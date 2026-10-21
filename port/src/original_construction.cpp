@@ -509,8 +509,9 @@ OfficeInsertionResult insert_original_office_record(
     std::uint16_t& floor_right,
     OriginalTdtTenant office,
     bool byte_swapped) {
-  // 11f8:321e is the matching placement preflight: a span inside represented
-  // bounds is admissible only when one type-zero record contains it in full.
+  // Record surgery of 11f8:17fd for non-Floor types: empty floor (1883),
+  // disjoint/adjacent left (18e8-1a3d) and right (1a40-1b1c) extensions, and
+  // the overlap path (1b1f-1e0d).
   const auto left = office.left;
   const auto right = office.right;
   if (tenants.empty()) {
@@ -553,38 +554,63 @@ OfficeInsertionResult insert_original_office_record(
     return OfficeInsertionResult::inserted;
   }
 
-  for (std::size_t index = 0; index < tenants.size(); ++index) {
-    const auto& candidate = tenants[index];
-    if (candidate.type != 0 || candidate.left > left ||
-        candidate.right < right) {
-      continue;
-    }
-    const bool left_remainder = candidate.left < left;
-    const bool right_remainder = candidate.right > right;
-    const std::size_t added = static_cast<std::size_t>(left_remainder) +
-                              static_cast<std::size_t>(right_remainder);
-    if (tenants.size() + added > OriginalTdtFloor::kTenantCapacity) {
-      return OfficeInsertionResult::tenant_limit;
-    }
-    std::vector<OriginalTdtTenant> replacement;
-    replacement.reserve(added + 1U);
-    if (left_remainder) {
-      auto remainder = candidate;
-      set_tenant_right(remainder, left, byte_swapped);
-      replacement.push_back(std::move(remainder));
-    }
-    replacement.push_back(std::move(office));
-    if (right_remainder) {
-      auto remainder = candidate;
-      set_tenant_left(remainder, right, byte_swapped);
-      replacement.push_back(std::move(remainder));
-    }
-    tenants.erase(tenants.begin() + static_cast<std::ptrdiff_t>(index));
-    tenants.insert(tenants.begin() + static_cast<std::ptrdiff_t>(index),
-                   replacement.begin(), replacement.end());
-    return OfficeInsertionResult::inserted;
+  // 1b1f-1ba2 selects the first record whose signed right edge reaches
+  // `right`; 1ba8 falls back to the last record when none does. Either way
+  // the selected record must be type 0 and start at or before `left`, unless
+  // it is record 0, whose left part may lie past the floor's left edge
+  // (1bcb-1c21). The span is never checked against earlier records.
+  const auto signed_left = std::bit_cast<std::int16_t>(left);
+  const auto signed_right = std::bit_cast<std::int16_t>(right);
+  std::size_t index = 0;
+  while (index < tenants.size() &&
+         std::bit_cast<std::int16_t>(tenants[index].right) < signed_right) {
+    ++index;
   }
-  return OfficeInsertionResult::occupied;
+  if (index == tenants.size()) {
+    index = tenants.size() - 1U;
+  }
+  const auto candidate = tenants[index];
+  if (candidate.type != 0 ||
+      (std::bit_cast<std::int16_t>(candidate.left) > signed_left &&
+       index != 0U)) {
+    return OfficeInsertionResult::occupied;
+  }
+
+  // 1c56-1d4d splits the selected record into an optional prefix, the new
+  // record, and an optional suffix, shifting later records up.
+  const bool left_remainder =
+      std::bit_cast<std::int16_t>(candidate.left) < signed_left;
+  const bool right_remainder =
+      std::bit_cast<std::int16_t>(candidate.right) > signed_right;
+  const std::size_t added = static_cast<std::size_t>(left_remainder) +
+                            static_cast<std::size_t>(right_remainder);
+  if (tenants.size() + added > OriginalTdtFloor::kTenantCapacity) {
+    return OfficeInsertionResult::tenant_limit;
+  }
+  std::vector<OriginalTdtTenant> replacement;
+  replacement.reserve(added + 1U);
+  if (left_remainder) replacement.push_back(candidate);
+  replacement.push_back(std::move(office));
+  if (right_remainder) replacement.push_back(candidate);
+  tenants.erase(tenants.begin() + static_cast<std::ptrdiff_t>(index));
+  tenants.insert(tenants.begin() + static_cast<std::ptrdiff_t>(index),
+                 replacement.begin(), replacement.end());
+
+  // 1d50-1e0a: the following record starts at `right`, or the floor's right
+  // edge moves to `right`; the preceding record ends at `left`, or the
+  // floor's left edge moves to `left`.
+  const std::size_t position = index + (left_remainder ? 1U : 0U);
+  if (position + 1U < tenants.size()) {
+    set_tenant_left(tenants[position + 1U], right, byte_swapped);
+  } else {
+    floor_right = right;
+  }
+  if (position >= 1U) {
+    set_tenant_right(tenants[position - 1U], left, byte_swapped);
+  } else {
+    floor_left = left;
+  }
+  return OfficeInsertionResult::inserted;
 }
 
 void enqueue_original_pending_tenant(OriginalTdtDocument& document,
