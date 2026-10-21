@@ -2211,6 +2211,7 @@ OriginalConstructionResult build_original_immediate_parking_unit(
   }
 
   document.header.balance = wrapping_subtract(document.header.balance, cost);
+  mark_original_balance_changed(document, cost);
   document.header.construction_costs =
       wrapping_subtract(document.header.construction_costs, cost);
   rebuild_original_parking_connectivity(document);
@@ -2420,6 +2421,7 @@ bool apply_original_initial_balance_bonus(
   constexpr std::uint32_t kInitialBonus = 20'000U;
   document.header.balance = std::bit_cast<std::int32_t>(
       std::bit_cast<std::uint32_t>(document.header.balance) + kInitialBonus);
+  mark_original_balance_changed(document, kInitialBonus);
   document.header.other_income = std::bit_cast<std::int32_t>(
       std::bit_cast<std::uint32_t>(document.header.other_income) +
       kInitialBonus);
@@ -3187,6 +3189,7 @@ OriginalElevatorShaftExtensionResult extend_original_elevator_shaft(
   rebuild_original_transport_route_graphs(working);
   working.header.balance =
       wrapping_subtract(working.header.balance, actual_cost);
+  mark_original_balance_changed(working, actual_cost);
   working.header.construction_costs =
       wrapping_subtract(working.header.construction_costs, actual_cost);
   elevator.bottom_floor = new_bottom;
@@ -3999,6 +4002,7 @@ OriginalConstructionResult build_original_floor(
   update_floor_bounds(target);
   rebuild_original_floor_lookup(target);
   document.header.balance = wrapping_subtract(document.header.balance, cost);
+  mark_original_balance_changed(document, cost);
   document.header.construction_costs =
       wrapping_subtract(document.header.construction_costs, cost);
   return {OriginalConstructionStatus::ok,
@@ -4080,6 +4084,7 @@ OriginalConstructionResult construct_original_ground_lobby_story(
   if (!preview) {
     document.header.balance =
         wrapping_subtract(document.header.balance, computed_cost);
+    mark_original_balance_changed(document, computed_cost);
     document.header.construction_costs =
         wrapping_subtract(document.header.construction_costs, computed_cost);
   }
@@ -4232,6 +4237,7 @@ OriginalConstructionResult build_original_sky_lobby(
   update_floor_bounds(target);
   rebuild_original_floor_lookup(target);
   document.header.balance = wrapping_subtract(document.header.balance, cost);
+  mark_original_balance_changed(document, cost);
   document.header.construction_costs =
       wrapping_subtract(document.header.construction_costs, cost);
   return {OriginalConstructionStatus::ok,
@@ -4367,6 +4373,7 @@ OriginalConstructionResult build_original_elevator(
         elevator.car_records[car_index], floor_byte, floor_mode, true);
     ++elevator.cars;
     document.header.balance = wrapping_subtract(document.header.balance, cost);
+    mark_original_balance_changed(document, cost, true);  // 11f8:11f2
     document.header.construction_costs =
         wrapping_subtract(document.header.construction_costs, cost);
     return {OriginalConstructionStatus::ok,
@@ -4435,6 +4442,7 @@ OriginalConstructionResult build_original_elevator(
                                capacity, x,
                                static_cast<std::uint8_t>(floor));
   document.header.balance = wrapping_subtract(document.header.balance, cost);
+  mark_original_balance_changed(document, cost, true);  // 11f8:11f2
   document.header.construction_costs =
       wrapping_subtract(document.header.construction_costs, cost);
   return {OriginalConstructionStatus::ok,
@@ -4579,6 +4587,7 @@ OriginalConstructionResult build_original_vertical_transport(
   // 1178:0703 debits only YEN[type], not the already-zero floor preview.
   const std::uint32_t cost = construction_costs[type];
   document.header.balance = wrapping_subtract(document.header.balance, cost);
+  mark_original_balance_changed(document, cost);
   document.header.construction_costs =
       wrapping_subtract(document.header.construction_costs, cost);
   return {OriginalConstructionStatus::ok, static_cast<std::int32_t>(cost)};
@@ -4885,6 +4894,7 @@ OriginalConstructionResult build_original_deferred_facility(
       document, static_cast<std::uint8_t>(floor), *key);
 
   document.header.balance = wrapping_subtract(document.header.balance, cost);
+  mark_original_balance_changed(document, cost);
   document.header.construction_costs =
       wrapping_subtract(document.header.construction_costs, cost);
   return {OriginalConstructionStatus::ok, static_cast<std::int32_t>(cost)};
@@ -5641,6 +5651,7 @@ OriginalConstructionResult build_original_office(
       document, static_cast<std::uint8_t>(floor), *key);
 
   document.header.balance = wrapping_subtract(document.header.balance, cost);
+  mark_original_balance_changed(document, cost);
   document.header.construction_costs =
       wrapping_subtract(document.header.construction_costs, cost);
   return {OriginalConstructionStatus::ok, static_cast<std::int32_t>(cost)};
