@@ -12,6 +12,7 @@
 namespace simtower {
 
 struct OriginalTdtDocument;
+struct OriginalTdtFloor;
 
 // A host-dispatched far-call target from the exact dispatcher at 1200:0196.
 // Arguments are stored in the source-level order reconstructed from its
@@ -413,6 +414,15 @@ void add_original_income_for_type(OriginalTdtDocument& document,
 void add_original_maintenance_for_type(OriginalTdtDocument& document,
                                        std::uint16_t facility_type,
                                        std::int32_t amount) noexcept;
+
+// Exact persisted portion of 11f8:3a31: coalesce adjacent type-0 records,
+// then type-24 records (11f8:3a87), and rebuild the live-key lookup
+// (1228:0e30). Construction 11f8:17fd (at 1f51), Lobby 11f8:284d (at 2dec),
+// shaft floor coverage 11f8:15f7 (at 17d3, every spanned floor) and damage
+// 11f8:35ac all end with it. The native host performs the original
+// conditional row redraw.
+void coalesce_original_floor_records(OriginalTdtFloor& floor,
+                                     bool byte_swapped);
 
 // Exact YEN/1001 rent/income helpers at 1178:0854 and 1178:08ec. Rent tier
 // four is the original no-charge sentinel. The add path applies the shared
