@@ -1614,6 +1614,35 @@ int main() {
       assert(hotel.construction_status_code == 7U);
     }
 
+    // 11f8:2e64 chooses its branch by floor, not type, and runs before 2f5a:
+    // a basement Office with no floor above it fails basement support (4)
+    // before 2f5a's above-ground-only rejection (10).
+    {
+      auto basement = simtower::make_original_new_tdt();
+      assert(simtower::build_original_initial_lobby(
+                 basement, 100, 200, 1, costs)
+                 .succeeded());
+      const auto office = simtower::build_original_office(
+          basement, 5, 120, 0, costs);
+      assert(office.status ==
+             simtower::OriginalConstructionStatus::invalid_span);
+      assert(office.construction_status_code == 4U);
+    }
+
+    // 11f8:07d8 checks for a Ramp (1198:0beb, message 34) before 240d calls
+    // 17fd, so ground-floor Parking without a Ramp reports 34, not 2f5a's 12.
+    {
+      auto ground = simtower::make_original_new_tdt();
+      assert(simtower::build_original_initial_lobby(
+                 ground, 100, 200, 1, costs)
+                 .succeeded());
+      const auto parking = simtower::build_original_parking(
+          ground, 10, 120, costs);
+      assert(parking.status ==
+             simtower::OriginalConstructionStatus::parking_ramp_required);
+      assert(parking.construction_status_code == 34U);
+    }
+
     // Overlapping an existing Office is still rejected.
     const auto before_overlap = simtower::serialize_original_tdt(tower);
     const auto overlap = simtower::build_original_office(
