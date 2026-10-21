@@ -1596,6 +1596,24 @@ int main() {
            floor.tenants[1].left == floor.tenants[0].right &&
            floor.tenants[1].right == 195U);
 
+    // 11f8:17fd checks funds (1178:009e at 183d) before 2e64 support and
+    // 2f5a floor legality, so an unaffordable request on an unsupported
+    // floor reports the funds message, not the support one.
+    {
+      auto poor = simtower::make_original_new_tdt();
+      poor.header.balance = 0;
+      const auto office = simtower::build_original_office(
+          poor, 50, 120, 0, costs);
+      assert(office.status ==
+             simtower::OriginalConstructionStatus::insufficient_funds);
+      assert(office.construction_status_code == 7U);
+      const auto hotel = simtower::build_original_hotel_room(
+          poor, 3, 50, 120, 0, costs);
+      assert(hotel.status ==
+             simtower::OriginalConstructionStatus::insufficient_funds);
+      assert(hotel.construction_status_code == 7U);
+    }
+
     // Overlapping an existing Office is still rejected.
     const auto before_overlap = simtower::serialize_original_tdt(tower);
     const auto overlap = simtower::build_original_office(
