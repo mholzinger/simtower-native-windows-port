@@ -1698,7 +1698,9 @@ bool ensure_original_elevator_floor_coverage(
       }
     }
     update_floor_bounds(floor);
-    rebuild_original_floor_lookup(floor);
+    // 11f8:15f7 calls 11f8:3a31 at 17d3 for every spanned floor.
+    coalesce_original_floor_records(floor,
+                                    document.header.byte_swapped);
   }
   return true;
 }
@@ -2209,6 +2211,9 @@ OriginalConstructionResult build_original_immediate_parking_unit(
   } else {
     rebuild_original_floor_lookup(target);
   }
+  // 11f8:240d/25a2 delegate to 17fd, which ends with 11f8:3a31 after the key
+  // and lookup assignment above.
+  coalesce_original_floor_records(target, document.header.byte_swapped);
 
   document.header.balance = wrapping_subtract(document.header.balance, cost);
   document.header.construction_costs =
@@ -3997,7 +4002,9 @@ OriginalConstructionResult build_original_floor(
   auto& target = document.floors[static_cast<std::size_t>(floor)];
   target.tenants = std::move(tenants);
   update_floor_bounds(target);
-  rebuild_original_floor_lookup(target);
+  // 11f8:17fd calls 11f8:3a31 at 1f51 on every success.
+  coalesce_original_floor_records(target,
+                                  document.header.byte_swapped);
   document.header.balance = wrapping_subtract(document.header.balance, cost);
   document.header.construction_costs =
       wrapping_subtract(document.header.construction_costs, cost);
@@ -4076,7 +4083,9 @@ OriginalConstructionResult construct_original_ground_lobby_story(
   auto& target = document.floors[static_cast<std::size_t>(floor)];
   target.tenants = std::move(replacement.tenants);
   update_floor_bounds(target);
-  rebuild_original_floor_lookup(target);
+  // 11f8:284d reaches 11f8:3a31 directly (2dec) or through 17fd.
+  coalesce_original_floor_records(target,
+                                  document.header.byte_swapped);
   if (!preview) {
     document.header.balance =
         wrapping_subtract(document.header.balance, computed_cost);
@@ -4230,7 +4239,9 @@ OriginalConstructionResult build_original_sky_lobby(
   auto& target = document.floors[static_cast<std::size_t>(floor)];
   target.tenants = std::move(replacement.tenants);
   update_floor_bounds(target);
-  rebuild_original_floor_lookup(target);
+  // 11f8:284d reaches 11f8:3a31 directly (2dec) or through 17fd.
+  coalesce_original_floor_records(target,
+                                  document.header.byte_swapped);
   document.header.balance = wrapping_subtract(document.header.balance, cost);
   document.header.construction_costs =
       wrapping_subtract(document.header.construction_costs, cost);
@@ -4862,7 +4873,9 @@ OriginalConstructionResult build_original_deferred_facility(
   target.tenants = std::move(new_tenants);
   target.left_edge = new_left;
   target.right_edge = new_right;
-  rebuild_original_floor_lookup(target);
+  // 11f8:17fd calls 11f8:3a31 at 1f51 on every success.
+  coalesce_original_floor_records(target,
+                                  document.header.byte_swapped);
 
   const std::size_t required_end =
       static_cast<std::size_t>(*people_start) + people_per_facility;
@@ -5618,7 +5631,9 @@ OriginalConstructionResult build_original_office(
   target.tenants = std::move(new_tenants);
   target.left_edge = new_left;
   target.right_edge = new_right;
-  rebuild_original_floor_lookup(target);
+  // 11f8:17fd calls 11f8:3a31 at 1f51 on every success.
+  coalesce_original_floor_records(target,
+                                  document.header.byte_swapped);
 
   const std::size_t required_end =
       static_cast<std::size_t>(*people_start) + kPeoplePerOffice;
