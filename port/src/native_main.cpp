@@ -1001,6 +1001,19 @@ void focus_original_event_coordinate(std::int16_t floor, std::int16_t x) {
   set_original_view(g_main_window, view.x, view.y);
 }
 
+// UI half of the Cathedral's rating-six promotion 1140:00a8 after its
+// headless 1148:003d state change: the rating modal, 1140:010d(1)'s Command
+// layout refresh, and the 1118:0044 Info repaint.
+void present_original_cathedral_promotion(
+    const simtower::OriginalEventDialogRequest& dialog) {
+  if (!dialog.valid() || !g_tower_document) return;
+  (void)run_original_event_dialog(dialog);
+  refresh_original_rating_command(g_tower_document->header.rating, 1U);
+  g_tower_dirty = true;
+  InvalidateRect(g_info_window, nullptr, FALSE);
+  UpdateWindow(g_info_window);
+}
+
 void set_original_fire_menu_enabled(bool enabled) {
   if (!g_main_window) {
     return;
@@ -1617,6 +1630,8 @@ void run_original_idle_simulation() {
       const auto& ceremony = *people.cathedral_ceremony;
       focus_original_event_coordinate(ceremony.effect_floor,
                                       ceremony.effect_x);
+      // 1040:0322: 1140:00a8 runs before 11c8:0135/0167.
+      present_original_cathedral_promotion(ceremony.rating_dialog);
       if (g_audio) {
         if (ceremony.stop_both_audio_channels) {
           g_audio->stop_all(true);
@@ -2312,6 +2327,8 @@ void consume_original_person_family_dispatch(
     const auto& ceremony = *dispatch.cathedral_arrival;
     focus_original_event_coordinate(ceremony.effect_floor,
                                     ceremony.effect_x);
+    // 1040:0322: 1140:00a8 runs before 11c8:0135/0167.
+    present_original_cathedral_promotion(ceremony.rating_dialog);
     if (g_audio) {
       if (ceremony.stop_both_audio_channels) g_audio->stop_all(true);
       if (ceremony.wave_resource != 0) {
