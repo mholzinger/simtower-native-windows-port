@@ -2519,6 +2519,7 @@ OriginalMovieChoiceResult choose_original_movie(
   record[9] = std::byte{0};
   document.header.balance = wrapping_subtract(
       document.header.balance, result.cost);
+  mark_original_balance_changed(document, result.cost);
   document.header.construction_costs = wrapping_subtract(
       document.header.construction_costs, result.cost);
   mark_original_movie_tenants(document, record);
