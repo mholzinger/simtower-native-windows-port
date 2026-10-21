@@ -1509,19 +1509,23 @@ OriginalRatingProgressResult step_original_rating_progress(
   ++document.header.rating;
   result.promoted = true;
 
+  result.dialog = apply_original_rating_promotion(document);
+  return result;
+}
+
+OriginalEventDialogRequest apply_original_rating_promotion(
+    OriginalTdtDocument& document) noexcept {
   // 1148:003d snapshots whether this rating's treasure condition was already
   // met, clears all VIP/transient prerequisite state, then shows the rating
   // modal. b92a/b92b/b92c/b92d intentionally survive.
+  auto& tail = document.post_elevator;
   tail.b922_flag = original_rating_treasure_condition(document) ? 1U : 0U;
   tail.b923 = 0U;
   tail.b928 = 0U;
   tail.b924 = -1;
   tail.b929 = 0U;
-  result.dialog = {
-      static_cast<std::uint16_t>(0x0bd4U + document.header.rating),
-      0,
-      0x2710};
-  return result;
+  return {static_cast<std::uint16_t>(0x0bd4U + document.header.rating), 0,
+          0x2710};
 }
 
 OriginalRatingConstructionResult complete_original_rating_construction(
