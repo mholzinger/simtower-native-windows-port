@@ -3485,6 +3485,13 @@ int main() {
     assert(tower.post_elevator.parking_connected == 0);
     assert(tower.header.exact_bytes[50] == std::byte{0});
     assert(tower.header.exact_bytes[51] == std::byte{0});
+
+    // 1198:0200's DEC is unconditional: another orphan wraps the count.
+    tower.post_elevator.cf9c_records[0][0] = std::byte{9};
+    tower.post_elevator.cf9c_records[0][1] = std::byte{0xff};
+    simtower::refresh_original_parking_for_day(tower);
+    assert(tower.header.exact_bytes[50] == std::byte{0xff});
+    assert(tower.header.exact_bytes[51] == std::byte{0xff});
   }
 
   {
