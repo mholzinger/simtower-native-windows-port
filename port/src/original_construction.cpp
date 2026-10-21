@@ -135,6 +135,44 @@ std::uint16_t original_funds_status_code(
       : 8U;
 }
 
+struct OriginalFundsGate {
+  std::uint32_t cost{};
+  std::optional<OriginalConstructionResult> failure;
+};
+
+// 11f8:17fd 182b-1849 calls 1178:009e before its 2e64 support and 2f5a floor
+// checks; preview passes skip it. 1178:035b prices the facility and
+// 1178:0583 adds YEN/1000[0] for each newly exposed floor cell.
+OriginalFundsGate original_17fd_funds_gate(const OriginalTdtDocument& document,
+                                           const OriginalTdtFloor& old_floor,
+                                           std::uint16_t left,
+                                           std::uint16_t right,
+                                           std::uint32_t facility_cost,
+                                           std::uint32_t cell_cost,
+                                           bool enforce_balance) {
+  const std::uint32_t added_cells = old_floor.tenants.empty()
+      ? static_cast<std::uint32_t>(right - left)
+      : static_cast<std::uint32_t>(old_floor.left_edge -
+                                   std::min(old_floor.left_edge, left)) +
+            static_cast<std::uint32_t>(
+                std::max(old_floor.right_edge, right) - old_floor.right_edge);
+  const std::uint64_t cost64 = static_cast<std::uint64_t>(facility_cost) +
+                               static_cast<std::uint64_t>(added_cells) *
+                                   cell_cost;
+  const auto cost = static_cast<std::uint32_t>(cost64);
+  if (cost64 > 0x7fffffffULL ||
+      (enforce_balance && cost != 0U &&
+       document.header.balance < static_cast<std::int32_t>(cost))) {
+    return {cost,
+            OriginalConstructionResult{
+                OriginalConstructionStatus::insufficient_funds,
+                static_cast<std::int32_t>(cost),
+                original_funds_status_code(document.header.balance,
+                                           facility_cost)}};
+  }
+  return {cost, std::nullopt};
+}
+
 OriginalTdtTenant make_lobby_tenant(std::uint16_t left,
                                     std::uint16_t right,
                                     bool byte_swapped) {
@@ -509,8 +547,9 @@ OfficeInsertionResult insert_original_office_record(
     std::uint16_t& floor_right,
     OriginalTdtTenant office,
     bool byte_swapped) {
-  // 11f8:321e is the matching placement preflight: a span inside represented
-  // bounds is admissible only when one type-zero record contains it in full.
+  // Record surgery of 11f8:17fd for non-Floor types: empty floor (1883),
+  // disjoint/adjacent left (18e8-1a3d) and right (1a40-1b1c) extensions, and
+  // the overlap path (1b1f-1e0d).
   const auto left = office.left;
   const auto right = office.right;
   if (tenants.empty()) {
@@ -553,38 +592,63 @@ OfficeInsertionResult insert_original_office_record(
     return OfficeInsertionResult::inserted;
   }
 
-  for (std::size_t index = 0; index < tenants.size(); ++index) {
-    const auto& candidate = tenants[index];
-    if (candidate.type != 0 || candidate.left > left ||
-        candidate.right < right) {
-      continue;
-    }
-    const bool left_remainder = candidate.left < left;
-    const bool right_remainder = candidate.right > right;
-    const std::size_t added = static_cast<std::size_t>(left_remainder) +
-                              static_cast<std::size_t>(right_remainder);
-    if (tenants.size() + added > OriginalTdtFloor::kTenantCapacity) {
-      return OfficeInsertionResult::tenant_limit;
-    }
-    std::vector<OriginalTdtTenant> replacement;
-    replacement.reserve(added + 1U);
-    if (left_remainder) {
-      auto remainder = candidate;
-      set_tenant_right(remainder, left, byte_swapped);
-      replacement.push_back(std::move(remainder));
-    }
-    replacement.push_back(std::move(office));
-    if (right_remainder) {
-      auto remainder = candidate;
-      set_tenant_left(remainder, right, byte_swapped);
-      replacement.push_back(std::move(remainder));
-    }
-    tenants.erase(tenants.begin() + static_cast<std::ptrdiff_t>(index));
-    tenants.insert(tenants.begin() + static_cast<std::ptrdiff_t>(index),
-                   replacement.begin(), replacement.end());
-    return OfficeInsertionResult::inserted;
+  // 1b1f-1ba2 selects the first record whose signed right edge reaches
+  // `right`; 1ba8 falls back to the last record when none does. Either way
+  // the selected record must be type 0 and start at or before `left`, unless
+  // it is record 0, whose left part may lie past the floor's left edge
+  // (1bcb-1c21). The span is never checked against earlier records.
+  const auto signed_left = std::bit_cast<std::int16_t>(left);
+  const auto signed_right = std::bit_cast<std::int16_t>(right);
+  std::size_t index = 0;
+  while (index < tenants.size() &&
+         std::bit_cast<std::int16_t>(tenants[index].right) < signed_right) {
+    ++index;
   }
-  return OfficeInsertionResult::occupied;
+  if (index == tenants.size()) {
+    index = tenants.size() - 1U;
+  }
+  const auto candidate = tenants[index];
+  if (candidate.type != 0 ||
+      (std::bit_cast<std::int16_t>(candidate.left) > signed_left &&
+       index != 0U)) {
+    return OfficeInsertionResult::occupied;
+  }
+
+  // 1c56-1d4d splits the selected record into an optional prefix, the new
+  // record, and an optional suffix, shifting later records up.
+  const bool left_remainder =
+      std::bit_cast<std::int16_t>(candidate.left) < signed_left;
+  const bool right_remainder =
+      std::bit_cast<std::int16_t>(candidate.right) > signed_right;
+  const std::size_t added = static_cast<std::size_t>(left_remainder) +
+                            static_cast<std::size_t>(right_remainder);
+  if (tenants.size() + added > OriginalTdtFloor::kTenantCapacity) {
+    return OfficeInsertionResult::tenant_limit;
+  }
+  std::vector<OriginalTdtTenant> replacement;
+  replacement.reserve(added + 1U);
+  if (left_remainder) replacement.push_back(candidate);
+  replacement.push_back(std::move(office));
+  if (right_remainder) replacement.push_back(candidate);
+  tenants.erase(tenants.begin() + static_cast<std::ptrdiff_t>(index));
+  tenants.insert(tenants.begin() + static_cast<std::ptrdiff_t>(index),
+                 replacement.begin(), replacement.end());
+
+  // 1d50-1e0a: the following record starts at `right`, or the floor's right
+  // edge moves to `right`; the preceding record ends at `left`, or the
+  // floor's left edge moves to `left`.
+  const std::size_t position = index + (left_remainder ? 1U : 0U);
+  if (position + 1U < tenants.size()) {
+    set_tenant_left(tenants[position + 1U], right, byte_swapped);
+  } else {
+    floor_right = right;
+  }
+  if (position >= 1U) {
+    set_tenant_right(tenants[position - 1U], left, byte_swapped);
+  } else {
+    floor_left = left;
+  }
+  return OfficeInsertionResult::inserted;
 }
 
 void enqueue_original_pending_tenant(OriginalTdtDocument& document,
@@ -2089,6 +2153,13 @@ OriginalConstructionResult build_original_immediate_parking_unit(
     }
   }
 
+  // 240d/25a2 then call 17fd, whose 1178:009e funds check precedes the
+  // 2e64 support and 2f5a floor checks below.
+  const auto funds = original_17fd_funds_gate(
+      document, document.floors[static_cast<std::size_t>(floor)], left, right,
+      construction_costs[type], construction_costs[0], true);
+  if (funds.failure) return *funds.failure;
+
   // Both immediate types take 11f8:2e64's basement support branch and
   // 11f8:2f5a's basement-only legality branch.
   const std::size_t b3e8_offset =
@@ -2143,23 +2214,7 @@ OriginalConstructionResult build_original_immediate_parking_unit(
             0, 9U};
   }
 
-  const std::uint32_t added_cells = old_floor.tenants.empty()
-      ? width
-      : static_cast<std::uint32_t>(old_floor.left_edge -
-                                   std::min(old_floor.left_edge, left)) +
-            static_cast<std::uint32_t>(
-                std::max(old_floor.right_edge, right) - old_floor.right_edge);
-  const std::uint64_t cost64 =
-      static_cast<std::uint64_t>(construction_costs[type]) +
-      static_cast<std::uint64_t>(added_cells) * construction_costs[0];
-  const auto cost = static_cast<std::uint32_t>(cost64);
-  if (cost64 > 0x7fffffffULL ||
-      (cost != 0U && document.header.balance < static_cast<std::int32_t>(cost))) {
-    return {OriginalConstructionStatus::insufficient_funds,
-            static_cast<std::int32_t>(cost),
-            original_funds_status_code(document.header.balance,
-                                       construction_costs[type])};
-  }
+  const auto cost = funds.cost;
 
   auto& target = document.floors[static_cast<std::size_t>(floor)];
   target.tenants = std::move(new_tenants);
@@ -4705,6 +4760,26 @@ OriginalConstructionResult build_original_deferred_facility(
   }
   const auto right = static_cast<std::uint16_t>(left + width);
 
+  // Gates that precede 17fd's 1178:009e funds check: 11f8:2291 (the only
+  // construction caller for types 36..40) fixes each Cathedral part's floor
+  // (113 for type 36, then 112..109), and 17fd rejects a negative floor at
+  // 181b. Funds then precede every 2e64 support and 2f5a floor check below.
+  if (type >= 36U && type <= 40U &&
+      floor != static_cast<std::int16_t>(149U - type)) {
+    return {OriginalConstructionStatus::invalid_floor, 0, 16U};
+  }
+  if (floor < 0) {
+    return {OriginalConstructionStatus::invalid_floor, 0, 20U};
+  }
+  OriginalFundsGate funds{};
+  if (static_cast<std::size_t>(floor) < document.floors.size()) {
+    funds = original_17fd_funds_gate(
+        document, document.floors[static_cast<std::size_t>(floor)], left,
+        right, construction_costs[type], construction_costs[0],
+        enforce_balance);
+    if (funds.failure) return *funds.failure;
+  }
+
   // Types 3/4/5/9 are above-ground only. Type 10 takes the common branch of
   // 11f8:2f5a: floors 0..9 and 11..109 are legal, but ground floor 10 is not.
   // The routine's first four-key table exempts only types 1, 24, 42, and 43
@@ -4735,12 +4810,6 @@ OriginalConstructionResult build_original_deferred_facility(
                       ? 5U
                       : (recycling_half ? 11U : 10U)));
     return {OriginalConstructionStatus::invalid_floor, 0, code};
-  }
-  if (cathedral_part && floor != static_cast<std::int16_t>(149U - type)) {
-    // 11f8:2291 is the only construction caller for types 36..40. Its
-    // selected type-36 floor is fixed at 113 and it emits the remaining
-    // four parts on 112..109 respectively.
-    return {OriginalConstructionStatus::invalid_floor, 0, 16U};
   }
   if ((type == 18U || type == 29U) && floor >= 11 &&
       floor <= static_cast<std::int16_t>(10U + document.header.lobby_height)) {
@@ -4849,25 +4918,7 @@ OriginalConstructionResult build_original_deferred_facility(
                 : OriginalConstructionStatus::occupied,
             0, 9U};
   }
-
-  const std::uint32_t added_cells = old_floor.tenants.empty()
-      ? width
-      : static_cast<std::uint32_t>(old_floor.left_edge -
-                                   std::min(old_floor.left_edge, left)) +
-            static_cast<std::uint32_t>(
-                std::max(old_floor.right_edge, right) - old_floor.right_edge);
-  const std::uint64_t cost64 =
-      static_cast<std::uint64_t>(construction_costs[type]) +
-      static_cast<std::uint64_t>(added_cells) * construction_costs[0];
-  const auto cost = static_cast<std::uint32_t>(cost64);
-  if (cost64 > 0x7fffffffULL ||
-      (enforce_balance && cost != 0U &&
-       document.header.balance < static_cast<std::int32_t>(cost))) {
-    return {OriginalConstructionStatus::insufficient_funds,
-            static_cast<std::int32_t>(cost),
-            original_funds_status_code(document.header.balance,
-                                       construction_costs[type])};
-  }
+  const auto cost = funds.cost;
 
   auto& target = document.floors[static_cast<std::size_t>(floor)];
   target.tenants = std::move(new_tenants);
@@ -5531,6 +5582,20 @@ OriginalConstructionResult build_original_office(
   constexpr std::size_t kPeoplePerOffice = 6;
   const std::uint16_t right = static_cast<std::uint16_t>(left + kWidth);
 
+  // 17fd rejects a negative floor at 181b, then runs the 1178:009e funds
+  // check before its 2e64 support and 2f5a floor checks. 1178:035b reads
+  // YEN/1000[7]; 1178:0583 charges YEN/1000[0] for each newly covered cell.
+  if (floor < 0) {
+    return {OriginalConstructionStatus::invalid_floor, 0, 20U};
+  }
+  OriginalFundsGate funds{};
+  if (static_cast<std::size_t>(floor) < document.floors.size()) {
+    funds = original_17fd_funds_gate(
+        document, document.floors[static_cast<std::size_t>(floor)], left,
+        right, construction_costs[7], construction_costs[0], true);
+    if (funds.failure) return *funds.failure;
+  }
+
   // 11f8:2f5a routes type 7 to the above-ground-only branch. Its common
   // ground-floor rejection makes floor 10 illegal and the general ceiling
   // rejects floors above 109.
@@ -5607,25 +5672,7 @@ OriginalConstructionResult build_original_office(
             0, 9U};
   }
 
-  const std::uint32_t added_cells = old_floor.tenants.empty()
-      ? kWidth
-      : static_cast<std::uint32_t>(old_floor.left_edge -
-                                   std::min(old_floor.left_edge, left)) +
-            static_cast<std::uint32_t>(
-                std::max(old_floor.right_edge, right) - old_floor.right_edge);
-  // 1178:035b reads YEN/1000[7]. For a floor outside the automatic lobby
-  // stories, 1178:0583 charges YEN/1000[0] for each newly covered cell.
-  const std::uint64_t cost64 =
-      static_cast<std::uint64_t>(construction_costs[7]) +
-      static_cast<std::uint64_t>(added_cells) * construction_costs[0];
-  const std::uint32_t cost = static_cast<std::uint32_t>(cost64);
-  if (cost64 > 0x7fffffffULL ||
-      (cost != 0U && document.header.balance < static_cast<std::int32_t>(cost))) {
-    return {OriginalConstructionStatus::insufficient_funds,
-            static_cast<std::int32_t>(cost),
-            original_funds_status_code(document.header.balance,
-                                       construction_costs[7])};
-  }
+  const std::uint32_t cost = funds.cost;
 
   auto& target = document.floors[static_cast<std::size_t>(floor)];
   target.tenants = std::move(new_tenants);
