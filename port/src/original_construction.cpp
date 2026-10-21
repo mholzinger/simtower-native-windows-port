@@ -5158,9 +5158,11 @@ OriginalConstructionResult build_original_recycling_center(
                      static_cast<std::uint32_t>(
                          std::max(old.right_edge, right) - old.right_edge);
   };
+  // 1178:011d prices only the selected top type; 1178:035b returns zero for
+  // the -1 it passes for the lower floor. Each 17fd call later debits its own
+  // part's price.
   const std::uint64_t cost64 =
       static_cast<std::uint64_t>(construction_costs[20]) +
-      static_cast<std::uint64_t>(construction_costs[21]) +
       static_cast<std::uint64_t>(added_cells(floor) +
                                  added_cells(lower_floor)) *
           construction_costs[0];
@@ -5239,9 +5241,10 @@ OriginalConstructionResult build_original_party_hall(
                      static_cast<std::uint32_t>(
                          std::max(old.right_edge, right) - old.right_edge);
   };
+  // 1178:011d prices only the selected type 29 (035b returns zero for the
+  // lower floor's -1); each 17fd call later debits its own part's price.
   const std::uint64_t cost64 =
       static_cast<std::uint64_t>(construction_costs[29]) +
-      static_cast<std::uint64_t>(construction_costs[30]) +
       static_cast<std::uint64_t>(added_cells(floor) +
                                  added_cells(lower_floor)) *
           construction_costs[0];
@@ -5333,22 +5336,22 @@ OriginalConstructionResult build_original_metro_station(
                          std::max(old.right_edge, right) - old.right_edge);
   };
 
-  // 1178:011d performs two independent balance checks: the type-31 YEN
-  // charge and the exposed-floor charge for floors 0..2. It does not compare
-  // their sum, so an exactly type-31-sized balance can legitimately finish
-  // negative by the newly exposed floor-cell amount.
+  // 1178:011d accumulates into one dword at [bp-8]: it first compares the
+  // type-31 YEN charge (message 7), then adds the exposed-floor charge for
+  // floors 0..2 to the same total and compares again (message 8).
   const std::uint64_t facility_preview = construction_costs[31];
   const std::uint64_t floor_preview =
       static_cast<std::uint64_t>(added_cells(0) + added_cells(1) +
                                  added_cells(2)) *
       construction_costs[0];
   const std::uint64_t combined_preview = facility_preview + floor_preview;
-  if (facility_preview > 0x7fffffffULL || floor_preview > 0x7fffffffULL ||
+  if (combined_preview > 0x7fffffffULL ||
       (facility_preview != 0U &&
        document.header.balance <
            static_cast<std::int32_t>(facility_preview)) ||
-      (floor_preview != 0U &&
-       document.header.balance < static_cast<std::int32_t>(floor_preview))) {
+      (combined_preview != 0U &&
+       document.header.balance <
+           static_cast<std::int32_t>(combined_preview))) {
     return {OriginalConstructionStatus::insufficient_funds,
             static_cast<std::int32_t>(combined_preview),
             original_funds_status_code(document.header.balance,
