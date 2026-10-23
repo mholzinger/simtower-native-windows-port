@@ -1,5 +1,7 @@
 #include "sdl_panels.hpp"
 
+#include "sdl_menu.hpp"
+
 #include "original_command_palette.hpp"
 #include "original_info.hpp"
 #include "original_map.hpp"
@@ -12,8 +14,8 @@
 namespace simtower::sdl {
 namespace {
 
-// TEMP: desktop and Main nonclient colors until the Win16 menus, caption
-// and scrollbars are drawn from the original resources.
+// TEMP: desktop and Main nonclient colors until the Win16 frame and
+// scrollbars are drawn (the caption and menu bar are, in sdl_menu.cpp).
 constexpr std::uint32_t kDesktopRgb = 0x00808080U;
 constexpr std::uint32_t kNonclientRgb = 0x00C0C0C0U;
 constexpr std::uint32_t kBorderRgb = 0x00000000U;
@@ -84,6 +86,7 @@ class Canvas {
   }
 
   [[nodiscard]] OriginalWorldRaster take() { return std::move(raster_); }
+  [[nodiscard]] OriginalWorldRaster& raster() { return raster_; }
 
  private:
   [[nodiscard]] std::size_t offset(int x, int y) const {
@@ -128,6 +131,10 @@ OriginalWorldRaster compose_window(const Session& session) {
     const auto& main = layout.main_client;
     canvas.fill(layout.main_outer, kNonclientRgb);
     canvas.outline(layout.main_outer, kBorderRgb);
+    // The caption and TOWER_MENU's bar, with the open title highlighted.
+    draw_main_caption_and_menu_bar(canvas.raster(), session.menu(), layout,
+                                   session.menu_view(),
+                                   session.window_title());
     canvas.blit(session.main_raster(), main.x, main.y, main);
   };
   const auto* palette = session.palette_runtime().initialized
@@ -206,6 +213,10 @@ OriginalWorldRaster compose_window(const Session& session) {
                     input.build_mode_enabled),
                 rect.x, rect.y, rect);
   }
+  // An open drop-down (and cascade) is above every window, as USER's
+  // popup menu windows are.
+  draw_menu_popups(canvas.raster(), session.menu(), layout,
+                   session.menu_view());
   return canvas.take();
 }
 

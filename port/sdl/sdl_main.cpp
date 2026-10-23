@@ -1,7 +1,9 @@
 // SDL3 frontend: one window holding Main and the Map, Info and Command
 // panels (sdl_layout.hpp), driven by the same portable simulation,
-// renderer and world input module as the Win32 host. Menus, dialogs, help,
-// fonts and file pickers come later.
+// renderer and world input module as the Win32 host. TOWER_MENU is drawn
+// in the window (sdl_menu.hpp) and dispatched through the shared WM_COMMAND
+// dispatcher; New/Open/Save/Save As use the native file pickers. Dialogs
+// and help are logged requests until their runtimes exist.
 //
 // Usage:
 //   simtower_sdl [--pack FILE] [--open FILE.TDT] [--size WxH] [--slow]
@@ -31,14 +33,21 @@
 // runs the hidden Bomb or Fire menu command before pass PASS (0-based, must
 // be below --passes); it may repeat.
 //
-// Input: --input-script FILE plays scripted mouse input (sdl_input_script.hpp)
-// through the same panel router as the window; the digest line then gains
-// an "input <hex>" field. Exit 2 on a script syntax, range or pass-order
+// Input: --input-script FILE plays scripted mouse, menu and file-picker
+// input (commands in sdl_input_script.hpp) through the same panel router
+// and WM_COMMAND dispatcher as the window; the digest line then gains an
+// "input <hex>" field. Exit 2 on a script syntax, range or pass-order
 // error, 3 on a failed expect-*; a script that ends inside the selector
-// modal cancels it. --direct-build (test-only) runs one constructor
-// plus the common success tail before pass PASS, as the reference for a
-// scripted placement. --headless-window FILE.bmp writes the composed window
-// (panels included) after the passes.
+// modal cancels it. A scripted File > Exit ends the run early. Headless
+// runs never open a native picker: an Open / Save As sheet takes the next
+// "pick-file" result, and with none it is cancelled. --direct-build
+// (test-only) runs one constructor plus the common success tail before
+// pass PASS, as the reference for a scripted placement. --headless-window
+// FILE.bmp writes the composed window (panels included) after the passes.
+//
+// Window keys: a lone Alt or F10 enters keyboard menu mode (arrows, Enter,
+// Esc, mnemonics), Alt+letter opens that title's drop-down, and F1 is the
+// TOWER_MENU accelerator (Help Contents).
 //
 // Headless mode (no window) is selected by any of --headless-frame,
 // --headless-window, --state-digest, --digest-every, --event,
@@ -50,10 +59,12 @@
 #include "sdl_audio.hpp"
 #include "sdl_input_script.hpp"
 #include "sdl_layout.hpp"
+#include "sdl_menu.hpp"
 #include "sdl_panels.hpp"
 #include "sdl_session.hpp"
 
 #include "original_audio_capture.hpp"
+#include "original_menu.hpp"
 #include "original_resources.generated.hpp"
 #include "original_simulation.hpp"
 #include "original_tdt.hpp"
@@ -68,6 +79,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -75,6 +87,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -625,13 +638,31 @@ int run_headless(const Options& options) {
                                        [&] { print_digest(completed); });
     session.set_input_source(&player);
     while (const auto* pass = player.run_until_pass()) {
-      while (completed < static_cast<int>(pass->value)) run_pass();
+      while (completed < static_cast<int>(pass->value) &&
+             !session.quit_requested()) {
+        run_pass();
+      }
     }
     session.set_input_source(nullptr);
+    // After File > Exit the rest of the script never ran, so its unused
+    // pick-file results are expected.
+    if (!session.quit_requested() && session.queued_picked_files() != 0U) {
+      throw simtower::sdl::ScriptFailure(
+          2, options.input_script->string() + ": " +
+                 std::to_string(session.queued_picked_files()) +
+                 " pick-file result(s) never used by an Open or Save As");
+    }
   }
-  while (completed < options.passes) run_pass();
+  // File > Exit destroys Main (WM_DESTROY posts WM_QUIT): no further pass.
+  while (completed < options.passes && !session.quit_requested()) run_pass();
+  if (session.quit_requested()) {
+    std::fprintf(stderr,
+                 "simtower_sdl: Exit after %d of %d passes; the rest of the"
+                 " run is skipped\n",
+                 completed, options.passes);
+  }
   // Taken before the presentation step below, which may rebuild the backing.
-  if (options.state_digest) print_digest(options.passes);
+  if (options.state_digest) print_digest(completed);
   std::fflush(stdout);
 
   const auto& header = session.document()->header;
@@ -644,7 +675,7 @@ int run_headless(const Options& options) {
                "simtower_sdl: after %d passes: frame_time %u day %d rating %u"
                " balance %d people records %u population %d; logged dialogs"
                " %zu sounds %zu focus %zu status %zu%s\n",
-               options.passes, static_cast<unsigned>(header.frame_time),
+               completed, static_cast<unsigned>(header.frame_time),
                static_cast<int>(header.current_day),
                static_cast<unsigned>(header.rating),
                static_cast<int>(header.balance),
@@ -755,6 +786,15 @@ class Window {
     SDL_RenderPresent(renderer_);
   }
 
+  [[nodiscard]] SDL_Window* handle() const { return window_; }
+
+  // The caption follows the document title (update_original_tower_title).
+  void set_title(const std::string& title) {
+    if (title == title_) return;
+    title_ = title;
+    SDL_SetWindowTitle(window_, title.c_str());
+  }
+
   // TEMP: the original CURSOR resources (1002..1005) are not decoded yet,
   // so each resolve_original_cursor id maps to an SDL system cursor.
   void set_cursor(std::uint16_t cursor_id) {
@@ -788,6 +828,7 @@ class Window {
   int texture_height_{};
   std::uint16_t cursor_id_{0xFFFFU};
   std::array<SDL_Cursor*, SDL_SYSTEM_CURSOR_COUNT> cursors_{};
+  std::string title_{};
 };
 
 // Main activation word and IsIconic for the idle-pass audio prelude.
@@ -891,10 +932,216 @@ class WindowModalSource final : public simtower::sdl::InputSource {
   bool quit_requested_{};
 };
 
+// The native Open / Save As sheets (SDL_ShowOpenFileDialog /
+// SDL_ShowSaveFileDialog). SDL calls back asynchronously, so the sheet runs
+// a nested wait loop that only re-presents the window, like a Win32 modal:
+// no idle pass runs until it closes. TEMP: no initial directory (the Win32
+// host's [Paths] Save has no SDL profile yet), and Save As uses the save
+// sheet, whose own replace prompt can precede the game's.
+class SdlFilePicker final : public simtower::sdl::FilePicker {
+ public:
+  SdlFilePicker(Window& window, simtower::sdl::Session& session)
+      : window_(window), session_(session) {}
+
+  [[nodiscard]] bool quit_requested() const { return quit_requested_; }
+
+  std::optional<std::filesystem::path> pick(bool save) override {
+    static constexpr SDL_DialogFileFilter kFilters[] = {
+        {"SimTower Data (*.TDT)", "TDT;tdt"},
+        {"all files (*.*)", "*"},
+    };
+    State state{};
+    if (save) {
+      SDL_ShowSaveFileDialog(&SdlFilePicker::done, &state, window_.handle(),
+                             kFilters, 2, nullptr);
+    } else {
+      SDL_ShowOpenFileDialog(&SdlFilePicker::done, &state, window_.handle(),
+                             kFilters, 2, nullptr, false);
+    }
+    while (!state.finished.load()) {
+      SDL_Event event{};
+      if (!SDL_WaitEventTimeout(&event, 50)) continue;
+      if (event.type == SDL_EVENT_QUIT) {
+        quit_requested_ = true;
+      } else if (event.type == SDL_EVENT_WINDOW_EXPOSED) {
+        window_.present(simtower::sdl::compose_window(session_));
+      }
+    }
+    const std::lock_guard lock(state.mutex);
+    if (!state.error.empty()) {
+      std::fprintf(stderr, "simtower_sdl: file dialog: %s\n",
+                   state.error.c_str());
+    }
+    return state.path;
+  }
+
+ private:
+  struct State {
+    std::mutex mutex;
+    std::optional<std::filesystem::path> path;
+    std::string error;
+    std::atomic<bool> finished{false};
+  };
+
+  static void SDLCALL done(void* userdata, const char* const* files, int) {
+    auto& state = *static_cast<State*>(userdata);
+    {
+      const std::lock_guard lock(state.mutex);
+      if (!files) {
+        state.error = SDL_GetError();
+      } else if (files[0]) {
+        state.path = std::filesystem::path(
+            std::u8string(reinterpret_cast<const char8_t*>(files[0])));
+      }
+    }
+    state.finished.store(true);
+  }
+
+  Window& window_;
+  simtower::sdl::Session& session_;
+  bool quit_requested_{};
+};
+
+// USER enters (and leaves) keyboard menu mode on a lone Alt: pressed and
+// released with no other key, mouse button, wheel or focus change in
+// between, so Alt+Tab, Alt+F4, Alt+arrow and Alt+click never do. On macOS
+// Option is Alt.
+class LoneAlt {
+ public:
+  // Feeds one event; true when it is the release of a lone Alt.
+  bool released(const SDL_Event& event) {
+    switch (event.type) {
+      case SDL_EVENT_KEY_DOWN:
+        if (!is_alt(event.key.key)) {
+          alone_ = false;
+        } else if (!event.key.repeat) {
+          alone_ = true;
+        }
+        return false;
+      case SDL_EVENT_KEY_UP: {
+        if (!is_alt(event.key.key)) return false;
+        const bool alone = alone_;
+        alone_ = false;
+        return alone;
+      }
+      case SDL_EVENT_MOUSE_BUTTON_DOWN:
+      case SDL_EVENT_MOUSE_WHEEL:
+      case SDL_EVENT_WINDOW_FOCUS_GAINED:
+      case SDL_EVENT_WINDOW_FOCUS_LOST:
+        alone_ = false;
+        return false;
+      default:
+        return false;
+    }
+  }
+
+ private:
+  static bool is_alt(SDL_Keycode key) {
+    return key == SDLK_LALT || key == SDLK_RALT;
+  }
+
+  bool alone_{};
+};
+
+// The bar title whose mnemonic is `key` (Alt+letter), or -1.
+int menu_title_for_mnemonic(const simtower::OriginalMenuItems& menu,
+                            SDL_Keycode key) {
+  if (key < SDLK_A || key > SDLK_Z) return -1;
+  const char character = static_cast<char>('a' + (key - SDLK_A));
+  for (std::size_t index = 0; index < menu.size(); ++index) {
+    if (simtower::original_menu_mnemonic(menu[index].text) == character) {
+      return static_cast<int>(index);
+    }
+  }
+  return -1;
+}
+
+// USER's modal menu loop: from a press on a title (or Alt/F10/Alt+letter)
+// until the menu closes, events go to the tracker only and no idle pass
+// runs. A keyboard entry selects the title only, or with open_popup also
+// opens its drop-down (Alt+letter). The chosen command is dispatched after
+// the menu has closed, as the posted WM_COMMAND is. Returns false on quit.
+bool run_menu_loop(Window& window, simtower::sdl::Session& session,
+                   int bar, bool keyboard, bool open_popup = false) {
+  simtower::sdl::MenuTracker tracker(session.menu(), session.layout());
+  auto step = tracker.open(bar, keyboard);
+  if (keyboard && open_popup) step = tracker.key(simtower::sdl::MenuKey::down);
+  LoneAlt lone_alt;
+  bool running = true;
+  while (true) {
+    if (step.redraw || step.close) {
+      session.set_menu_view(step.close ? simtower::sdl::MenuView{}
+                                       : tracker.view());
+      window.present(simtower::sdl::compose_window(session));
+    }
+    if (step.close) break;
+    SDL_Event event{};
+    if (!SDL_WaitEvent(&event)) break;
+    const bool lone_alt_up = lone_alt.released(event);
+    step = {};
+    if (event.type == SDL_EVENT_QUIT) {
+      running = false;
+      step.close = true;
+    } else if (event.type == SDL_EVENT_WINDOW_EXPOSED) {
+      step.redraw = true;
+    } else if (event.type == SDL_EVENT_WINDOW_RESIZED ||
+               event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+      // USER ends menu mode when the window loses activation; a resize
+      // also closes it here (the layout changes under the tracker).
+      if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+        resize_session(event, session);
+      }
+      step.close = true;
+    } else if (const auto input = pointer_input(event)) {
+      step = tracker.pointer(*input);
+    } else if (event.type == SDL_EVENT_KEY_DOWN) {
+      using simtower::sdl::MenuKey;
+      switch (event.key.key) {
+        case SDLK_LEFT: step = tracker.key(MenuKey::left); break;
+        case SDLK_RIGHT: step = tracker.key(MenuKey::right); break;
+        case SDLK_UP: step = tracker.key(MenuKey::up); break;
+        case SDLK_DOWN: step = tracker.key(MenuKey::down); break;
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER: step = tracker.key(MenuKey::enter); break;
+        case SDLK_ESCAPE: step = tracker.key(MenuKey::escape); break;
+        case SDLK_F10: step = tracker.key(MenuKey::toggle); break;
+        default:
+          if (event.key.key >= SDLK_A && event.key.key <= SDLK_Z) {
+            step = tracker.key(MenuKey::character,
+                               static_cast<char>('a' + (event.key.key -
+                                                        SDLK_A)));
+          }
+          break;
+      }
+    } else if (lone_alt_up) {
+      step = tracker.key(simtower::sdl::MenuKey::toggle);
+    }
+  }
+  if (running && step.command) {
+    (void)session.choose_menu_command(*step.command);
+  }
+  return running;
+}
+
 // Returns false on quit.
 bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
-                  bool& expose, WindowActivation& activation) {
+                  Window& window, bool& expose,
+                  WindowActivation& activation, LoneAlt& lone_alt) {
+  const bool lone_alt_up = lone_alt.released(event);
   if (const auto input = pointer_input(event)) {
+    if (input->kind == simtower::sdl::InputKind::down ||
+        input->kind == simtower::sdl::InputKind::double_click) {
+      const auto bar =
+          simtower::sdl::menu_bar_layout(session.menu(), session.layout());
+      if (bar.strip.contains(input->x, input->y)) {
+        // A press on the bar enters menu mode (on a title) or, between
+        // titles, does nothing; it never reaches the panels.
+        const int title =
+            simtower::sdl::menu_title_at(bar, input->x, input->y);
+        expose = true;
+        return title < 0 || run_menu_loop(window, session, title, false);
+      }
+    }
     session.pointer_event(*input);
     expose = true;
     return true;
@@ -922,7 +1169,35 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
     case SDL_EVENT_WINDOW_EXPOSED:
       expose = true;
       break;
+    case SDL_EVENT_KEY_UP:
+      // A lone Alt (or F10 below) enters keyboard menu mode on File.
+      if (lone_alt_up) {
+        expose = true;
+        return run_menu_loop(window, session, 0, true);
+      }
+      break;
     case SDL_EVENT_KEY_DOWN:
+      if ((event.key.mod & SDL_KMOD_ALT) != 0 &&
+          (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) == 0 &&
+          !event.key.repeat) {
+        // Alt+mnemonic opens that title's drop-down.
+        const int title = menu_title_for_mnemonic(session.menu(),
+                                                  event.key.key);
+        if (title >= 0) {
+          expose = true;
+          return run_menu_loop(window, session, title, true, true);
+        }
+      }
+      if (event.key.key == SDLK_F1 && !event.key.repeat) {
+        // TranslateAccelerator: TOWER_MENU's one entry, VK_F1 -> 40021.
+        (void)session.accelerator(simtower::kOriginalVirtualKeyF1);
+        expose = true;
+        break;
+      }
+      if (event.key.key == SDLK_F10 && !event.key.repeat) {
+        expose = true;
+        return run_menu_loop(window, session, 0, true);
+      }
       // SDL-only stand-ins for the Main scrollbars, which this frontend
       // does not draw yet. MAINWNDPROC has no WM_KEYDOWN or WM_MOUSEWHEEL
       // scrolling: only WM_HSCROLL/WM_VSCROLL reach scroll_original
@@ -979,10 +1254,14 @@ int run_window(const Options& options) {
   session.resize(width, height);
   WindowModalSource modal(window, session);
   session.set_input_source(&modal);
+  SdlFilePicker picker(window, session);
+  session.set_file_picker(&picker);
   // WinMain plays WAVE/20000 right before the new/load startup path.
   session.play_startup_sound();
   start_tower(session, options);
   WindowActivation activation = initial_activation(window.flags());
+  LoneAlt lone_alt;
+  window.set_title(session.window_title());
 
   // Replaces the PeekMessage busy loop (WinMain): wait for an event
   // or until the next pass has work, drain the queue, then run one idle pass.
@@ -992,18 +1271,28 @@ int run_window(const Options& options) {
     SDL_Event event{};
     if (SDL_WaitEventTimeout(
             &event, static_cast<Sint32>(session.milliseconds_until_due()))) {
-      running = handle_event(event, session, expose, activation);
-      while (running && !modal.quit_requested() && SDL_PollEvent(&event)) {
-        running = handle_event(event, session, expose, activation);
+      running = handle_event(event, session, window, expose, activation,
+                             lone_alt);
+      while (running && !modal.quit_requested() &&
+             !picker.quit_requested() && !session.quit_requested() &&
+             SDL_PollEvent(&event)) {
+        running = handle_event(event, session, window, expose, activation,
+                               lone_alt);
       }
     }
-    if (!running || modal.quit_requested()) break;
+    // File > Exit destroys Main (WM_DESTROY posts WM_QUIT).
+    if (!running || modal.quit_requested() || picker.quit_requested() ||
+        session.quit_requested()) {
+      break;
+    }
+    window.set_title(session.window_title());
     session.set_window_activation(activation.active, activation.iconic);
     if (session.run_idle_pass() || expose) {
       window.present(simtower::sdl::compose_window(session));
     }
     window.set_cursor(session.cursor_id());
   }
+  session.set_file_picker(nullptr);
   session.set_input_source(nullptr);
   return 0;
 }

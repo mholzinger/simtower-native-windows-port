@@ -24,6 +24,32 @@
 //   expect-type T | expect-mode M | expect-balance B
 //                          assertion; exit 3 on mismatch
 //   digest                 print a digest line now
+//   menu ID                pick menu command ID (WM_COMMAND), as a click on
+//                          the item would: exit 2 if ID is not in the live
+//                          menu; a grayed item is logged and not sent
+//   key f1                 the F1 accelerator (TranslateAccelerator, 40021)
+//   pick-file PATH|cancel  the result of an Open / Save As sheet (PATH is
+//                          the rest of the line). Right after the command
+//                          that opens the sheet it answers that sheet;
+//                          before it, it is queued and used in order. Exit 2
+//                          if any is left unused when the script ends
+//   menu-show BAR [ITEM [SUB]]
+//                          draw drop-down BAR (0 File .. 3 Help) with row
+//                          ITEM highlighted (and, for a cascade row, its
+//                          drop-down with row SUB) in --headless-window;
+//                          presentation only, until menu-hide
+//   menu-hide              close it again
+//   expect-menu ID checked|unchecked|grayed|enabled|absent
+//   expect-title TEXT      the caption, e.g. "SimTower - untitled"
+//   expect-saved PATH      PATH holds exactly the game-save serialization of
+//                          the live tower (what a Save just wrote)
+//
+// pick-file, expect-title and expect-saved take the rest of the line, but
+// '#' still starts a comment there, so PATH and TEXT cannot contain '#'.
+//
+// A File > Exit that destroys Main ("menu 40001") ends the run like the
+// window's WM_QUIT: the rest of the script and any remaining --passes are
+// skipped, and the final digest reports the passes actually run.
 //
 // Determinism: commands after "pass N" run after N passes and before pass
 // N+1 (the --event NAME@PASS convention). The virtual clock does not move
@@ -74,6 +100,14 @@ enum class ScriptOp : std::uint8_t {
   expect_mode,
   expect_balance,
   digest,
+  menu,
+  key,
+  pick_file,
+  menu_show,
+  menu_hide,
+  expect_menu,
+  expect_title,
+  expect_saved,
 };
 
 struct ScriptCommand {
@@ -85,6 +119,8 @@ struct ScriptCommand {
   std::int64_t value{};  // pass count, alert answer, expectation
   std::optional<std::uint16_t> edit_mode{};
   std::optional<std::uint16_t> build_type{};
+  std::string text{};  // pick-file path ("" = cancel), expect-* words
+  std::vector<int> numbers{};  // menu-show BAR [ITEM [SUB]]
 };
 
 // Throws ScriptFailure(2) with the file name and line on a syntax error.
@@ -105,10 +141,13 @@ class ScriptPlayer final : public InputSource {
                std::function<void()> print_digest);
 
   // Executes commands up to the next "pass N" and returns that command,
-  // or null when the script has ended.
+  // or null when the script has ended or a command quit (File > Exit).
   const ScriptCommand* run_until_pass();
 
   std::optional<InputEvent> next_modal_event() override;
+  // A sheet opened by a command: the next line, when it is "pick-file".
+  std::optional<std::optional<std::filesystem::path>> next_file_pick()
+      override;
 
  private:
   // Executes one non-pass command. Mouse commands go to the session (or,

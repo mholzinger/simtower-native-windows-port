@@ -69,7 +69,8 @@ std::filesystem::path original_tdt_normalized_path(
 }
 
 bool original_tdt_basename_is_valid(
-    const std::filesystem::path& normalized_path) noexcept {
+    const std::filesystem::path& normalized_path,
+    std::wstring_view separators) noexcept {
   // 10d0:0523-054f deliberately uses strchr('.') and strrchr('\\') on the
   // whole normalized path. The first dot, rather than the final extension,
   // ends the DOS basename measurement; a prior dotted directory consequently
@@ -77,7 +78,7 @@ bool original_tdt_basename_is_valid(
   const auto text = normalized_path.wstring();
   const auto dot = text.find(L'.');
   if (dot == std::wstring::npos) return false;
-  const auto slash = text.find_last_of(L'\\');
+  const auto slash = text.find_last_of(separators);
   const std::ptrdiff_t basename_start =
       slash == std::wstring::npos
           ? 0
