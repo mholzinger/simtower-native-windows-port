@@ -1,0 +1,22 @@
+# CLI end-to-end: three Lobby clicks on floor 10 (cells 182..194), then an
+# Office (Command cell 2, a plain cell that activates on press and release)
+# on floor 11 over them: cells 183..192, variant 0. Each Lobby click at
+# window x 576/608/640 is Main client x 368/400/432 (cells 182/186/190 to
+# +4). The expect-balance lines check that the click built the Office: the
+# balance drops by its cost, 445 (as in construction_tests.cpp).
+# direct-build: 24,10,182@1
+# direct-build: 24,10,186@1
+# direct-build: 24,10,190@1
+# direct-build: 7,11,183,0@1
+# passes: 3
+pass 1
+click 576 550
+click 608 550
+click 640 550
+expect-balance 19400
+click-command 151 288
+expect-type 7
+expect-mode 5
+click 608 518
+expect-balance 18955
+pass 3

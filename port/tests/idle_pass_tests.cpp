@@ -19,7 +19,7 @@
 //
 // Usage: simtower_idle_pass_tests <original_resources.pack> [trace-dir]
 
-#include "sdl_scenario.hpp"
+#include "test_scenario.hpp"
 
 #include "original_construction.hpp"
 #include "original_idle_pass.hpp"
@@ -430,7 +430,7 @@ RunResult run_scenario(const OriginalResources& resources,
   OriginalPaletteRuntime palette{};
   reset_original_palette_runtime(resources, &document, palette,
                                  original_coarse_tick(clock_ms));
-  (void)sdl::build_scenario(scenario, document, startup.part,
+  (void)build_scenario(scenario, document, startup.part,
                             startup.construction_costs);
 
   std::vector<OriginalElevatorTransferVisual> transfer_visuals;

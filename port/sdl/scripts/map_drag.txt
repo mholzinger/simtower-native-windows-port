@@ -1,0 +1,19 @@
+# Map content drag (1058:0284): pressing the Map below its toolbar centers
+# the Main view on that point, and dragging keeps it following. The Map
+# client starts at window 3,5; its content starts 8 + 18 pixels lower.
+#
+#   simtower_sdl --input-script map_drag.txt --passes 4 --state-digest \
+#                --headless-window map.bmp
+
+pass 1
+down 103 200
+move 113 220
+move 123 240
+up 123 240
+pass 2
+# Map toolbar: the second 50x18 cell selects overlay 1 (Eval), which
+# disables construction and selects edit mode two.
+click 78 15
+expect-mode 2
+pass 4
+digest

@@ -1,6 +1,7 @@
-// SDL3 frontend, first milestone: one window showing the main tower view,
-// driven by the same portable simulation and renderer as the Win32 host.
-// Menus, panels, dialogs, help, fonts and file pickers come later.
+// SDL3 frontend: one window holding Main and the Map, Info and Command
+// panels (sdl_layout.hpp), driven by the same portable simulation,
+// renderer and world input module as the Win32 host. Menus, dialogs, help,
+// fonts and file pickers come later.
 //
 // Usage:
 //   simtower_sdl [--pack FILE] [--open FILE.TDT] [--size WxH] [--slow]
@@ -10,6 +11,8 @@
 //                [--scenario none|busy|full] [--state-digest]
 //                [--digest-every K] [--trace-requests]
 //                [--event bomb|fire@PASS ...]
+//                [--input-script FILE] [--headless-window FILE.bmp]
+//                [--direct-build TYPE,FLOOR,LEFT[,VARIANT][,shift]@PASS ...]
 //
 // Sound: the interactive window plays sound by default (--no-sound turns
 // it off); it also plays the startup WAVE/20000. Headless runs keep sound
@@ -28,13 +31,26 @@
 // runs the hidden Bomb or Fire menu command before pass PASS (0-based, must
 // be below --passes); it may repeat.
 //
+// Input: --input-script FILE plays scripted mouse input (sdl_input_script.hpp)
+// through the same panel router as the window; the digest line then gains
+// an "input <hex>" field. Exit 2 on a script syntax, range or pass-order
+// error, 3 on a failed expect-*; a script that ends inside the selector
+// modal cancels it. --direct-build (test-only) runs one constructor
+// plus the common success tail before pass PASS, as the reference for a
+// scripted placement. --headless-window FILE.bmp writes the composed window
+// (panels included) after the passes.
+//
 // Headless mode (no window) is selected by any of --headless-frame,
-// --state-digest, --digest-every, --event, --audio-capture, or --scenario
-// other than none; --headless-frame is then optional. No other flag selects
-// it: without those, --trace-requests, --log-sounds or --sound alone still
-// open a window.
+// --headless-window, --state-digest, --digest-every, --event,
+// --input-script, --direct-build, --audio-capture, or --scenario other than
+// none; --headless-frame is then optional. No other flag selects it:
+// without those, --trace-requests, --log-sounds or --sound alone still open
+// a window.
 
 #include "sdl_audio.hpp"
+#include "sdl_input_script.hpp"
+#include "sdl_layout.hpp"
+#include "sdl_panels.hpp"
 #include "sdl_session.hpp"
 
 #include "original_audio_capture.hpp"
@@ -45,11 +61,13 @@
 #include "original_time.hpp"
 #include "original_ui.hpp"
 #include "original_wave.hpp"
+#include "original_world_input.hpp"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -90,18 +108,10 @@ struct MainClientLimits {
 };
 
 MainClientLimits main_client_limits() {
-  constexpr simtower::OriginalMainNonclientMetrics metrics{
-      .frame_width = 4,
-      .frame_height = 4,
-      .vertical_scroll_width = 16,
-      .horizontal_scroll_height = 16,
-      .menu_height = 19,
-      .caption_height = 19,
-      .border_width = 1,
-      .border_height = 1,
-  };
-  const auto geometry =
-      simtower::original_main_window_geometry(1024, 768, metrics);
+  // One definition with the panel layout (sdl_layout.hpp).
+  constexpr auto& metrics = simtower::sdl::kMainNonclientMetrics;
+  const auto geometry = simtower::original_main_window_geometry(
+      simtower::sdl::kDesktopWidth, simtower::sdl::kDesktopHeight, metrics);
   const int nonclient_width =
       2 * metrics.frame_width + metrics.vertical_scroll_width;
   const int nonclient_height = 2 * metrics.frame_height +
@@ -144,10 +154,15 @@ struct Options {
   int digest_every{0};
   // --event NAME@PASS: run Session::trigger_event before that pass.
   std::vector<std::pair<std::string, int>> events{};
+  std::optional<std::filesystem::path> input_script{};
+  std::optional<std::filesystem::path> headless_window{};
+  // --direct-build SPEC@PASS: Session::direct_build before that pass.
+  std::vector<std::pair<simtower::DirectBuild, int>> direct_builds{};
 
   [[nodiscard]] bool headless() const {
-    return headless_frame || state_digest || digest_every > 0 ||
-           scenario != "none" || !events.empty() || audio_capture;
+    return headless_frame || headless_window || state_digest ||
+           digest_every > 0 || scenario != "none" || !events.empty() ||
+           audio_capture || input_script || !direct_builds.empty();
   }
   [[nodiscard]] bool sound_enabled() const {
     if (audio_capture) return true;
@@ -163,31 +178,64 @@ struct Options {
       " [--audio-capture FILE.wav]"
       " [--headless-frame FILE.bmp [--passes N] [--view X,Y]]"
       " [--scenario none|busy|full] [--state-digest] [--digest-every K]"
-      " [--trace-requests] [--event bomb|fire@PASS ...]");
+      " [--trace-requests] [--event bomb|fire@PASS ...]"
+      " [--input-script FILE] [--headless-window FILE.bmp]"
+      " [--direct-build TYPE,FLOOR,LEFT[,VARIANT][,shift]@PASS ...]"
+      "\n--input-script exits 2 on a script error, 3 on a failed expect-*"
+      " (see sdl_input_script.hpp)");
+}
+
+// Parses a whole decimal int; trailing junk ("12x", "3 ") is an error.
+int parse_int(std::string_view text, const std::string& error) {
+  try {
+    std::size_t used = 0U;
+    const int value = std::stoi(std::string(text), &used);
+    if (used != text.size()) usage_error(error);
+    return value;
+  } catch (const std::exception&) {
+    usage_error(error);
+  }
 }
 
 // Parses "AxB" or "A,B" into two integers.
 std::pair<int, int> parse_pair(std::string_view text, char separator) {
+  const std::string error = "bad pair: " + std::string(text);
   const auto split = text.find(separator);
-  if (split == std::string_view::npos) usage_error("bad pair: " +
-                                                   std::string(text));
-  try {
-    return {std::stoi(std::string(text.substr(0, split))),
-            std::stoi(std::string(text.substr(split + 1)))};
-  } catch (const std::exception&) {
-    usage_error("bad pair: " + std::string(text));
+  if (split == std::string_view::npos) usage_error(error);
+  return {parse_int(text.substr(0, split), error),
+          parse_int(text.substr(split + 1), error)};
+}
+
+// TYPE,FLOOR,LEFT[,VARIANT][,shift]
+simtower::DirectBuild parse_direct_build(const std::string& text) {
+  std::vector<std::string> fields;
+  std::size_t start = 0U;
+  while (true) {
+    const auto comma = text.find(',', start);
+    fields.push_back(text.substr(start, comma - start));
+    if (comma == std::string::npos) break;
+    start = comma + 1U;
   }
+  simtower::DirectBuild build{};
+  if (!fields.empty() && fields.back() == "shift") {
+    build.shift = true;
+    fields.pop_back();
+  }
+  if (fields.size() < 3U || fields.size() > 4U) {
+    usage_error("bad --direct-build: " + text);
+  }
+  const std::string error = "bad --direct-build: " + text;
+  build.type = static_cast<std::uint16_t>(parse_int(fields[0], error));
+  build.floor = static_cast<std::int16_t>(parse_int(fields[1], error));
+  build.left = static_cast<std::uint16_t>(parse_int(fields[2], error));
+  if (fields.size() == 4U) {
+    build.variant = static_cast<std::uint8_t>(parse_int(fields[3], error));
+  }
+  return build;
 }
 
 int parse_count(std::string_view text) {
-  try {
-    std::size_t used = 0U;
-    const int count = std::stoi(std::string(text), &used);
-    if (used != text.size()) usage_error("bad passes: " + std::string(text));
-    return count;
-  } catch (const std::exception&) {
-    usage_error("bad passes: " + std::string(text));
-  }
+  return parse_int(text, "bad passes: " + std::string(text));
 }
 
 Options parse_options(int argc, char** argv) {
@@ -236,6 +284,16 @@ Options parse_options(int argc, char** argv) {
       if (at == std::string::npos) usage_error("bad event: " + text);
       options.events.emplace_back(text.substr(0, at),
                                   parse_count(text.substr(at + 1)));
+    } else if (argument == "--input-script") {
+      options.input_script = value(index);
+    } else if (argument == "--headless-window") {
+      options.headless_window = value(index);
+    } else if (argument == "--direct-build") {
+      const std::string text(value(index));
+      const auto at = text.find('@');
+      if (at == std::string::npos) usage_error("bad --direct-build: " + text);
+      options.direct_builds.emplace_back(parse_direct_build(text.substr(0, at)),
+                                         parse_count(text.substr(at + 1)));
     } else if (argument == "--view") {
       const auto [x, y] = parse_pair(value(index), ',');
       options.view = simtower::OriginalWorldPoint{x, y};
@@ -248,6 +306,12 @@ Options parse_options(int argc, char** argv) {
   }
   if (options.width <= 0 || options.height <= 0 || options.passes < 0) {
     usage_error("size and passes must be positive");
+  }
+  for (const auto& [build, at_pass] : options.direct_builds) {
+    if (at_pass < 0 || at_pass >= options.passes) {
+      usage_error("--direct-build at pass " + std::to_string(at_pass) +
+                  " is outside --passes " + std::to_string(options.passes));
+    }
   }
   for (const auto& [name, at_pass] : options.events) {
     if (name != "bomb" && name != "fire") {
@@ -497,7 +561,7 @@ int run_headless(const Options& options) {
     const auto summary = session.apply_scenario(options.scenario);
     std::string built;
     for (const auto& [type, count] : summary.built_by_type) {
-      built += " " + simtower::sdl::scenario_type_name(type) + "=" +
+      built += " " + simtower::scenario_type_name(type) + "=" +
                std::to_string(count);
     }
     std::fprintf(stderr,
@@ -508,17 +572,36 @@ int run_headless(const Options& options) {
                  summary.rating_dialogs,
                  static_cast<int>(summary.balance_after));
   }
-  const auto print_digest = [&session](int pass) {
+  // The "input" field is added only with a script, so the regression oracle
+  // (no script) prints exactly what it printed before input existed.
+  const bool scripted = options.input_script.has_value();
+  const auto print_digest = [&session, scripted](int pass) {
     const auto digest = session.state_digest();
     std::printf("digest %016llx pass %d tower %016llx process %016llx"
-                " host %016llx requests %016llx\n",
+                " host %016llx requests %016llx",
                 static_cast<unsigned long long>(digest.combined), pass,
                 static_cast<unsigned long long>(digest.tower),
                 static_cast<unsigned long long>(digest.process),
                 static_cast<unsigned long long>(digest.host),
                 static_cast<unsigned long long>(digest.requests));
+    if (scripted) {
+      std::printf(" input %016llx", static_cast<unsigned long long>(
+                                         session.input_digest()));
+    }
+    std::printf("\n");
   };
-  for (int pass = 0; pass < options.passes; ++pass) {
+  int completed = 0;
+  const auto run_pass = [&]() {
+    const int pass = completed;
+    for (const auto& [build, at_pass] : options.direct_builds) {
+      if (at_pass != pass) continue;
+      const bool built = session.direct_build(build);
+      std::fprintf(stderr,
+                   "simtower_sdl: direct build type %u floor %d left %u"
+                   " before pass %d: %s\n",
+                   build.type, build.floor, build.left, pass,
+                   built ? "built" : "rejected");
+    }
     for (const auto& [name, at_pass] : options.events) {
       if (at_pass != pass) continue;
       const bool started = session.trigger_event(name);
@@ -527,10 +610,26 @@ int run_headless(const Options& options) {
     }
     clock_ms += pass_ms;
     (void)session.run_idle_pass();
-    if (options.digest_every > 0 && (pass + 1) % options.digest_every == 0) {
-      print_digest(pass + 1);
+    ++completed;
+    if (options.digest_every > 0 && completed % options.digest_every == 0) {
+      print_digest(completed);
     }
+  };
+  if (scripted) {
+    // Each "pass N" runs passes until N have run; the commands after it run
+    // between pass N and pass N+1 on a fixed virtual clock.
+    // validate_pass_order makes every target reachable in order.
+    auto commands = simtower::sdl::parse_input_script(*options.input_script);
+    simtower::sdl::validate_pass_order(commands, options.passes);
+    simtower::sdl::ScriptPlayer player(std::move(commands), session,
+                                       [&] { print_digest(completed); });
+    session.set_input_source(&player);
+    while (const auto* pass = player.run_until_pass()) {
+      while (completed < static_cast<int>(pass->value)) run_pass();
+    }
+    session.set_input_source(nullptr);
   }
+  while (completed < options.passes) run_pass();
   // Taken before the presentation step below, which may rebuild the backing.
   if (options.state_digest) print_digest(options.passes);
   std::fflush(stdout);
@@ -555,20 +654,32 @@ int run_headless(const Options& options) {
                requests.dialogs, requests.sounds, requests.focus,
                requests.status, tally.c_str());
   if (capture && !write_audio_capture(options, session, *capture)) return 1;
-  if (!options.headless_frame) return 0;
+  if (!options.headless_frame && !options.headless_window) return 0;
 
   // Presentation only: no scheduler, palette or clock step.
   session.present();
-  const auto& raster = session.main_raster();
-  if (!write_bmp(raster, *options.headless_frame)) {
-    std::fprintf(stderr, "simtower_sdl: could not write %s: %s\n",
-                 options.headless_frame->string().c_str(), SDL_GetError());
+  const auto write = [](const simtower::OriginalWorldRaster& raster,
+                        const std::filesystem::path& path) {
+    if (!write_bmp(raster, path)) {
+      std::fprintf(stderr, "simtower_sdl: could not write %s: %s\n",
+                   path.string().c_str(), SDL_GetError());
+      return false;
+    }
+    std::fprintf(stderr, "simtower_sdl: wrote %s (%dx%d)\n",
+                 path.string().c_str(), raster.width, raster.height);
+    return true;
+  };
+  if (options.headless_frame &&
+      !write(session.main_raster(), *options.headless_frame)) {
+    return 1;
+  }
+  if (options.headless_window &&
+      !write(simtower::sdl::compose_window(session),
+             *options.headless_window)) {
     return 1;
   }
   const auto& view = session.viewport();
-  std::fprintf(stderr, "simtower_sdl: wrote %s (%dx%d) view %d,%d\n",
-               options.headless_frame->string().c_str(), raster.width,
-               raster.height, view.x, view.y);
+  std::fprintf(stderr, "simtower_sdl: view %d,%d\n", view.x, view.y);
   return 0;
 }
 
@@ -576,23 +687,31 @@ class Window {
  public:
   explicit Window(const Options& options) {
     if (!SDL_Init(SDL_INIT_VIDEO)) fail("SDL_Init");
-    // One window; panels will live inside it. The client size is in window
-    // coordinates and the texture is scaled to the drawable on HiDPI.
-    if (!SDL_CreateWindowAndRenderer("SimTower", options.width,
-                                     options.height, SDL_WINDOW_RESIZABLE,
-                                     &window_, &renderer_)) {
+    // One window holding Main and the panels (sdl_layout.hpp). Window
+    // coordinates are the Win16 desktop coordinates; the texture is scaled
+    // to the drawable on HiDPI, so mouse coordinates (window points) map
+    // one to one onto the composed raster.
+    if (!SDL_CreateWindowAndRenderer(
+            "SimTower", simtower::sdl::window_width_for(options.width),
+            simtower::sdl::window_height_for(options.height),
+            SDL_WINDOW_RESIZABLE, &window_, &renderer_)) {
       const std::string error = SDL_GetError();
       SDL_Quit();
       throw std::runtime_error("SDL_CreateWindowAndRenderer: " + error);
     }
-    // MINMAXINFO tracking limits (1158:0334), as client sizes.
+    // MINMAXINFO tracking limits (1158:0334) on the Main client.
     const auto limits = main_client_limits();
-    SDL_SetWindowMinimumSize(window_, limits.minimum_width,
-                             limits.minimum_height);
-    SDL_SetWindowMaximumSize(window_, limits.maximum_width,
-                             limits.maximum_height);
+    SDL_SetWindowMinimumSize(
+        window_, simtower::sdl::window_width_for(limits.minimum_width),
+        simtower::sdl::window_height_for(limits.minimum_height));
+    SDL_SetWindowMaximumSize(
+        window_, simtower::sdl::window_width_for(limits.maximum_width),
+        simtower::sdl::window_height_for(limits.maximum_height));
   }
   ~Window() {
+    for (auto* cursor : cursors_) {
+      if (cursor) SDL_DestroyCursor(cursor);
+    }
     if (texture_) SDL_DestroyTexture(texture_);
     if (renderer_) SDL_DestroyRenderer(renderer_);
     if (window_) SDL_DestroyWindow(window_);
@@ -601,19 +720,21 @@ class Window {
   Window(const Window&) = delete;
   Window& operator=(const Window&) = delete;
 
-  // Clamped as well, in case a window manager ignores the size limits.
+  // The Main client size for the current window size, clamped as well, in
+  // case a window manager ignores the size limits.
   [[nodiscard]] std::pair<int, int> client_size() const {
     int width = 0;
     int height = 0;
     SDL_GetWindowSize(window_, &width, &height);
-    return clamp_client(width, height);
+    return clamp_client(simtower::sdl::main_client_width_for(width),
+                        simtower::sdl::main_client_height_for(height));
   }
 
   [[nodiscard]] SDL_WindowFlags flags() const {
     return SDL_GetWindowFlags(window_);
   }
 
-  // Replaces draw_original_world_raster's SetDIBitsToDevice.
+  // Replaces each window's SetDIBitsToDevice with one composed raster.
   void present(const simtower::OriginalWorldRaster& raster) {
     if (raster.width <= 0 || raster.height <= 0) return;
     if (!texture_ || texture_width_ != raster.width ||
@@ -634,6 +755,27 @@ class Window {
     SDL_RenderPresent(renderer_);
   }
 
+  // TEMP: the original CURSOR resources (1002..1005) are not decoded yet,
+  // so each resolve_original_cursor id maps to an SDL system cursor.
+  void set_cursor(std::uint16_t cursor_id) {
+    if (cursor_id == cursor_id_) return;
+    cursor_id_ = cursor_id;
+    SDL_SystemCursor system = SDL_SYSTEM_CURSOR_DEFAULT;
+    switch (cursor_id) {
+      case 2U: system = SDL_SYSTEM_CURSOR_CROSSHAIR; break;
+      case 4U: system = SDL_SYSTEM_CURSOR_WAIT; break;
+      case 1000U: system = SDL_SYSTEM_CURSOR_NS_RESIZE; break;
+      case 1002U: system = SDL_SYSTEM_CURSOR_CROSSHAIR; break;  // build
+      case 1003U: system = SDL_SYSTEM_CURSOR_POINTER; break;    // inspect
+      case 1004U: system = SDL_SYSTEM_CURSOR_POINTER; break;    // finger
+      case 1005U: system = SDL_SYSTEM_CURSOR_NOT_ALLOWED; break;  // bulldoze
+      default: break;
+    }
+    auto*& cursor = cursors_[static_cast<std::size_t>(system)];
+    if (!cursor) cursor = SDL_CreateSystemCursor(system);
+    if (cursor) SDL_SetCursor(cursor);
+  }
+
  private:
   [[noreturn]] static void fail(const char* what) {
     throw std::runtime_error(std::string(what) + ": " + SDL_GetError());
@@ -644,6 +786,8 @@ class Window {
   SDL_Texture* texture_{};
   int texture_width_{};
   int texture_height_{};
+  std::uint16_t cursor_id_{0xFFFFU};
+  std::array<SDL_Cursor*, SDL_SYSTEM_CURSOR_COUNT> cursors_{};
 };
 
 // Main activation word and IsIconic for the idle-pass audio prelude.
@@ -659,9 +803,102 @@ WindowActivation initial_activation(SDL_WindowFlags flags) {
           .iconic = (flags & SDL_WINDOW_MINIMIZED) != 0U};
 }
 
+// SDL mouse events as session input: window points are the logical
+// coordinates, Shift/Control come from the keyboard state, and a left
+// press with clicks >= 2 is WM_LBUTTONDBLCLK (Main's CS_DBLCLKS).
+std::optional<simtower::sdl::InputEvent> pointer_input(const SDL_Event& event) {
+  using simtower::sdl::InputKind;
+  const auto modifiers = SDL_GetModState();
+  const std::uint16_t keys = static_cast<std::uint16_t>(
+      ((modifiers & SDL_KMOD_SHIFT) != 0 ? simtower::kOriginalKeyShift : 0U) |
+      ((modifiers & SDL_KMOD_CTRL) != 0 ? simtower::kOriginalKeyControl : 0U));
+  const auto at = [&](InputKind kind, float x, float y) {
+    return simtower::sdl::InputEvent{kind, static_cast<int>(x),
+                                     static_cast<int>(y), keys};
+  };
+  switch (event.type) {
+    case SDL_EVENT_MOUSE_MOTION:
+      return at(InputKind::move, event.motion.x, event.motion.y);
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+      if (event.button.button == SDL_BUTTON_LEFT) {
+        return at(event.button.clicks >= 2 ? InputKind::double_click
+                                            : InputKind::down,
+                  event.button.x, event.button.y);
+      }
+      if (event.button.button == SDL_BUTTON_RIGHT) {
+        return at(InputKind::right_down, event.button.x, event.button.y);
+      }
+      return std::nullopt;
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+      if (event.button.button == SDL_BUTTON_LEFT) {
+        return at(InputKind::up, event.button.x, event.button.y);
+      }
+      return std::nullopt;
+    default:
+      return std::nullopt;
+  }
+}
+
+// WM_SIZE: a resize changes only the Main client; the panels stay put.
+void resize_session(const SDL_Event& event, simtower::sdl::Session& session) {
+  const auto [width, height] =
+      clamp_client(simtower::sdl::main_client_width_for(event.window.data1),
+                   simtower::sdl::main_client_height_for(event.window.data2));
+  session.resize(width, height);
+}
+
+// The 1050:05a7 selector modal in the window: a nested SDL_WaitEvent loop
+// that re-presents the window (with the selector overlay) and runs no idle
+// pass, as DialogBoxIndirectParamW's own loop does. Only pointer input,
+// QUIT, EXPOSED and RESIZED are handled inside it; other events (focus,
+// keys, wheel) are dropped while it runs.
+class WindowModalSource final : public simtower::sdl::InputSource {
+ public:
+  WindowModalSource(Window& window, simtower::sdl::Session& session)
+      : window_(window), session_(session) {}
+
+  [[nodiscard]] bool quit_requested() const { return quit_requested_; }
+
+  std::optional<simtower::sdl::InputEvent> next_modal_event() override {
+    SDL_Event event{};
+    while (!quit_requested_ && SDL_WaitEvent(&event)) {
+      if (event.type == SDL_EVENT_QUIT) {
+        quit_requested_ = true;
+        break;
+      }
+      if (event.type == SDL_EVENT_WINDOW_EXPOSED) {
+        modal_changed();
+        continue;
+      }
+      if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+        // A Win32 modal loop still dispatches WM_SIZE to Main.
+        resize_session(event, session_);
+        modal_changed();
+        continue;
+      }
+      if (const auto input = pointer_input(event)) return input;
+    }
+    return std::nullopt;
+  }
+
+  void modal_changed() override {
+    window_.present(simtower::sdl::compose_window(session_));
+  }
+
+ private:
+  Window& window_;
+  simtower::sdl::Session& session_;
+  bool quit_requested_{};
+};
+
 // Returns false on quit.
 bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
                   bool& expose, WindowActivation& activation) {
+  if (const auto input = pointer_input(event)) {
+    session.pointer_event(*input);
+    expose = true;
+    return true;
+  }
   switch (event.type) {
     case SDL_EVENT_QUIT:
       return false;
@@ -678,12 +915,10 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
     case SDL_EVENT_WINDOW_MAXIMIZED:
       activation.iconic = false;
       break;
-    case SDL_EVENT_WINDOW_RESIZED: {
-      const auto [width, height] =
-          clamp_client(event.window.data1, event.window.data2);
-      session.resize(width, height);
+    case SDL_EVENT_WINDOW_RESIZED:
+      resize_session(event, session);
+      expose = true;
       break;
-    }
     case SDL_EVENT_WINDOW_EXPOSED:
       expose = true;
       break;
@@ -703,6 +938,7 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
         case SDLK_PAGEDOWN: session.scroll_by_code(false, 3U); break;
         default: break;
       }
+      expose = true;
       break;
     case SDL_EVENT_MOUSE_WHEEL: {
       // SDL-only, as above: one line-scroll request per wheel notch.
@@ -717,6 +953,7 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
            ++step) {
         session.scroll_by_code(true, horizontal > 0 ? 1U : 0U);
       }
+      expose = true;
       break;
     }
     default:
@@ -740,6 +977,8 @@ int run_window(const Options& options) {
       audio ? &*audio : nullptr);
   const auto [width, height] = window.client_size();
   session.resize(width, height);
+  WindowModalSource modal(window, session);
+  session.set_input_source(&modal);
   // WinMain plays WAVE/20000 right before the new/load startup path.
   session.play_startup_sound();
   start_tower(session, options);
@@ -754,14 +993,18 @@ int run_window(const Options& options) {
     if (SDL_WaitEventTimeout(
             &event, static_cast<Sint32>(session.milliseconds_until_due()))) {
       running = handle_event(event, session, expose, activation);
-      while (running && SDL_PollEvent(&event)) {
+      while (running && !modal.quit_requested() && SDL_PollEvent(&event)) {
         running = handle_event(event, session, expose, activation);
       }
     }
-    if (!running) break;
+    if (!running || modal.quit_requested()) break;
     session.set_window_activation(activation.active, activation.iconic);
-    if (session.run_idle_pass() || expose) window.present(session.main_raster());
+    if (session.run_idle_pass() || expose) {
+      window.present(simtower::sdl::compose_window(session));
+    }
+    window.set_cursor(session.cursor_id());
   }
+  session.set_input_source(nullptr);
   return 0;
 }
 
@@ -771,6 +1014,10 @@ int main(int argc, char** argv) {
   try {
     const auto options = parse_options(argc, argv);
     return options.headless() ? run_headless(options) : run_window(options);
+  } catch (const simtower::sdl::ScriptFailure& failure) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "simtower_sdl: input script: %s\n", failure.what());
+    return failure.exit_code();
   } catch (const std::exception& error) {
     std::fprintf(stderr, "simtower_sdl: %s\n", error.what());
     return 1;

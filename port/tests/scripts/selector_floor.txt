@@ -1,0 +1,14 @@
+# CLI end-to-end: Lobby, then Floor chosen in the 1050:05a7 selector (press
+# the Lobby group, move to row two, release), then one Floor cell on 11.
+# Window 608,518 is Main client 400,423: Floor cells 187..188, floor 11.
+# direct-build: 24,10,186@1
+# direct-build: 0,11,187@1
+# passes: 3
+pass 1
+click 608 550
+down 151 256
+move 151 287
+up 151 287
+expect-type 0
+click 608 518
+pass 3

@@ -1,5 +1,9 @@
 #pragma once
 
+// Test support shared by simtower_sdl (--scenario, --direct-build) and the
+// portable tests (idle_pass_tests, world_input_tests). It depends only on
+// the portable core, never on SDL or Win32.
+//
 // Deterministic test towers for headless regression runs (--scenario).
 // Built only through the portable construction functions, each followed by
 // the host's common success tail (1148:0163 rating callback, then the
@@ -15,7 +19,7 @@
 #include <string>
 #include <string_view>
 
-namespace simtower::sdl {
+namespace simtower {
 
 struct ScenarioSummary {
   // Successful construction commands by facility/command type.
@@ -34,7 +38,29 @@ ScenarioSummary build_scenario(std::string_view name,
                                const OriginalPartTable& part,
                                const OriginalYenTable& construction_costs);
 
+// --direct-build TYPE,FLOOR,LEFT[,VARIANT][,shift]: the constructor
+// 11f8:07d8 reaches for one placement, written from the constructor table
+// and independent of the shared input module, so a scripted click can be
+// compared with it. Floor and Lobby take a one-cell or four-cell span from
+// LEFT; Shift runs 11f8:09c1's replacement demolition over the footprint
+// first. The common success tail (1148:0163, then 0ed8) follows a success.
+struct DirectBuild {
+  std::uint16_t type{};
+  std::int16_t floor{};
+  std::uint16_t left{};
+  std::uint8_t variant{};
+  bool shift{};
+};
+
+// Returns whether the constructor succeeded. Throws std::runtime_error for
+// a type without a single-placement constructor.
+bool apply_direct_build(OriginalTdtDocument& document,
+                        const OriginalPartTable& part,
+                        const OriginalYenTable& construction_costs,
+                        const OriginalYenTable& rent_income,
+                        const DirectBuild& build);
+
 // Human-readable name for a facility/command type in summaries.
 [[nodiscard]] std::string scenario_type_name(int type);
 
-}  // namespace simtower::sdl
+}  // namespace simtower

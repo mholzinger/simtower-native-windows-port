@@ -1,0 +1,23 @@
+# The grouped Lobby/Floor/Stairs selector (1050:05a7): choose Floor, then
+# open it again and cancel with the right button, which keeps Floor.
+# Window coordinates for the default --size; the Command client starts at
+# 135,179 and the selector opens with the chosen row over the pressed cell
+# (rows Lobby, Floor, Stairs from window y 239 while Lobby is chosen).
+#
+#   simtower_sdl --input-script selector_cancel.txt --passes 4 --state-digest
+
+pass 1
+down 151 256
+move 151 287
+up 151 287
+expect-type 0
+expect-mode 3
+# Floor is now row two, so the popup opens one row higher (top 207).
+down 151 256
+rdown 151 256
+# The physical left button is still down; its release reaches Command,
+# which re-enters the cell without a selector and keeps the choice.
+up 151 256
+expect-type 0
+pass 4
+digest

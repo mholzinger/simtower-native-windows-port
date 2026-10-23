@@ -1,0 +1,10 @@
+# Reference for selector_inner_click.txt (not a test by itself): the same
+# gestures with each click split into its down and up lines.
+pass 1
+click 608 550
+down 151 256
+down 151 287
+up 151 287
+down 608 518
+up 608 518
+pass 3
