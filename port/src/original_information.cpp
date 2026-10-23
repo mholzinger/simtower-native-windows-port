@@ -1,4 +1,4 @@
-#include "original_information.hpp"
+#include "original_information_win32.hpp"
 
 #include "original_construction.hpp"
 #include "original_dialog.hpp"

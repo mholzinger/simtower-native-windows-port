@@ -12,7 +12,7 @@
 #include "original_find.hpp"
 #include "original_font.hpp"
 #include "original_info.hpp"
-#include "original_information.hpp"
+#include "original_information_win32.hpp"
 #include "original_map.hpp"
 #include "original_palette_frame.hpp"
 #include "original_people.hpp"
@@ -23,7 +23,7 @@
 #include "original_tdt_file.hpp"
 #include "original_time.hpp"
 #include "original_ui.hpp"
-#include "original_world.hpp"
+#include "original_world_win32.hpp"
 
 #include <windows.h>
 #include <commdlg.h>
