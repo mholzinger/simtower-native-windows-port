@@ -1,7 +1,5 @@
 #pragma once
 
-#include <windows.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -73,13 +71,5 @@ original_font_creation_spec(std::int16_t pixel_height,
     std::string_view face_name) noexcept {
   return face_name == "Arial";
 }
-
-// Process-global Win32 adapter for 1208:0a8d, 1208:0ba7, and 1208:0b6a.
-// Returned handles are borrowed from the original ten-entry bank and remain
-// valid until destroy_original_font_cache; callers must not delete them.
-void initialize_original_font_cache() noexcept;
-[[nodiscard]] HFONT original_cached_font(
-    std::int16_t requested_height) noexcept;
-void destroy_original_font_cache() noexcept;
 
 }  // namespace simtower

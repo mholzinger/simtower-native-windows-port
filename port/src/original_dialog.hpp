@@ -10,6 +10,10 @@
 
 namespace simtower {
 
+// Win16/Win32 DS_SETFONT dialog style bit (checked against <windows.h> in
+// original_dialog_win32.cpp).
+inline constexpr std::uint32_t kOriginalDialogStyleSetFont = 0x00000040U;
+
 // Exact five-entry AHOTTADLOGFILTER parallel message table at
 // 1068:00b6/0421.
 [[nodiscard]] constexpr bool original_event_dialog_handles_message(
@@ -161,11 +165,6 @@ enum class OriginalEventDialogAction {
     OriginalDialogScreenRect desktop,
     OriginalDialogScreenRect window,
     std::int32_t requested_left) noexcept;
-
-// Converts the Win16 ANSI template to a Win32 Unicode DLGTEMPLATE while
-// preserving styles, coordinates, identifiers, classes, text, and font.
-[[nodiscard]] std::vector<std::byte> build_native_dialog_template(
-    const OriginalDialog& dialog);
 
 // Exact facility-type switch at 1100:03ac. The returned resource is
 // DIALOG/(0x02ec + b3ac). Types handled by the separate Lobby/status path,

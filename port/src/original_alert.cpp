@@ -59,9 +59,11 @@ std::string format_original_alert(
   return result;
 }
 
-UINT original_alert_message_box_style(std::uint16_t button_mode) {
+OriginalAlertStyle original_alert_message_box_style(
+    std::uint16_t button_mode) {
   // 1208:0385-038f: ALRT[0] | MB_ICONEXCLAMATION | MB_SYSTEMMODAL.
-  return static_cast<UINT>(button_mode) | MB_ICONEXCLAMATION | MB_SYSTEMMODAL;
+  return static_cast<OriginalAlertStyle>(button_mode) |
+         kOriginalAlertIconExclamation | kOriginalAlertSystemModal;
 }
 
 int original_alert_result(std::uint16_t button_mode,
@@ -71,17 +73,17 @@ int original_alert_result(std::uint16_t button_mode,
   // preserves the original yes/no/cancel values as one/two/three.
   switch (button_mode) {
     case 1:
-      return message_box_result == IDOK ? 1 : 2;
+      return message_box_result == kOriginalAlertResultOk ? 1 : 2;
     case 3:
-      if (message_box_result == IDYES) {
+      if (message_box_result == kOriginalAlertResultYes) {
         return 1;
       }
-      if (message_box_result == IDNO) {
+      if (message_box_result == kOriginalAlertResultNo) {
         return 2;
       }
       return 3;
     case 4:
-      return message_box_result == IDYES ? 1 : 2;
+      return message_box_result == kOriginalAlertResultYes ? 1 : 2;
     case 0:
     case 2:
     default:
@@ -99,22 +101,6 @@ OriginalAlertPresentation prepare_original_alert(
       format_original_alert(alert.message_template, substitutions),
       original_alert_message_box_style(alert.button_mode),
   };
-}
-
-int show_original_alert(
-    HWND owner,
-    const OriginalResources& resources,
-    int resource_id,
-    const std::array<std::string_view, 4>& substitutions) {
-  // Native owner/resource boundary for the shared 11e0:0c9e wrapper and its
-  // 1208:0133/017a/0274/0369 resource/format/result helpers. The ALRT
-  // bytes are immutable spans in the self-contained resource pack, so the
-  // obsolete Win16 lock-count cleanup at 1208:0cb5 is unnecessary here.
-  const auto presentation =
-      prepare_original_alert(resources, resource_id, substitutions);
-  const int native_result = MessageBoxA(
-      owner, presentation.message.c_str(), "SimTower", presentation.style);
-  return original_alert_result(presentation.button_mode, native_result);
 }
 
 }  // namespace simtower

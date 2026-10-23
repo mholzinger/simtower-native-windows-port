@@ -16,32 +16,38 @@ Generated 2026-10-21 from `development` plus the audio header split.
 
 ## By source file
 
-Count of distinct imported Win32 functions per object file.
+Count of distinct imported Win32 functions per object file. Counts are from
+the 2026-10-21 import scan; file names are updated to the `*_win32.cpp` that
+holds each call after the step 4e-2 split (`toupper` is CRT and stays in the
+portable `original_resources_index.cpp`).
 
 | File | Count | Functions |
 | --- | ---: | --- |
 | `native_main.cpp` | 143 | AdjustWindowRectEx, AnimatePalette, BeginPaint, CallWindowProcW, CheckMenuItem, ClientToScreen, ClipCursor, CreateDialogIndirectParamW, CreateFontW, CreatePen, CreateSolidBrush, CreateWindowExW, ... (+131) |
-| `original_dtmp_runtime.cpp` | 22 | CreatePen, CreateSolidBrush, DeleteObject, FillRect, GetClientRect, GetDC, GetDlgItem, GetTextAlign, GetWindowRect, InflateRect, IsRectEmpty, IsWindow, ... (+10) |
-| `original_info.cpp` | 16 | CreatePen, CreateSolidBrush, DeleteObject, DrawTextA, FillRect, GetTextExtentPoint32A, IntersectClipRect, LineTo, MoveToEx, RestoreDC, SaveDC, SelectObject, ... (+4) |
-| `original_ui.cpp` | 10 | AppendMenuW, CreateAcceleratorTableW, CreateIconFromResourceEx, CreateMenu, CreatePopupMenu, CreateSolidBrush, DeleteObject, DestroyMenu, FillRect, MultiByteToWideChar |
+| `original_dtmp_runtime_win32.cpp` | 22 | CreatePen, CreateSolidBrush, DeleteObject, FillRect, GetClientRect, GetDC, GetDlgItem, GetTextAlign, GetWindowRect, InflateRect, IsRectEmpty, IsWindow, ... (+10) |
+| `original_info_win32.cpp` | 16 | CreatePen, CreateSolidBrush, DeleteObject, DrawTextA, FillRect, GetTextExtentPoint32A, IntersectClipRect, LineTo, MoveToEx, RestoreDC, SaveDC, SelectObject, ... (+4) |
+| `original_ui_win32.cpp` | 10 | AppendMenuW, CreateAcceleratorTableW, CreateIconFromResourceEx, CreateMenu, CreatePopupMenu, CreateSolidBrush, DeleteObject, DestroyMenu, FillRect, MultiByteToWideChar |
 | `original_audio.cpp` | 7 | waveOutClose, waveOutGetNumDevs, waveOutOpen, waveOutPrepareHeader, waveOutReset, waveOutUnprepareHeader, waveOutWrite |
-| `original_resources.cpp` | 6 | FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource, toupper |
-| `original_palette_frame.cpp` | 6 | CreateSolidBrush, DeleteObject, FillRect, FrameRect, GetStockObject, GetSysColor |
-| `original_information.cpp` | 5 | CreateSolidBrush, DeleteObject, FillRect, SetStretchBltMode, StretchDIBits |
-| `original_font.cpp` | 5 | CreateFontA, DeleteObject, EnumFontsA, GetDC, ReleaseDC |
-| `original_dib.cpp` | 3 | SetDIBitsToDevice, SetStretchBltMode, StretchDIBits |
-| `original_world.cpp` | 2 | CreatePalette, SetDIBitsToDevice |
-| `original_dialog.cpp` | 1 | MultiByteToWideChar |
-| `original_command_palette.cpp` | 1 | SetDIBitsToDevice |
-| `original_alert.cpp` | 1 | MessageBoxA |
+| `original_resources_win32.cpp` | 5 | FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource |
+| `original_palette_frame_win32.cpp` | 6 | CreateSolidBrush, DeleteObject, FillRect, FrameRect, GetStockObject, GetSysColor |
+| `original_information_win32.cpp` | 5 | CreateSolidBrush, DeleteObject, FillRect, SetStretchBltMode, StretchDIBits |
+| `original_font_win32.cpp` | 5 | CreateFontA, DeleteObject, EnumFontsA, GetDC, ReleaseDC |
+| `original_dib_win32.cpp` | 3 | SetDIBitsToDevice, SetStretchBltMode, StretchDIBits |
+| `original_world_win32.cpp` | 2 | CreatePalette, SetDIBitsToDevice |
+| `original_dialog_win32.cpp` | 1 | MultiByteToWideChar |
+| `original_command_palette_win32.cpp` | 1 | SetDIBitsToDevice |
+| `original_alert_win32.cpp` | 1 | MessageBoxA |
 
 ## Portable today (no Win32 headers)
 
-These compile with Apple clang (`-std=c++20`) after the audio header split:
-construction, dtmp, elevator_control, finance, people, simulation, tables, tdt, tdt_file, wave.
+These compile with Apple clang (`-std=c++20`) after the step 4e-2 splits:
+about, alert, audio_rules, command_palette, construction, dialog, dib, dtmp, dtmp_runtime,
+elevator_control, finance, find, info, information, map, people, resources_index, simulation,
+startup, tables, tdt, tdt_file, ui, wave, world.
 
-Still Win32-bound: native_main, about, alert, audio (device), command_palette, dialog, dib,
-dtmp_runtime, find, font, info, information, map, palette_frame, resources, startup, ui, world.
+Win32 host files (intentionally Win32-bound): native_main, audio (waveOut device), and every
+`*_win32.cpp` (alert, command_palette, dialog, dib, dtmp_runtime, font, info, information,
+palette_frame, resources, ui, world).
 
 ## Full function lists by DLL
 

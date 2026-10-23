@@ -8,7 +8,7 @@
 #include <string>
 
 // Portable lookup over the packed resources; the Win32 module loader is in
-// original_resources.cpp.
+// original_resources_win32.cpp.
 namespace simtower {
 namespace {
 

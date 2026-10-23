@@ -107,7 +107,7 @@ game core (portable today)        presentation logic (to make portable)
   buttons or owner-draw controls. Modal dialogs become a nested event loop
   run by the same pump, preserving the existing "modal locks Main input"
   rule (N:497).
-- **Fonts.** The port probes for Arial then MS Sans Serif (`original_font.cpp`).
+- **Fonts.** The port probes for Arial then MS Sans Serif (`original_font_win32.cpp`).
   The SDL3 build needs a font source; options: (a) rasterize a bundled
   metric-compatible free font, (b) use the platform's installed fonts, or
   (c) extract bitmap fonts from a user-supplied Windows install. Open

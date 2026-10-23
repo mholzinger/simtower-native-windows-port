@@ -8,24 +8,31 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(simtower_port_core STATIC
   src/original_about.cpp
   src/original_alert.cpp
+  src/original_alert_win32.cpp
   src/original_audio.cpp
   src/original_audio_rules.cpp
   src/original_command_palette.cpp
+  src/original_command_palette_win32.cpp
   src/original_construction.cpp
   src/original_dialog.cpp
+  src/original_dialog_win32.cpp
   src/original_dib.cpp
+  src/original_dib_win32.cpp
   src/original_dtmp.cpp
   src/original_dtmp_runtime.cpp
+  src/original_dtmp_runtime_win32.cpp
   src/original_elevator_control.cpp
   src/original_finance.cpp
   src/original_find.cpp
-  src/original_font.cpp
+  src/original_font_win32.cpp
   src/original_info.cpp
+  src/original_info_win32.cpp
   src/original_information.cpp
+  src/original_information_win32.cpp
   src/original_map.cpp
-  src/original_palette_frame.cpp
+  src/original_palette_frame_win32.cpp
   src/original_people.cpp
-  src/original_resources.cpp
+  src/original_resources_win32.cpp
   src/original_resources_index.cpp
   src/original_simulation.cpp
   src/original_startup.cpp
@@ -33,6 +40,7 @@ add_library(simtower_port_core STATIC
   src/original_tdt.cpp
   src/original_tdt_file.cpp
   src/original_ui.cpp
+  src/original_ui_win32.cpp
   src/original_wave.cpp
   src/original_world.cpp
   src/original_world_win32.cpp

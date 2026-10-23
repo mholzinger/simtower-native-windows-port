@@ -1,7 +1,5 @@
 #pragma once
 
-#include <windows.h>
-
 #include <cstdint>
 
 namespace simtower {
@@ -47,10 +45,5 @@ original_palette_frame_hit_test(int x, int y) noexcept {
              ? OriginalPaletteFrameHit::close
              : OriginalPaletteFrameHit::drag;
 }
-
-// Exact active/inactive eight-pixel frame painter at 1078:00c6. Active uses
-// COLOR_ACTIVECAPTION plus a white close square; inactive uses a white bar and
-// a one-pixel black outline around the close square.
-void draw_original_palette_frame(HDC destination, int width, bool active);
 
 }  // namespace simtower

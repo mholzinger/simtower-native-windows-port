@@ -1,6 +1,6 @@
 #include "original_resources.hpp"
 #include "original_tables.hpp"
-#include "original_ui.hpp"
+#include "original_ui_win32.hpp"
 
 #include <cassert>
 

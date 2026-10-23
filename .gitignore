@@ -1,8 +1,10 @@
 # Supplied game media and derived copyrighted assets
 /original/
+/original
 /analysis/manuals/
 /release-native/
 /port/generated/
+/port/generated
 *.exe
 *.dll
 *.com

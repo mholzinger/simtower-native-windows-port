@@ -1,15 +1,50 @@
 #pragma once
 
-#include <windows.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <span>
 
 namespace simtower {
 
+// Portable layout mirrors of the Win32 BITMAPINFOHEADER, RGBQUAD, and
+// BITMAPINFO structures, keeping the Win32 field names. Resource bytes are
+// reinterpreted in place exactly as before; original_dib_win32.cpp pins the
+// size and field offsets against the Win32 SDK. LONG is 32-bit on Windows, so
+// the signed fields use std::int32_t rather than long.
+struct OriginalRgbQuad {
+  std::uint8_t rgbBlue;
+  std::uint8_t rgbGreen;
+  std::uint8_t rgbRed;
+  std::uint8_t rgbReserved;
+};
+
+struct OriginalBitmapInfoHeader {
+  std::uint32_t biSize;
+  std::int32_t biWidth;
+  std::int32_t biHeight;
+  std::uint16_t biPlanes;
+  std::uint16_t biBitCount;
+  std::uint32_t biCompression;
+  std::uint32_t biSizeImage;
+  std::int32_t biXPelsPerMeter;
+  std::int32_t biYPelsPerMeter;
+  std::uint32_t biClrUsed;
+  std::uint32_t biClrImportant;
+};
+
+struct OriginalBitmapInfo {
+  OriginalBitmapInfoHeader bmiHeader;
+  OriginalRgbQuad bmiColors[1];
+};
+
+// BI_RGB.
+inline constexpr std::uint32_t kOriginalDibCompressionRgb = 0U;
+
+static_assert(sizeof(OriginalBitmapInfoHeader) == 40);
+static_assert(sizeof(OriginalRgbQuad) == 4);
+
 struct OriginalDibView {
-  const BITMAPINFO* info = nullptr;
+  const OriginalBitmapInfo* info = nullptr;
   std::span<const std::byte> pixels{};
   std::int32_t width = 0;
   std::int32_t height = 0;
@@ -71,38 +106,5 @@ struct OriginalOpaqueBlitPlan {
 // BITMAPINFOHEADER, its palette, then packed DIB scanlines.
 [[nodiscard]] OriginalDibView original_dib_view(
     std::span<const std::byte> resource);
-
-// Native SetDIBitsToDevice equivalent of original routine 1208:0529.
-void draw_original_dib(HDC destination,
-                       std::span<const std::byte> resource,
-                       int x,
-                       int y);
-
-// Source rectangle is expressed in the original bitmap's top-left client
-// coordinates. This is the native partial-blit equivalent needed by the
-// Finance dialog's BITMAP/500 -> BITMAP/501 pressed-button transition.
-void draw_original_dib_region(HDC destination,
-                              std::span<const std::byte> resource,
-                              int destination_x,
-                              int destination_y,
-                              int source_left,
-                              int source_top,
-                              int width,
-                              int height);
-
-// WinGStretchBlt/WinGBitBlt-equivalent source-region path used by the
-// original Person Information portrait painter at 1100:364a through its
-// direct 1100:37a9/37d1 calls. Source coordinates remain in top-left DIB
-// space while destination dimensions may differ.
-void draw_original_dib_region_scaled(HDC destination,
-                                     std::span<const std::byte> resource,
-                                     int destination_x,
-                                     int destination_y,
-                                     int destination_width,
-                                     int destination_height,
-                                     int source_left,
-                                     int source_top,
-                                     int source_width,
-                                     int source_height);
 
 }  // namespace simtower

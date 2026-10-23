@@ -8,6 +8,7 @@
 #include <array>
 #include <bit>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -37,7 +38,7 @@ struct IndexedDib {
       return 0x00ffffffU;
     }
     const auto index = sample_index(x, y);
-    const RGBQUAD color = view.info->bmiColors[index];
+    const OriginalRgbQuad color = view.info->bmiColors[index];
     return (static_cast<std::uint32_t>(color.rgbRed) << 16U) |
            (static_cast<std::uint32_t>(color.rgbGreen) << 8U) |
            static_cast<std::uint32_t>(color.rgbBlue);

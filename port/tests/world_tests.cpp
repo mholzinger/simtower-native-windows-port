@@ -3,7 +3,11 @@
 #include "original_map.hpp"
 #include "original_resources.hpp"
 #include "original_tdt.hpp"
+#include "original_world.hpp"
+
+#ifdef _WIN32
 #include "original_world_win32.hpp"
+#endif
 
 #include <algorithm>
 #include <bit>
@@ -43,7 +47,7 @@ std::uint32_t dib_pixel(std::span<const std::byte> resource, int x, int y) {
   const int source_y = dib.height > 0 ? height - 1 - y : y;
   const auto index = std::to_integer<std::uint8_t>(
       dib.pixels[static_cast<std::size_t>(source_y) * row_bytes + x]);
-  const RGBQUAD color = dib.info->bmiColors[index];
+  const simtower::OriginalRgbQuad color = dib.info->bmiColors[index];
   return (static_cast<std::uint32_t>(color.rgbRed) << 16U) |
          (static_cast<std::uint32_t>(color.rgbGreen) << 8U) |
          static_cast<std::uint32_t>(color.rgbBlue);
@@ -378,6 +382,7 @@ int main(int argc, char** argv) {
           std::array<std::uint8_t, 4>{0x56U, 0x34U, 0x12U, 0x00U}));
   assert((logical_entries[255] ==
           simtower::OriginalLogicalPaletteEntry{}));
+#ifdef _WIN32
   // Direct 1020:0f4f coverage: production and this test pass the recovered
   // 0x0300/256 LOGPALETTE with all 1,024 entry bytes through CreatePalette.
   // GetPaletteEntries proves that the resulting GDI object retained every
@@ -396,6 +401,7 @@ int main(int argc, char** argv) {
     assert(native_entries[index].peFlags == logical_entries[index].flags);
   }
   assert(DeleteObject(logical_palette));
+#endif  // _WIN32
 
   // Direct 1208:07d5 coverage: the shared WinG allocator negates the signed
   // height for top-down storage, rounds 8-bit rows to DWORD boundaries,

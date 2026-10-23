@@ -3,8 +3,6 @@
 #include "original_palette_frame.hpp"
 #include "original_resources.hpp"
 
-#include <windows.h>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -312,10 +310,5 @@ void original_command_select_group_choice(
     const OriginalCommandGroup& group,
     std::uint16_t selected_icon_plus_one,
     bool build_enabled = true);
-
-void draw_original_command_raster(HDC destination,
-                                  const OriginalCommandRaster& raster,
-                                  int x = 0,
-                                  int y = kOriginalCommandPaintOffsetY);
 
 }  // namespace simtower

@@ -1,10 +1,16 @@
-#include "original_font.hpp"
+#include "original_font_win32.hpp"
 
 #include <array>
 #include <string_view>
 
 namespace simtower {
 namespace {
+
+// The portable creation spec in original_font.hpp uses these literal values.
+static_assert(DEFAULT_CHARSET == 1);
+static_assert(OUT_DEFAULT_PRECIS == 0);
+static_assert(OUT_TT_ONLY_PRECIS == 7);
+static_assert(LF_FACESIZE == 32);
 
 struct OriginalFontCache {
   bool initialized{};
