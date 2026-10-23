@@ -5,84 +5,108 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Portable core: builds on every platform. The Win32 host modules
+# (*_win32, the waveOut audio runtime) are added below on Windows only.
 add_library(simtower_port_core STATIC
   src/original_about.cpp
   src/original_alert.cpp
-  src/original_alert_win32.cpp
-  src/original_audio.cpp
   src/original_audio_rules.cpp
   src/original_command_palette.cpp
-  src/original_command_palette_win32.cpp
   src/original_construction.cpp
   src/original_dialog.cpp
-  src/original_dialog_win32.cpp
   src/original_dib.cpp
-  src/original_dib_win32.cpp
   src/original_dtmp.cpp
   src/original_dtmp_runtime.cpp
-  src/original_dtmp_runtime_win32.cpp
   src/original_elevator_control.cpp
   src/original_finance.cpp
   src/original_find.cpp
-  src/original_font_win32.cpp
   src/original_info.cpp
-  src/original_info_win32.cpp
   src/original_information.cpp
-  src/original_information_win32.cpp
   src/original_map.cpp
-  src/original_palette_frame_win32.cpp
   src/original_people.cpp
-  src/original_resources_win32.cpp
   src/original_resources_index.cpp
   src/original_simulation.cpp
   src/original_startup.cpp
+  src/original_startup_data.cpp
   src/original_tables.cpp
   src/original_tdt.cpp
   src/original_tdt_file.cpp
   src/original_ui.cpp
-  src/original_ui_win32.cpp
   src/original_wave.cpp
   src/original_world.cpp
-  src/original_world_win32.cpp
 )
 target_include_directories(simtower_port_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/generated
 )
-target_compile_definitions(simtower_port_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(simtower_port_core PUBLIC user32 gdi32 winmm)
+if(WIN32)
+  target_compile_definitions(simtower_port_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_sources(simtower_port_core PRIVATE
+    src/original_alert_win32.cpp
+    src/original_audio.cpp
+    src/original_command_palette_win32.cpp
+    src/original_dialog_win32.cpp
+    src/original_dib_win32.cpp
+    src/original_dtmp_runtime_win32.cpp
+    src/original_font_win32.cpp
+    src/original_info_win32.cpp
+    src/original_information_win32.cpp
+    src/original_palette_frame_win32.cpp
+    src/original_resources_win32.cpp
+    src/original_ui_win32.cpp
+    src/original_world_win32.cpp
+  )
+  target_link_libraries(simtower_port_core PUBLIC user32 gdi32 winmm)
 
-find_program(SIMTOWER_WINDRES NAMES windres HINTS C:/Strawberry/c/bin REQUIRED)
-set(SIMTOWER_RESOURCE_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/original_resources.res.o)
-set(SIMTOWER_RESOURCE_PACK
-    ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack)
-set(SIMTOWER_HELP_FILE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../original/extracted/MAXIS/SIMTOWER/SIMTOWER.HLP)
-file(TO_CMAKE_PATH "${SIMTOWER_RESOURCE_PACK}" SIMTOWER_RESOURCE_PACK_RC)
-file(TO_CMAKE_PATH "${SIMTOWER_HELP_FILE}" SIMTOWER_HELP_FILE_RC)
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.rc.in
-  ${CMAKE_CURRENT_BINARY_DIR}/original_resources.rc
-  @ONLY
-)
-add_custom_command(
-  OUTPUT ${SIMTOWER_RESOURCE_OBJECT}
-  COMMAND ${SIMTOWER_WINDRES} -O coff
-          ${CMAKE_CURRENT_BINARY_DIR}/original_resources.rc
-          ${SIMTOWER_RESOURCE_OBJECT}
-  DEPENDS
+  find_program(SIMTOWER_WINDRES NAMES windres HINTS C:/Strawberry/c/bin REQUIRED)
+  set(SIMTOWER_RESOURCE_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/original_resources.res.o)
+  set(SIMTOWER_RESOURCE_PACK
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack)
+  set(SIMTOWER_HELP_FILE
+      ${CMAKE_CURRENT_SOURCE_DIR}/../original/extracted/MAXIS/SIMTOWER/SIMTOWER.HLP)
+  file(TO_CMAKE_PATH "${SIMTOWER_RESOURCE_PACK}" SIMTOWER_RESOURCE_PACK_RC)
+  file(TO_CMAKE_PATH "${SIMTOWER_HELP_FILE}" SIMTOWER_HELP_FILE_RC)
+  configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.rc.in
-    ${SIMTOWER_RESOURCE_PACK}
-    ${SIMTOWER_HELP_FILE}
-  VERBATIM
-)
-set_source_files_properties(${SIMTOWER_RESOURCE_OBJECT} PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+    ${CMAKE_CURRENT_BINARY_DIR}/original_resources.rc
+    @ONLY
+  )
+  add_custom_command(
+    OUTPUT ${SIMTOWER_RESOURCE_OBJECT}
+    COMMAND ${SIMTOWER_WINDRES} -O coff
+            ${CMAKE_CURRENT_BINARY_DIR}/original_resources.rc
+            ${SIMTOWER_RESOURCE_OBJECT}
+    DEPENDS
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.rc.in
+      ${SIMTOWER_RESOURCE_PACK}
+      ${SIMTOWER_HELP_FILE}
+    VERBATIM
+  )
+  set_source_files_properties(${SIMTOWER_RESOURCE_OBJECT} PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
 
-add_executable(simtower WIN32 src/native_main.cpp ${SIMTOWER_RESOURCE_OBJECT})
-target_link_libraries(simtower PRIVATE simtower_port_core comdlg32)
-target_compile_definitions(simtower PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-if(MINGW)
-  target_link_options(simtower PRIVATE -static -static-libgcc -static-libstdc++)
+  add_executable(simtower WIN32 src/native_main.cpp ${SIMTOWER_RESOURCE_OBJECT})
+  target_link_libraries(simtower PRIVATE simtower_port_core comdlg32)
+  target_compile_definitions(simtower PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  if(MINGW)
+    target_link_options(simtower PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+endif()
+
+# SDL3 frontend (port/sdl). On by default off Windows; the Windows build
+# keeps the Win32 host and can opt in once an SDL3 package is available.
+# A non-Windows configure therefore requires an SDL3 CMake package: CI jobs
+# for Linux and macOS must install SDL3 or pass -DSIMTOWER_BUILD_SDL=OFF.
+if(WIN32)
+  set(SIMTOWER_BUILD_SDL_DEFAULT OFF)
+else()
+  set(SIMTOWER_BUILD_SDL_DEFAULT ON)
+endif()
+option(SIMTOWER_BUILD_SDL "Build the SDL3 frontend simtower_sdl"
+       ${SIMTOWER_BUILD_SDL_DEFAULT})
+if(SIMTOWER_BUILD_SDL)
+  find_package(SDL3 REQUIRED CONFIG)
+  add_executable(simtower_sdl sdl/sdl_main.cpp sdl/sdl_session.cpp)
+  target_link_libraries(simtower_sdl PRIVATE simtower_port_core SDL3::SDL3)
 endif()
 
 include(CTest)
@@ -90,27 +114,30 @@ if(BUILD_TESTING)
   add_executable(simtower_native_save_fixture tests/native_save_fixture.cpp)
   target_link_libraries(simtower_native_save_fixture PRIVATE simtower_port_core)
 
-  # Manual hardware smoke: it uses the production waveOut transaction but
-  # submits a same-format digital-silence buffer so validation is inaudible.
-  # It is intentionally not registered in CTest because a PCM endpoint is a
-  # machine capability, not a deterministic headless prerequisite.
-  add_executable(simtower_native_pcm_smoke tests/native_pcm_smoke.cpp)
-  target_link_libraries(simtower_native_pcm_smoke PRIVATE simtower_port_core)
+  # Win32-only suites: waveOut, the PE resource loader and the GDI paths.
+  if(WIN32)
+    # Manual hardware smoke: it uses the production waveOut transaction but
+    # submits a same-format digital-silence buffer so validation is inaudible.
+    # It is intentionally not registered in CTest because a PCM endpoint is a
+    # machine capability, not a deterministic headless prerequisite.
+    add_executable(simtower_native_pcm_smoke tests/native_pcm_smoke.cpp)
+    target_link_libraries(simtower_native_pcm_smoke PRIVATE simtower_port_core)
 
-  add_executable(simtower_resource_tests tests/resource_tests.cpp)
-  target_link_libraries(simtower_resource_tests PRIVATE simtower_port_core)
-  add_test(
-    NAME simtower_resource_tests
-    COMMAND simtower_resource_tests ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
-  )
+    add_executable(simtower_resource_tests tests/resource_tests.cpp)
+    target_link_libraries(simtower_resource_tests PRIVATE simtower_port_core)
+    add_test(
+      NAME simtower_resource_tests
+      COMMAND simtower_resource_tests ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+    )
 
-  add_executable(
-    simtower_embedded_resource_tests
-    tests/embedded_resource_tests.cpp
-    ${SIMTOWER_RESOURCE_OBJECT}
-  )
-  target_link_libraries(simtower_embedded_resource_tests PRIVATE simtower_port_core)
-  add_test(NAME simtower_embedded_resource_tests COMMAND simtower_embedded_resource_tests)
+    add_executable(
+      simtower_embedded_resource_tests
+      tests/embedded_resource_tests.cpp
+      ${SIMTOWER_RESOURCE_OBJECT}
+    )
+    target_link_libraries(simtower_embedded_resource_tests PRIVATE simtower_port_core)
+    add_test(NAME simtower_embedded_resource_tests COMMAND simtower_embedded_resource_tests)
+  endif()
 
   add_executable(simtower_tdt_tests tests/tdt_tests.cpp)
   target_link_libraries(simtower_tdt_tests PRIVATE simtower_port_core)
@@ -227,9 +254,7 @@ if(BUILD_TESTING)
   # These executables intentionally use assert() as their test primitive.
   # Release configurations define NDEBUG globally; removing it per test keeps
   # both the checks and any setup calls inside them active.
-  foreach(test_target IN ITEMS
-      simtower_resource_tests
-      simtower_embedded_resource_tests
+  set(SIMTOWER_ASSERT_TESTS
       simtower_tdt_tests
       simtower_simulation_tests
       simtower_people_tests
@@ -242,6 +267,12 @@ if(BUILD_TESTING)
       simtower_find_tests
       simtower_about_tests
       simtower_elevator_control_tests)
+  if(WIN32)
+    list(APPEND SIMTOWER_ASSERT_TESTS
+         simtower_resource_tests
+         simtower_embedded_resource_tests)
+  endif()
+  foreach(test_target IN LISTS SIMTOWER_ASSERT_TESTS)
     if(MSVC)
       target_compile_options(${test_target} PRIVATE /UNDEBUG)
     else()
