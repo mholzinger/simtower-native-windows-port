@@ -11,6 +11,7 @@
 #include "original_finance.hpp"
 #include "original_find.hpp"
 #include "original_font_win32.hpp"
+#include "original_idle_pass.hpp"
 #include "original_info_win32.hpp"
 #include "original_information_win32.hpp"
 #include "original_map.hpp"
@@ -416,8 +417,6 @@ void consume_original_person_family_dispatches(
         dispatches);
 void consume_original_person_family_dispatch(
     const simtower::OriginalPersonFamilyDispatchResult& dispatch);
-void consume_original_person_host_requests(
-    const std::vector<simtower::OriginalPersonHostRequest>& requests);
 bool advance_original_main_surface_state(
     simtower::OriginalMainSurfacePass pass);
 void rebuild_original_main_backing(
@@ -425,7 +424,8 @@ void rebuild_original_main_backing(
     bool advance_state = true,
     bool full_frame_surface_dirty = false);
 void present_original_main_backing_direct();
-void present_original_info_surface_direct();
+void present_original_info_surface_direct(
+    simtower::OriginalIdleInfoLatches& latches);
 void request_original_main_surface_pass(
     simtower::OriginalMainSurfacePass pass,
     bool synchronous);
@@ -980,20 +980,6 @@ void play_original_event_sounds(
   }
 }
 
-bool apply_original_event_damage(
-    std::span<const simtower::OriginalFacilityDamageRequest> requests) {
-  if (!g_tower_document || requests.empty()) {
-    return false;
-  }
-  const auto result = simtower::apply_original_facility_damage_sequence(
-      *g_tower_document, g_rent_income, requests);
-  play_original_event_sounds(result.sound_requests);
-  for (const auto code : result.notification_codes) {
-    show_original_notification_status(code);
-  }
-  return result.changed != 0U;
-}
-
 void focus_original_event_coordinate(std::int16_t floor, std::int16_t x) {
   RECT client{};
   GetClientRect(g_main_window, &client);
@@ -1014,138 +1000,287 @@ void set_original_fire_menu_enabled(bool enabled) {
   }
 }
 
-bool consume_original_bomb_action(
-    const simtower::OriginalEventActionResult& action) {
-  if (!g_tower_document) {
-    return false;
+// Win32 host of the shared idle pass (original_idle_pass.hpp). Every hook
+// performs exactly the Win32 calls the pass made inline at that point,
+// including each GetTickCount read and 11e0:0e84 audio pump.
+class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
+ public:
+  std::uint32_t now_ms() override { return GetTickCount(); }
+  std::uint32_t coarse_tick(std::uint32_t now_ms) override {
+    return original_runtime_coarse_tick(now_ms);
   }
-  bool changed = action.changed;
-  const auto host_plan = simtower::original_bomb_event_host_plan(action);
-  for (const auto operation : host_plan.sequence()) {
-    switch (operation) {
-      case simtower::OriginalEventHostOperation::play_sounds:
-        play_original_event_sounds(action.sound_requests);
-        break;
-      case simtower::OriginalEventHostOperation::apply_damage:
-        changed = apply_original_event_damage(action.damage_requests) ||
-                  changed;
-        break;
-      case simtower::OriginalEventHostOperation::dispatch_security:
-        simtower::dispatch_original_security_response(
-            *g_tower_document, action.security_dispatch_flags);
-        changed = true;
-        break;
-      case simtower::OriginalEventHostOperation::focus_coordinate:
-        focus_original_event_coordinate(action.focus_floor, action.focus_x);
-        break;
-      case simtower::OriginalEventHostOperation::show_dialog:
-        (void)run_original_event_dialog(action.dialog);
-        break;
-      case simtower::OriginalEventHostOperation::complete_deferred_action:
-        simtower::complete_original_event_action(
-            *g_tower_document, action.deferred_completion);
-        changed = true;
-        break;
-      case simtower::OriginalEventHostOperation::update_fire_menu:
-        break;
+
+  void expire_find_marker() override {
+    auto expired_marker = g_find_marker;
+    if (simtower::expire_original_find_marker(
+            expired_marker,
+            original_runtime_coarse_tick())) {
+      g_find_marker = expired_marker;
+      apply_original_construction_toggle();
     }
   }
-  return changed;
-}
-
-bool consume_original_fire_action(
-    const simtower::OriginalEventActionResult& action) {
-  if (!g_tower_document) {
-    return false;
+  bool build_mode_enabled() override { return g_build_mode_enabled; }
+  bool elevator_finger_capture_active() override {
+    return g_elevator_shaft_drag.capture_active;
   }
-  bool changed = action.changed;
-  const auto host_plan = simtower::original_fire_event_host_plan(action);
-  for (const auto operation : host_plan.sequence()) {
-    switch (operation) {
-      case simtower::OriginalEventHostOperation::apply_damage:
-        changed = apply_original_event_damage(action.damage_requests) ||
-                  changed;
-        break;
-      case simtower::OriginalEventHostOperation::play_sounds:
-        play_original_event_sounds(action.sound_requests);
-        break;
-      case simtower::OriginalEventHostOperation::update_fire_menu:
-        set_original_fire_menu_enabled(*action.fire_menu_enabled);
-        break;
-      case simtower::OriginalEventHostOperation::show_dialog:
-        (void)run_original_event_dialog(action.dialog);
-        break;
-      case simtower::OriginalEventHostOperation::complete_deferred_action:
-        simtower::complete_original_event_action(
-            *g_tower_document, action.deferred_completion);
-        changed = true;
-        break;
-      case simtower::OriginalEventHostOperation::dispatch_security:
-      case simtower::OriginalEventHostOperation::focus_coordinate:
-        break;
+  bool fast_mode_enabled() override { return g_fast_mode_enabled; }
+  bool elevator_isolation_active() override {
+    return g_elevator_control_context &&
+           g_elevator_control_context->state.isolation_active;
+  }
+  bool ambient_sound_enabled() override {
+    return g_audio && g_audio->sound_enabled();
+  }
+  simtower::OriginalIdleView main_view() override {
+    RECT client{};
+    GetClientRect(g_main_window, &client);
+    const auto view = current_original_view(g_main_window);
+    return {view.x, view.y, client.right - client.left,
+            client.bottom - client.top};
+  }
+  bool step_effect_palette() override {
+    return step_native_effect_palette(
+        *g_tower_document, g_effects_animation_enabled, GetTickCount());
+  }
+  bool refresh_time_palette() override {
+    return refresh_native_time_palette(*g_tower_document);
+  }
+  bool advance_visible_people() override {
+    return advance_original_main_surface_state(
+        simtower::OriginalMainSurfacePass::simulation_frame);
+  }
+  std::uint16_t event_dialog(
+      const simtower::OriginalEventDialogRequest& dialog,
+      simtower::OriginalIdleDialog) override {
+    return static_cast<std::uint16_t>(run_original_event_dialog(dialog));
+  }
+  void focus(std::int16_t floor, std::int16_t x) override {
+    focus_original_event_coordinate(floor, x);
+  }
+  void notification_status(std::uint16_t code) override {
+    show_original_notification_status(code);
+  }
+  void income_status(std::uint16_t code) override {
+    show_original_income_status(code);
+  }
+  void expire_info_status() override {
+    if (simtower::expire_original_info_status(
+            g_info_status, original_runtime_coarse_tick())) {
+      invalidate_original_info_status();
     }
   }
-  return changed;
+
+  void play_sound(std::int32_t resource,
+                  std::uint16_t repeat,
+                  std::uint16_t priority,
+                  simtower::OriginalIdleSound) override {
+    if (g_audio) {
+      (void)g_audio->play_resource(resource, repeat, priority,
+                                   GetTickCount());
+    }
+  }
+  void play_event_sounds(
+      std::span<const simtower::OriginalEventSoundRequest> requests)
+      override {
+    play_original_event_sounds(requests);
+  }
+  void stop_all_audio(bool force) override {
+    if (g_audio) g_audio->stop_all(force);
+  }
+  void fire_menu_enabled(bool enabled) override {
+    set_original_fire_menu_enabled(enabled);
+  }
+  void checkpoint(simtower::OriginalIdleCheckpoint) override {
+    original_runtime_audio_pump();
+  }
+
+  void idle_palette_changed() override {
+    invalidate_original_main_surface();
+    InvalidateRect(g_map_window, nullptr, FALSE);
+  }
+
+  void before_scheduler_step(bool sample_cursor) override {
+    if (sample_cursor) {
+      POINT cursor{};
+      if (GetCursorPos(&cursor) && ScreenToClient(g_main_window, &cursor)) {
+        // 1258:0256 passes the converted point even when it lies outside the
+        // client. 11f8:3c13 performs the later client intersection itself.
+        g_main_pointer.inside = true;
+        g_main_pointer.client_x = cursor.x;
+        g_main_pointer.client_y = cursor.y;
+      }
+    }
+    // 1090:03ab saves DS:77ac before either its preview-only derivation or
+    // its complete frame. A stationary point can still produce a different
+    // shape after tool, mode, or viewport state changes, so preserve the
+    // rectangle.
+    previous_preview_rect_ = g_original_main_preview_rect;
+  }
+
+  void preview_only_pass() override {
+    // 1090:03bf-0427 always restores/derives DS:77ac, then EQUALRECT alone
+    // decides whether 1158:0ae5 presents the changed rectangle. Keep this
+    // repaint out of the full-frame RNG/person-animation path.
+    const bool isolation_active =
+        g_elevator_control_context &&
+        g_elevator_control_context->state.isolation_active;
+    const auto restore =
+        simtower::original_construction_preview_restore_plan(
+            g_original_main_preview_scratch, isolation_active,
+            previous_preview_rect_.has_value());
+    run_original_runtime_audio_checkpoints(restore.audio_checkpoints);
+    if (restore.clear_previous_rectangle) {
+      g_original_main_preview_rect.reset();
+    }
+    const auto current_preview_rect = current_original_main_preview_rect();
+    const auto draw = simtower::original_construction_preview_draw_plan(
+        g_original_main_preview_scratch, g_build_mode_enabled,
+        g_command_mode);
+    const auto preview_presentation =
+        simtower::original_preview_only_presentation_plan(
+            previous_preview_rect_ == current_preview_rect);
+    if (preview_presentation.present_main_direct) {
+      // 1090:03fb-0427 owns a Main DC and calls 1158:0ae5 immediately;
+      // this is not a queued WM_PAINT. Rebuild the native RGB transport
+      // cache without presentation-state advancement, then synchronously
+      // present the changed result before the idle pass returns.
+      g_main_pending_surface_pass.reset();
+      rebuild_original_main_backing(
+          simtower::OriginalMainSurfacePass::preview_repaint, false);
+    } else {
+      g_original_main_preview_rect = current_preview_rect;
+    }
+    // 11f8:3c99/3cd2/3d19 surround the scratch capture and outline draw;
+    // all three still run when EQUALRECT later suppresses presentation.
+    run_original_runtime_audio_checkpoints(draw.audio_checkpoints);
+    if (preview_presentation.present_main_direct) {
+      present_original_main_backing_direct();
+    }
+  }
+
+  void begin_full_frame(bool day_changed) override {
+    g_main_pending_surface_pass.reset();
+    if (day_changed) {
+      // 1200:04d4-04fe synchronously repaints 1118:045d immediately after
+      // the day/calendar update, before the ordinary 1090 frame pass.
+      InvalidateRect(g_info_window, nullptr, FALSE);
+      UpdateWindow(g_info_window);
+    }
+  }
+
+  void bomb_ransom_paid() override { invalidate_original_info_status(); }
+
+  void rating_promoted_before_dialog(std::uint16_t) override {
+    g_tower_dirty = true;
+    InvalidateRect(g_info_window, nullptr, FALSE);
+    UpdateWindow(g_info_window);
+  }
+  void rating_promoted_after_dialog(std::uint16_t rating) override {
+    // 1140:010d(1) resets DS:783c to edit mode two before synchronously
+    // presenting the newly selected Command surface; it does not preserve
+    // the active construction tool and does not present or invalidate Map.
+    refresh_original_rating_command(rating, 1U);
+  }
+
+  void map_cadence_refresh() override {
+    InvalidateRect(g_map_window, nullptr, FALSE);
+    UpdateWindow(g_map_window);
+  }
+
+  void restore_preview() override {
+    const bool elevator_isolation_active =
+        g_elevator_control_context &&
+        g_elevator_control_context->state.isolation_active;
+    const auto preview_restore =
+        simtower::original_construction_preview_restore_plan(
+            g_original_main_preview_scratch, elevator_isolation_active,
+            previous_preview_rect_.has_value());
+    run_original_runtime_audio_checkpoints(
+        preview_restore.audio_checkpoints);
+    if (preview_restore.clear_previous_rectangle) {
+      g_original_main_preview_rect.reset();
+    }
+  }
+
+  bool render_full_frame(bool renderer_surface_dirty) override {
+    current_preview_rect_ = current_original_main_preview_rect();
+    const bool preview_changed =
+        previous_preview_rect_ != current_preview_rect_;
+    rebuild_original_main_backing(
+        simtower::OriginalMainSurfacePass::simulation_frame, false,
+        renderer_surface_dirty);
+    const auto preview_draw =
+        simtower::original_construction_preview_draw_plan(
+            g_original_main_preview_scratch, g_build_mode_enabled,
+            g_command_mode);
+    run_original_runtime_audio_checkpoints(preview_draw.audio_checkpoints);
+    return preview_changed;
+  }
+  void palette_recolor_rebuild() override {
+    rebuild_original_main_backing(
+        simtower::OriginalMainSurfacePass::palette_repaint, false);
+  }
+  void commit_full_frame_preview() override {
+    g_original_main_preview_rect = current_preview_rect_;
+  }
+  void palette_recolor_invalidate_map() override {
+    InvalidateRect(g_map_window, nullptr, FALSE);
+  }
+  void present_main_direct() override {
+    // Keep this out of WM_PAINT so exposure handling stays independent.
+    present_original_main_backing_direct();
+  }
+  void invalidate_command() override {
+    InvalidateRect(g_command_window, nullptr, FALSE);
+  }
+  void present_info_direct(simtower::OriginalIdleInfoLatches& latches)
+      override {
+    present_original_info_surface_direct(latches);
+  }
+  void final_effect_palette_changed() override {
+    rebuild_original_main_backing(
+        simtower::OriginalMainSurfacePass::palette_repaint, false);
+    present_original_main_backing_direct();
+    InvalidateRect(g_map_window, nullptr, FALSE);
+  }
+
+ private:
+  // Per-pass locals of the former inline pass: DS:77ac at entry, and the
+  // 1090:05ee rectangle committed after the simulation mirror resync.
+  decltype(g_original_main_preview_rect) previous_preview_rect_{};
+  decltype(g_original_main_preview_rect) current_preview_rect_{};
+};
+
+Win32IdlePassHost g_idle_pass_host;
+
+simtower::OriginalIdlePassContext original_idle_pass_context() {
+  return {g_tower_document ? &*g_tower_document : nullptr,
+          g_simulation_state,
+          g_native_fast_frame_tick,
+          g_elevator_transfer_visuals,
+          g_part,
+          g_rent_income,
+          g_maintenance_costs};
 }
 
+// Menu-command entry points (9000, 9002, 40008) to the shared boundaries.
 bool consume_original_fire_crew_resolution(
     const simtower::OriginalFireCrewResolution& resolution) {
-  if (!g_tower_document || !resolution.handled) {
-    return false;
-  }
-  if (resolution.followup_dialog.valid()) {
-    (void)run_original_event_dialog(resolution.followup_dialog);
-  }
-  if (resolution.security_dispatch_pending) {
-    simtower::dispatch_original_security_response(
-        *g_tower_document, resolution.security_dispatch_flags);
-  }
-  if (resolution.focus_requested) {
-    focus_original_event_coordinate(resolution.focus_floor,
-                                    resolution.focus_x);
-  }
-  if (resolution.fire_menu_enabled) {
-    set_original_fire_menu_enabled(*resolution.fire_menu_enabled);
-  }
-  return resolution.hired || resolution.security_dispatch_pending;
+  auto context = original_idle_pass_context();
+  return simtower::consume_original_fire_crew_resolution(
+      context, g_idle_pass_host, resolution);
 }
 
 bool run_original_bomb_offer_boundary() {
-  if (!g_tower_document) return false;
-  const auto offer = simtower::prepare_original_bomb_event(
-      *g_tower_document, g_part);
-  if (!offer.offered) return false;
-  const auto choice = static_cast<std::uint16_t>(
-      run_original_event_dialog(offer.dialog));
-  const auto resolution = simtower::resolve_original_bomb_event(
-      *g_tower_document, g_part, choice);
-  if (resolution.direct_wave_resource != 0 && g_audio) {
-    (void)g_audio->play_resource(
-        resolution.direct_wave_resource, 0, 4, GetTickCount());
-  }
-  if (resolution.paid) {
-    // 10c8:014f-016a plays WAVE/10015 before 1178:07e8 performs its direct
-    // Info balance paint. Paying never raises the active Bomb/world flag.
-    invalidate_original_info_status();
-  }
-  if (resolution.followup_dialog.valid()) {
-    (void)run_original_event_dialog(resolution.followup_dialog);
-  }
-  if (resolution.started) {
-    simtower::commit_original_bomb_event(*g_tower_document);
-  }
-  return resolution.started;
+  auto context = original_idle_pass_context();
+  return simtower::run_original_bomb_offer_boundary(context,
+                                                    g_idle_pass_host);
 }
 
 bool run_original_fire_offer_boundary() {
-  if (!g_tower_document) return false;
-  const auto fire = simtower::prepare_original_fire_event(
-      *g_tower_document, g_part, g_simulation_state.day_phase);
-  if (!fire.offered) return false;
-  (void)run_original_event_dialog(fire.dialog);
-  simtower::commit_original_fire_event(*g_tower_document, g_part);
-  focus_original_event_coordinate(fire.floor, fire.x);
-  return true;
+  auto context = original_idle_pass_context();
+  return simtower::run_original_fire_offer_boundary(context,
+                                                    g_idle_pass_host);
 }
 
 void run_original_idle_simulation() {
@@ -1201,639 +1336,13 @@ void run_original_idle_simulation() {
       break;
   }
 
-  // 1258:023a invokes 1020:00cb on every empty-queue pass, before both the
-  // Find-marker timeout and 1200:0196's six-coarse-tick (~96-ms) simulation
-  // gate. The
-  // original indexed palette changes in place; native direct rasters need an
-  // explicit repaint when this independent pass advances the palette.
-  if (g_tower_document &&
-      step_native_effect_palette(
-          *g_tower_document, g_effects_animation_enabled, GetTickCount())) {
-    invalidate_original_main_surface();
-    InvalidateRect(g_map_window, nullptr, FALSE);
-  }
+  // 1258:023a through 1090:03ab(1): the shared portable pass.
+  auto context = original_idle_pass_context();
+  const auto outcome =
+      simtower::run_original_idle_pass(context, g_idle_pass_host);
 
-  // 1258:0186 invokes 10e0:051d on every empty-queue pass, independently of
-  // whether the simulation clock advances. An active Map overlay exits via
-  // 11d0:0000; otherwise 1058:033c performs the ordinary construction toggle.
-  auto expired_marker = g_find_marker;
-  if (simtower::expire_original_find_marker(
-          expired_marker,
-          original_runtime_coarse_tick())) {
-    g_find_marker = expired_marker;
-    apply_original_construction_toggle();
-  }
-  if (!g_tower_document) {
-    finish_original_idle_audio_pass();
-    return;
-  }
-  const bool elevator_finger_capture_active =
-      g_elevator_shaft_drag.capture_active;
-  const auto idle_gate = simtower::original_idle_world_pass_plan(
-      g_build_mode_enabled, elevator_finger_capture_active, false);
-  if (!idle_gate.run_scheduler) {
-    finish_original_idle_audio_pass();
-    return;
-  }
-
-  if (idle_gate.sample_cursor) {
-    POINT cursor{};
-    if (GetCursorPos(&cursor) && ScreenToClient(g_main_window, &cursor)) {
-      // 1258:0256 passes the converted point even when it lies outside the
-      // client. 11f8:3c13 performs the later client intersection itself.
-      g_main_pointer.inside = true;
-      g_main_pointer.client_x = cursor.x;
-      g_main_pointer.client_y = cursor.y;
-    }
-  }
-  // 1090:03ab saves DS:77ac before either its preview-only derivation or its
-  // complete frame. A stationary point can still produce a different shape
-  // after tool, mode, or viewport state changes, so preserve the rectangle.
-  const auto previous_preview_rect = g_original_main_preview_rect;
-  simtower::OriginalSimulationStep step{};
-  const auto scheduler_now_ms = GetTickCount();
-  if (!g_fast_mode_enabled || simtower::native_fast_mode_frame_due(
-                                  g_native_fast_frame_tick,
-                                  scheduler_now_ms)) {
-    step = simtower::step_original_simulation(
-        g_simulation_state, *g_tower_document,
-        original_runtime_coarse_tick(scheduler_now_ms),
-        g_fast_mode_enabled);
-    if (g_fast_mode_enabled && step.advanced) {
-      g_native_fast_frame_tick = scheduler_now_ms;
-    }
-  }
-  const auto world_pass = simtower::original_idle_world_pass_plan(
-      g_build_mode_enabled, elevator_finger_capture_active,
-      step.advanced);
-  if (!step.advanced) {
-    if (world_pass.run_preview_only_pass) {
-      // 1090:03bf-0427 always restores/derives DS:77ac, then EQUALRECT alone
-      // decides whether 1158:0ae5 presents the changed rectangle. Keep this
-      // repaint out of the full-frame RNG/person-animation path.
-      const bool isolation_active =
-          g_elevator_control_context &&
-          g_elevator_control_context->state.isolation_active;
-      const auto restore =
-          simtower::original_construction_preview_restore_plan(
-              g_original_main_preview_scratch, isolation_active,
-              previous_preview_rect.has_value());
-      run_original_runtime_audio_checkpoints(restore.audio_checkpoints);
-      if (restore.clear_previous_rectangle) {
-        g_original_main_preview_rect.reset();
-      }
-      const auto current_preview_rect =
-          current_original_main_preview_rect();
-      const auto draw = simtower::original_construction_preview_draw_plan(
-          g_original_main_preview_scratch, g_build_mode_enabled,
-          g_command_mode);
-      const auto preview_presentation =
-          simtower::original_preview_only_presentation_plan(
-              previous_preview_rect == current_preview_rect);
-      if (preview_presentation.present_main_direct) {
-        // 1090:03fb-0427 owns a Main DC and calls 1158:0ae5 immediately;
-        // this is not a queued WM_PAINT. Rebuild the native RGB transport
-        // cache without presentation-state advancement, then synchronously
-        // present the changed result before the idle pass returns.
-        g_main_pending_surface_pass.reset();
-        rebuild_original_main_backing(
-            simtower::OriginalMainSurfacePass::preview_repaint, false);
-      } else {
-        g_original_main_preview_rect = current_preview_rect;
-      }
-      // 11f8:3c99/3cd2/3d19 surround the scratch capture and outline draw;
-      // all three still run when EQUALRECT later suppresses presentation.
-      run_original_runtime_audio_checkpoints(draw.audio_checkpoints);
-      if (preview_presentation.present_main_direct) {
-        present_original_main_backing_direct();
-      }
-    }
-    finish_original_idle_audio_pass();
-    return;
-  }
-  g_main_pending_surface_pass.reset();
-  if (step.day_changed) {
-    // 1200:04d4-04fe synchronously repaints 1118:045d immediately after the
-    // day/calendar update, before the ordinary 1090 frame pass.
-    InvalidateRect(g_info_window, nullptr, FALSE);
-    UpdateWindow(g_info_window);
-  }
-
-  // 1258:026e calls the scheduler first, including each translated far call,
-  // then 1090:03ab(1); 1090:042f is the construction-queue pass.
-  bool world_changed = false;
-  for (const auto& call : step.calls) {
-    if (!simtower::original_simulation_call_supported(call)) {
-      throw std::runtime_error(
-          "Recovered scheduler emitted an unsupported native call");
-    }
-    if (call.selector == 0x11c8U && call.offset == 0x0167U &&
-        call.arguments.size() == 3U) {
-      if (g_audio) {
-        (void)g_audio->play_resource(
-            call.arguments[0], call.arguments[1],
-            static_cast<std::uint16_t>(call.arguments[2]), GetTickCount());
-      }
-    } else if (call.selector == 0x11c8U && call.offset == 0x03abU) {
-      RECT client{};
-      GetClientRect(g_main_window, &client);
-      const auto view = current_original_view(g_main_window);
-      const auto resource = simtower::select_original_ambient_sound(
-          *g_tower_document, g_audio && g_audio->sound_enabled(), view.x,
-          view.y, client.right - client.left, client.bottom - client.top);
-      if (resource && g_audio) {
-        (void)g_audio->play_resource(*resource, 0, 1, GetTickCount());
-      }
-    } else if (call.selector == 0x1228U && call.offset == 0x0968U) {
-      (void)simtower::advance_original_facilities_for_day(
-          *g_tower_document, g_simulation_state.calendar_phase);
-      world_changed = true;
-    } else if (call.selector == 0x1228U && call.offset == 0x0b59U) {
-      (void)simtower::advance_original_facilities_for_evening(
-          *g_tower_document);
-      world_changed = true;
-    } else if (call.selector == 0x1228U && call.offset == 0x086bU) {
-      (void)simtower::prepare_original_facilities_for_night(
-          *g_tower_document);
-      world_changed = true;
-    } else if (call.selector == 0x1198U && call.offset == 0x01abU) {
-      simtower::refresh_original_parking_for_day(*g_tower_document);
-    } else if (call.selector == 0x1170U && call.offset == 0x011fU) {
-      simtower::refresh_original_medical_for_day(*g_tower_document);
-      world_changed = true;
-    } else if (call.selector == 0x1020U && call.offset == 0x0dcbU) {
-      world_changed = simtower::raise_original_periodic_b406_flag(
-                          *g_tower_document) ||
-                      world_changed;
-    } else if (call.selector == 0x1020U && call.offset == 0x0e0bU) {
-      (void)simtower::clear_original_periodic_b406_flag(*g_tower_document);
-      // 1020:0e1f sets the original window-dirty word unconditionally.
-      world_changed = true;
-    } else if (call.selector == 0x1240U && call.offset == 0x01deU) {
-      (void)simtower::reset_original_periodic_b924_state(*g_tower_document);
-    } else if (call.selector == 0x1060U && call.offset == 0x003aU) {
-      simtower::reset_original_quarter_finance(*g_tower_document);
-    } else if (call.selector == 0x1178U && call.offset == 0x0b44U) {
-      simtower::charge_original_three_day_maintenance(
-          *g_tower_document, g_maintenance_costs, g_part);
-      world_changed = true;
-    } else if (call.selector == 0x1180U && call.offset == 0x05afU) {
-      simtower::reset_original_entertainment_for_day(
-          *g_tower_document, g_part);
-      world_changed = true;
-    } else if (call.selector == 0x1180U && call.offset == 0x06a8U &&
-               call.arguments.size() == 2U) {
-      simtower::begin_original_entertainment_arrivals(
-          *g_tower_document,
-          static_cast<std::uint16_t>(call.arguments[0]),
-          static_cast<std::uint16_t>(call.arguments[1]));
-      world_changed = true;
-    } else if (call.selector == 0x1180U && call.offset == 0x0826U &&
-               call.arguments.size() == 2U) {
-      simtower::advance_original_entertainment_show(
-          *g_tower_document,
-          static_cast<std::uint16_t>(call.arguments[0]),
-          static_cast<std::uint16_t>(call.arguments[1]));
-      world_changed = true;
-    } else if (call.selector == 0x1180U && call.offset == 0x090aU &&
-               call.arguments.size() == 2U) {
-      const auto income = simtower::finish_original_entertainment_phase(
-          *g_tower_document, g_part,
-          static_cast<std::uint16_t>(call.arguments[0]),
-          static_cast<std::uint16_t>(call.arguments[1]));
-      for (const auto code : income.codes) {
-        show_original_income_status(code);
-      }
-      world_changed = true;
-    } else if (call.selector == 0x11a8U && call.offset == 0x0184U) {
-      simtower::reset_original_commercial_for_day(
-          *g_tower_document, g_part);
-      world_changed = true;
-    } else if (call.selector == 0x11a8U && call.offset == 0x0250U) {
-      simtower::reset_original_restaurants_for_evening(
-          *g_tower_document, g_part);
-      world_changed = true;
-    } else if (call.selector == 0x11a8U && call.offset == 0x0554U) {
-      const auto income = simtower::close_original_nonrestaurant_commercial(
-          *g_tower_document, g_part);
-      for (const auto code : income.codes) {
-        show_original_income_status(code);
-      }
-      world_changed = true;
-    } else if (call.selector == 0x11a8U && call.offset == 0x0603U) {
-      const auto income = simtower::close_original_restaurants_for_night(
-          *g_tower_document, g_part);
-      for (const auto code : income.codes) {
-        show_original_income_status(code);
-      }
-      world_changed = true;
-    } else if (call.selector == 0x1130U && call.offset == 0x0000U) {
-      simtower::advance_original_tenants_at_midnight(
-          *g_tower_document, g_part, g_rent_income);
-      world_changed = true;
-    } else if (call.selector == 0x1130U && call.offset == 0x0109U) {
-      simtower::advance_original_hotels_for_evening(
-          *g_tower_document, g_part);
-      world_changed = true;
-    } else if (call.selector == 0x1130U && call.offset == 0x01e2U) {
-      world_changed =
-          simtower::repair_original_hotel_pair_states(
-              *g_tower_document, g_simulation_state.day_phase) != 0U ||
-          world_changed;
-    } else if (call.selector == 0x1188U && call.offset == 0x0977U) {
-      (void)simtower::remove_original_nightly_person_links(*g_tower_document);
-    } else if (call.selector == 0x1188U && call.offset == 0x0a20U) {
-      (void)simtower::remove_original_hotel_person_links(*g_tower_document);
-    } else if (call.selector == 0x1088U && call.offset == 0x00deU) {
-      const auto result =
-          simtower::reset_original_recycling_for_day(*g_tower_document);
-      if (result.play_transition_sound && g_audio) {
-        (void)g_audio->play_resource(0x08e8, 0, 1, GetTickCount());
-      }
-      if (result.notification_code != 0U) {
-        show_original_notification_status(result.notification_code);
-      }
-      world_changed = world_changed || result.touched != 0U;
-    } else if (call.selector == 0x1088U && call.offset == 0x01d1U) {
-      world_changed =
-          simtower::finish_original_recycling_day_start(*g_tower_document) !=
-              0U ||
-          world_changed;
-    } else if (call.selector == 0x1088U && call.offset == 0x0000U &&
-               call.arguments.size() == 1U) {
-      const auto result = simtower::advance_original_recycling_phase(
-          *g_tower_document,
-          static_cast<std::uint8_t>(call.arguments[0]));
-      if (result.notification_code != 0U) {
-        show_original_notification_status(result.notification_code);
-      }
-      world_changed = world_changed || result.touched != 0U;
-    } else if (call.selector == 0x11e8U && call.offset == 0x0273U) {
-      const auto result =
-          simtower::pulse_original_metro_effects(*g_tower_document);
-      if (result.play_transition_sound && g_audio) {
-        (void)g_audio->play_resource(0x271a, 0, 1, GetTickCount());
-      }
-      world_changed = world_changed || result.touched != 0U;
-    } else if (call.selector == 0x11b8U && call.offset == 0x0028U) {
-      const auto result =
-          simtower::start_original_annual_effect(*g_tower_document);
-      if (result.notification_code != 0U) {
-        show_original_notification_status(result.notification_code);
-      }
-      world_changed = world_changed || result.started;
-    } else if (call.selector == 0x1040U && call.offset == 0x0000U) {
-      (void)simtower::reset_original_cathedral_for_day(*g_tower_document);
-      world_changed = true;
-    } else if (call.selector == 0x1040U && call.offset == 0x0179U) {
-      (void)simtower::close_original_cathedral_for_day(*g_tower_document);
-      world_changed = true;
-    } else if (call.selector == 0x1220U && call.offset == 0x0000U) {
-      (void)simtower::reset_original_people_for_day(*g_tower_document);
-    } else if (call.selector == 0x1220U && call.offset == 0x1059U) {
-      (void)simtower::sweep_original_people_transit(
-          *g_tower_document, g_simulation_state.frame_time);
-      world_changed = true;
-    } else if (call.selector == 0x10c8U && call.offset == 0x006eU) {
-      world_changed = run_original_bomb_offer_boundary() || world_changed;
-    } else if (call.selector == 0x10e8U && call.offset == 0x0029U) {
-      world_changed = run_original_fire_offer_boundary() || world_changed;
-    } else {
-      throw std::runtime_error(
-          "Recovered scheduler call has no native host dispatch");
-    }
-  }
-  // 1200:0529 samples 1208:05e6 only after all scheduled far calls return.
-  // In particular, a midnight/event modal postpones the next 96-ms gate from
-  // its close time; committing the entry sample would advance immediately
-  // after a long modal. This tail precedes the separate 1090:03ab full frame.
-  simtower::finish_original_simulation_step(
-      g_simulation_state, original_runtime_coarse_tick());
-  // Direct 1090:042a checkpoint before the full-frame construction queue.
-  original_runtime_audio_pump();
-  // Exact leading order inside 1090:03ab(1): 11f0:0211 construction queue,
-  // then rating, Bomb/Fire, Security, normal people, Elevator cars, annual
-  // effects, and ambient audio in their recovered host order.
-  const auto pending =
-      simtower::step_original_pending_construction(*g_tower_document);
-  world_changed = world_changed ||
-                   pending ==
-                       simtower::OriginalPendingStepStatus::activated;
-  // Direct 1090:0434 checkpoint between construction activation and rating.
-  original_runtime_audio_pump();
-
-  // Exact 1090:0439 position: after the pending-construction pass and before
-  // Bomb/Fire dispatch, 1140:002d evaluates one population-rating step and
-  // 1148:007e enforces its persisted prerequisites. The modal is a host-only
-  // boundary; all rating/VIP/latch mutation has already occurred headlessly.
-  const auto rating = simtower::step_original_rating_progress(
-      *g_tower_document, g_part, g_simulation_state.calendar_phase,
-      g_simulation_state.day_phase);
-  if (rating.notification_code) {
-    show_original_notification_status(*rating.notification_code);
-  }
-  if (rating.promoted) {
-    // 1140:00a8 is the rating-six form of this same promotion boundary: set
-    // the final rating, present its modal, select the rating command layout,
-    // resize Command, and repaint Info. Native state mutation occurs in the
-    // headless rating step immediately above; these calls provide its UI half.
-    g_tower_dirty = true;
-    InvalidateRect(g_info_window, nullptr, FALSE);
-    UpdateWindow(g_info_window);
-    if (rating.dialog.valid()) {
-      (void)run_original_event_dialog(rating.dialog);
-    }
-    // Both 1140:002d and the rating-six 1140:00a8 pass one to 1140:010d.
-    // That argument resets DS:783c to edit mode two before synchronously
-    // presenting the newly selected Command surface; it does not preserve the
-    // active construction tool and does not present or invalidate Map here.
-    refresh_original_rating_command(
-        g_tower_document->header.rating, 1U);
-    world_changed = true;
-  }
-  // Direct 1090:043e checkpoint after rating (including its modal boundary)
-  // and before Bomb/Fire progression.
-  original_runtime_audio_pump();
-
-  const auto bomb =
-      simtower::advance_original_bomb_event(*g_tower_document, g_part);
-  world_changed = consume_original_bomb_action(bomb) || world_changed;
-
-  if (simtower::original_fire_event_active(*g_tower_document)) {
-    if (g_tower_document->header.frame_time == 2000U) {
-      world_changed = consume_original_fire_action(
-                          simtower::finish_original_fire_event(
-                              *g_tower_document)) ||
-                      world_changed;
-    } else {
-      if (simtower::original_fire_crew_offer_due(*g_tower_document, g_part)) {
-        const auto choice = static_cast<std::uint16_t>(
-            run_original_event_dialog(
-                simtower::original_fire_crew_offer(g_part)));
-        const auto resolution = simtower::resolve_original_fire_crew_offer(
-            *g_tower_document, g_part, choice, true);
-        world_changed =
-            consume_original_fire_crew_resolution(resolution) || world_changed;
-      }
-      world_changed = consume_original_fire_action(
-                          simtower::advance_original_fire_event(
-                              *g_tower_document, g_part)) ||
-                      world_changed;
-    }
-  }
-
-  // First 1020:00cb call at 1090:0448, after Bomb/Fire and before Security.
-  // The original calls the same 15-coarse-tick (~240-ms)-gated routine four
-  // times per frame;
-  // long frames can therefore advance it again between expensive passes.
-  bool native_palette_recolor_required = step_native_effect_palette(
-      *g_tower_document, g_effects_animation_enabled, GetTickCount());
-  // Direct 1090:044d checkpoint after the first in-frame effects pass.
-  original_runtime_audio_pump();
-
-  if (simtower::original_emergency_people_pass_active(
-          *g_tower_document)) {
-    // 1090:0452-045e selects the type-14 emergency tenant/person scan only
-    // while Bomb bit zero or Fire bit three is active. The translated family
-    // returns 1080:0000 requests explicitly so this host boundary remains the
-    // only view mutation.
-    const auto security =
-        simtower::step_original_security_people(*g_tower_document, g_part);
-    for (const auto& effect : security.effects) {
-      focus_original_event_coordinate(effect.floor, effect.x);
-    }
-    world_changed = security.changed != 0U || world_changed;
-  } else {
-    // With both event bits clear, 1090:0460 runs the normal one-sixteenth
-    // person pass instead of 0f85. The translated Hotel, commercial,
-    // Housekeeping, Metro, Cathedral, and Movie/Party wrappers share one
-    // ordered scan so route, finance, service, and queue mutations retain
-    // original person-index order. Cross-family Elevator timeouts execute the
-    // translated 1637/1b41/1aed ring path in that same pass.
-    const auto people =
-        simtower::step_original_translated_people(
-            *g_tower_document, g_part, g_rent_income);
-    consume_original_person_host_requests(people.host_requests);
-    if (people.cathedral_ceremony) {
-      const auto& ceremony = *people.cathedral_ceremony;
-      focus_original_event_coordinate(ceremony.effect_floor,
-                                      ceremony.effect_x);
-      if (g_audio) {
-        if (ceremony.stop_both_audio_channels) {
-          g_audio->stop_all(true);
-        }
-        if (ceremony.wave_resource != 0) {
-          (void)g_audio->play_resource(
-              ceremony.wave_resource, ceremony.wave_repeat,
-              ceremony.wave_priority, GetTickCount());
-        }
-      }
-    }
-    world_changed = people.changed != 0U || world_changed;
-  }
-
-  // Second 1020:00cb call at 1090:0465, after the normal people pass.
-  native_palette_recolor_required =
-      step_native_effect_palette(
-          *g_tower_document, g_effects_animation_enabled, GetTickCount()) ||
-      native_palette_recolor_required;
-  // Direct 1090:046a checkpoint after the selected people pass and second
-  // effects pass.
-  original_runtime_audio_pump();
-
-  // 1090:046f-047c calls 1080:09c3 every sixteen clock ticks. That routine
-  // invalidates and synchronously repaints the Map even when no simulation
-  // mutation raised the shared world-dirty flag, advancing BITMAP/352's
-  // horizontally cycled background on its original cadence.
-  if (simtower::original_map_animation_refresh_due(
-          g_tower_document->header.frame_time)) {
-    InvalidateRect(g_map_window, nullptr, FALSE);
-    UpdateWindow(g_map_window);
-  }
-  // Direct 1090:0481 checkpoint after the independent Map cadence branch.
-  original_runtime_audio_pump();
-  // 1090:04a7 enters 11f8:3b94 after saving the old DS:77ac rectangle. Its
-  // two nested checkpoints occur only when a nonempty outline is actually
-  // restored outside Elevator-Control isolation.
-  const bool elevator_isolation_active =
-      g_elevator_control_context &&
-      g_elevator_control_context->state.isolation_active;
-  const auto preview_restore =
-      simtower::original_construction_preview_restore_plan(
-          g_original_main_preview_scratch, elevator_isolation_active,
-          previous_preview_rect.has_value());
-  run_original_runtime_audio_checkpoints(
-      preview_restore.audio_checkpoints);
-  if (preview_restore.clear_previous_rectangle) {
-    g_original_main_preview_rect.reset();
-  }
-  // Direct 1090:04b1 checkpoint after the backing/annual scratch restore and
-  // before the per-Elevator state loops.
-  original_runtime_audio_pump();
-
-  // Exact 1090:04c0-0542 order: each used Elevator advances all eight cars,
-  // runs all eight 1210:07a6/0351 passenger pairs, and enters 11e0:0e84
-  // before the next Elevator. 10a8's process-local cache owns two entries per
-  // visible floor/Elevator pair and consumes them in one top-to-bottom,
-  // left-to-right paint.
-  const auto elevators = simtower::step_original_elevator_frame(
-      *g_tower_document, g_part, g_rent_income,
-      g_elevator_control_context &&
-          g_elevator_control_context->state.isolation_active,
-      simtower::OriginalElevatorFrameHostHooks{
-          [] {
-            if (g_audio) {
-              (void)g_audio->play_resource(
-                  0x1772U, 0U, 0U, GetTickCount());
-            }
-          },
-          [](const simtower::OriginalPersonFamilyDispatchResult& dispatch) {
-            consume_original_person_family_dispatch(dispatch);
-          },
-          [] { original_runtime_audio_pump(); }});
-  g_elevator_transfer_visuals.clear();
-  for (const auto& event : elevators.transfer_visuals) {
-    g_elevator_transfer_visuals.push_back(
-        simtower::OriginalElevatorTransferVisual{
-            event.elevator_index, event.floor, event.boarding,
-            event.direction_up,
-            static_cast<std::uint32_t>(event.person_index)});
-  }
-  world_changed = elevators.changed || world_changed;
-  // Exact 1090:0551 position: 10c0:002e raises the shared repaint flag when
-  // any used Stair/Escalator has a nonzero wrapping word_6+word_8 passenger
-  // count. This keeps its frame_time-selected BITMAP animation advancing on
-  // frames where no unrelated simulation mutation dirties the world.
-  world_changed =
-      simtower::original_vertical_transport_animation_active(
-          *g_tower_document) ||
-      world_changed;
-  // Direct 1090:0556 checkpoint after the Stair/Escalator dirty scan.
-  original_runtime_audio_pump();
-  // 1090:0567 advances the visible 1038:050e facility-person presentation
-  // after Elevator/Stair work and before the later annual/palette tail. It
-  // draws into DS:3264 directly; an unrelated WM_PAINT never repeats it.
-  world_changed = advance_original_main_surface_state(
-                      simtower::OriginalMainSurfacePass::simulation_frame) ||
-                  world_changed;
-  // 1090:05db invokes 11b8:0060 later in the same frame, including the frame
-  // that starts the annual effect.
-  world_changed =
-      simtower::advance_original_annual_effect(*g_tower_document) ||
-      world_changed;
-
-  // 1090:05ee redraws the construction outline after every world layer and
-  // before either 1020:098b or the third 1020:00cb palette call. Preserve the
-  // pre-preview dirty word for 0580's conditional renderer family; EQUALRECT
-  // contributes only to the later 061f presentation test.
-  const auto current_preview_rect = current_original_main_preview_rect();
-  const bool preview_changed =
-      previous_preview_rect != current_preview_rect;
-  const bool renderer_surface_dirty = world_changed;
-  rebuild_original_main_backing(
-      simtower::OriginalMainSurfacePass::simulation_frame, false,
-      renderer_surface_dirty);
-  const auto preview_draw =
-      simtower::original_construction_preview_draw_plan(
-          g_original_main_preview_scratch, g_build_mode_enabled,
-          g_command_mode);
-  run_original_runtime_audio_checkpoints(preview_draw.audio_checkpoints);
-  world_changed = preview_changed || world_changed;
-
-  // 1090:060f/0615 applies the time palette and then makes the third
-  // independently gated 1020:00cb effect-animation call. Both mutate one
-  // persistent logical palette, including the Effects-menu freeze behavior.
-  const bool palette_changed =
-      refresh_native_time_palette(*g_tower_document);
-  const bool effect_palette_changed = step_native_effect_palette(
-      *g_tower_document, g_effects_animation_enabled, GetTickCount());
-  native_palette_recolor_required =
-      palette_changed || effect_palette_changed ||
-      native_palette_recolor_required;
-  if (native_palette_recolor_required) {
-    // Win16 recolors the already-retained indexed bitmap in place. Rebuild
-    // native's RGB transport without replaying any simulation/checkpoint work.
-    rebuild_original_main_backing(
-        simtower::OriginalMainSurfacePass::palette_repaint, false);
-  }
-  // Direct 1090:061a checkpoint after time-palette realization and the third
-  // in-frame effects pass.
-  original_runtime_audio_pump();
-
-  // Event completion writes the shared b3de clock directly. Keep the native
-  // scheduler mirror synchronized so the following tick cannot overwrite it.
-  g_simulation_state.frame_time = g_tower_document->header.frame_time;
-  g_simulation_state.current_day = g_tower_document->header.current_day;
-  g_simulation_state.day_phase =
-      simtower::original_day_phase(g_simulation_state.frame_time);
-  g_simulation_state.calendar_phase =
-      simtower::original_calendar_phase(g_simulation_state.current_day);
-  g_original_main_preview_rect = current_preview_rect;
-  auto presentation =
-      simtower::original_full_frame_auxiliary_presentation_plan(world_changed);
-  if (native_palette_recolor_required) {
-    // AnimatePalette recolors every visible indexed surface without touching
-    // DS:31cc. Native's true-color transport needs an explicit equivalent,
-    // but must not feed that adapter-only need back into 0580's dirty gate.
-    presentation.present_main_direct = true;
-    presentation.invalidate_command = true;
-    presentation.invalidate_map = true;
-    InvalidateRect(g_map_window, nullptr, FALSE);
-  }
-  for (const auto tail_step : simtower::original_full_frame_tail_order()) {
-    switch (tail_step) {
-      case simtower::OriginalFullFrameTailStep::present_main_if_dirty:
-        if (presentation.present_main_direct) {
-          // 1090:062c-0648 obtains the Main DC and calls 1158:0a3c directly.
-          // Keep this out of WM_PAINT so exposure handling stays independent.
-          present_original_main_backing_direct();
-        }
-        break;
-      case simtower::OriginalFullFrameTailStep::
-          invalidate_command_if_dirty:
-        if (presentation.invalidate_command) {
-          // 1090:064d-065b invalidates only DS:325a Command after Main.
-          InvalidateRect(g_command_window, nullptr, FALSE);
-        }
-        break;
-      case simtower::OriginalFullFrameTailStep::present_info_direct:
-        if (presentation.present_info_direct) {
-          // 1090:0661-06cd always owns an Info DC and paints 1118:073d before
-          // its conditional fields, without queueing a whole-window paint.
-          present_original_info_surface_direct();
-        }
-        break;
-      case simtower::OriginalFullFrameTailStep::expire_info_status:
-        // 1118:08f3 runs only after the unconditional Info pass, so the text
-        // remains visible in this frame and clears for the next presentation.
-        if (simtower::expire_original_info_status(
-                g_info_status, original_runtime_coarse_tick())) {
-          invalidate_original_info_status();
-        }
-        break;
-      case simtower::OriginalFullFrameTailStep::step_final_effect_palette: {
-        // Win16 AnimatePalette recolors retained indexed pixels immediately.
-        // Native RGB must rematerialize/present only when this fourth call at
-        // 1090:06dc actually advances the effects palette.
-        const bool changed = step_native_effect_palette(
-            *g_tower_document, g_effects_animation_enabled, GetTickCount());
-        if (changed) {
-          rebuild_original_main_backing(
-              simtower::OriginalMainSurfacePass::palette_repaint, false);
-          present_original_main_backing_direct();
-          InvalidateRect(g_map_window, nullptr, FALSE);
-        }
-        break;
-      }
-      case simtower::OriginalFullFrameTailStep::final_audio_checkpoint:
-        // 1090:06e1 restores the WinG backing selection before 06ed's final
-        // direct 11e0:0e84 checkpoint.
-        original_runtime_audio_pump();
-        break;
-    }
-  }
-
-  if (simtower::original_idle_elevator_refresh_required(
+  if (outcome == simtower::OriginalIdlePassOutcome::full_frame &&
+      simtower::original_idle_elevator_refresh_required(
           true, g_elevator_control_window != nullptr,
           g_elevator_control_context != nullptr,
           g_elevator_control_context != nullptr)) {
@@ -2302,44 +1811,8 @@ void consume_original_person_family_dispatches(
 
 void consume_original_person_family_dispatch(
     const simtower::OriginalPersonFamilyDispatchResult& dispatch) {
-  consume_original_person_host_requests(dispatch.host_requests);
-  if (dispatch.security_effect.valid()) {
-    focus_original_event_coordinate(dispatch.security_effect.floor,
-                                    dispatch.security_effect.x);
-  }
-  if (dispatch.cathedral_arrival &&
-      dispatch.cathedral_arrival->status ==
-          simtower::OriginalCathedralArrivalStatus::ceremony_started) {
-    const auto& ceremony = *dispatch.cathedral_arrival;
-    focus_original_event_coordinate(ceremony.effect_floor,
-                                    ceremony.effect_x);
-    if (g_audio) {
-      if (ceremony.stop_both_audio_channels) g_audio->stop_all(true);
-      if (ceremony.wave_resource != 0) {
-        (void)g_audio->play_resource(
-            ceremony.wave_resource, ceremony.wave_repeat,
-            ceremony.wave_priority, GetTickCount());
-      }
-    }
-  }
-}
-
-void consume_original_person_host_requests(
-    const std::vector<simtower::OriginalPersonHostRequest>& requests) {
-  for (const auto& request : requests) {
-    switch (request.kind) {
-      case simtower::OriginalPersonHostRequestKind::income_status:
-        show_original_income_status(request.code);
-        break;
-      case simtower::OriginalPersonHostRequestKind::notification_status:
-        show_original_notification_status(request.code);
-        break;
-      case simtower::OriginalPersonHostRequestKind::hotel_dialog:
-        (void)run_original_event_dialog(
-            {request.code, request.argument, 10000});
-        break;
-    }
-  }
+  simtower::consume_original_person_family_dispatch(g_idle_pass_host,
+                                                    dispatch);
 }
 
 void run_original_elevator_finger(HWND window, LPARAM position) {
@@ -7855,7 +7328,8 @@ const simtower::OriginalTdtDocument* original_presentation_document(
   return &*storage;
 }
 
-void present_original_info_surface_direct() {
+void present_original_info_surface_direct(
+    simtower::OriginalIdleInfoLatches& latches) {
   if (!g_info_window) return;
   if (HDC dc = GetDC(g_info_window)) {
     if (g_logical_palette) {
@@ -7876,16 +7350,9 @@ void present_original_info_surface_direct() {
     // 1090:0691 is the second direct checkpoint, before the three conditional
     // field-latch painters. Native's retained painter has already emitted the
     // current field values, but the Hotel latch/audio mutation still occurs
-    // at this exact point.
+    // at this exact point (WAVE/10013, repeat 2, priority 3).
     original_runtime_audio_pump();
-    if (g_tower_document) {
-      const auto checkout_presentation =
-          simtower::consume_original_hotel_checkout_presentation(
-              *g_tower_document);
-      if (checkout_presentation.play_cash_sound && g_audio) {
-        (void)g_audio->play_resource(10013U, 2U, 3U, GetTickCount());
-      }
-    }
+    latches.consume_hotel_checkout();
     ReleaseDC(g_info_window, dc);
     // Direct 1090:06d2 checkpoint after the Info DC is released.
     original_runtime_audio_pump();
