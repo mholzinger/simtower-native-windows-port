@@ -1108,14 +1108,23 @@ int main() {
     assert(poor.header.exact_bytes[30] == std::byte{0xff});
     assert(poor.header.exact_bytes[31] == std::byte{0xff});
 
+    // 1178:011d adds the 150 floor charge to the 10,000 facility charge in
+    // one accumulator ([bp-8], never reset between its loops), so a balance
+    // covering only the facility fails the second comparison with message 8.
     auto split_gate = make_metro_ready_tower(costs);
     split_gate.header.balance = 10000;
     result = simtower::build_original_metro_station(
         split_gate, 2, 120, costs);
+    assert(result.status ==
+           simtower::OriginalConstructionStatus::insufficient_funds);
+    assert(result.cost == 10150);
+    assert(result.construction_status_code == 8U);
+
+    auto exact = make_metro_ready_tower(costs);
+    exact.header.balance = 10150;
+    result = simtower::build_original_metro_station(exact, 2, 120, costs);
     assert(result.succeeded() && result.cost == 10150);
-    // 1178:011d compares the 10,000 facility and 150 floor previews to the
-    // same starting balance independently, so the final debit may be below 0.
-    assert(split_gate.header.balance == -150);
+    assert(exact.header.balance == 0);
 
     auto late_phase = make_metro_ready_tower(costs);
     late_phase.header.frame_time = 1600U;
