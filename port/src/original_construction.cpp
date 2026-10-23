@@ -5367,22 +5367,16 @@ OriginalConstructionResult build_original_metro_station(
     return {OriginalConstructionStatus::tenant_limit, 0, 17U};
   }
   constexpr std::uint16_t kWidth = 30U;
-  if (left > kOriginalWorldGridWidth - kWidth) {
-    return {OriginalConstructionStatus::invalid_span, 0, 20U};
-  }
 
-  // Type 31's 11f8:3010 branch accepts only runtime floor two. It requires
-  // floor zero to contain exactly one ordinary type-zero floor record, then
-  // clears that record count before any of the later cost/collision checks.
-  // Preserve that observable side effect even when a subsequent check fails.
-  if (floor != 2) {
-    return {OriginalConstructionStatus::invalid_floor, 0, 15U};
+  // 11f8:20e7 starts with 2f5a for type 31 (3010): any basement floor from
+  // two to nine whose floor two below is empty. On floor two a lone type-0
+  // record on floor zero is cleared first, a persisted side effect that
+  // survives later failures. Span and support follow per part (321e/17fd).
+  if (const auto code = original_2f5a_floor_failure(document, 31U, floor)) {
+    return {OriginalConstructionStatus::invalid_floor, 0, *code};
   }
-  auto& bottom = document.floors[0];
-  if (bottom.tenants.size() != 1U || bottom.tenants[0].type != 0) {
-    return {OriginalConstructionStatus::invalid_floor, 0, 15U};
-  }
-  bottom.tenants.clear();
+  const auto middle_floor = static_cast<std::int16_t>(floor - 1);
+  const auto bottom_floor = static_cast<std::int16_t>(floor - 2);
 
   const auto right = static_cast<std::uint16_t>(left + kWidth);
   const auto added_cells = [&](std::int16_t target_floor) {
@@ -5398,11 +5392,12 @@ OriginalConstructionResult build_original_metro_station(
 
   // 1178:011d accumulates into one dword at [bp-8]: it first compares the
   // type-31 YEN charge (message 7), then adds the exposed-floor charge for
-  // floors 0..2 to the same total and compares again (message 8).
+  // the three floors to the same total and compares again (message 8).
   const std::uint64_t facility_preview = construction_costs[31];
   const std::uint64_t floor_preview =
-      static_cast<std::uint64_t>(added_cells(0) + added_cells(1) +
-                                 added_cells(2)) *
+      static_cast<std::uint64_t>(added_cells(bottom_floor) +
+                                 added_cells(middle_floor) +
+                                 added_cells(floor)) *
       construction_costs[0];
   const std::uint64_t combined_preview = facility_preview + floor_preview;
   if (combined_preview > 0x7fffffffULL ||
@@ -5418,31 +5413,33 @@ OriginalConstructionResult build_original_metro_station(
                                        facility_preview)};
   }
 
-  // Below ground, 11f8:20e7 constructs top-to-bottom: type 31 at floor 2,
-  // type 32 at floor 1, then type 33 at floor 0. DS:b3a1 chooses persisted
-  // frame selector zero before phase four and one afterward. The preflight
-  // above is the original funds gate; each internal 17fd call then debits
-  // without repeating a combined-balance test.
+  // Below ground, 11f8:20e7 (21da-2281) constructs top-to-bottom: type 31
+  // at the selected floor, 32 one floor down, then 33 two floors down.
+  // DS:b3a1 chooses persisted frame selector zero before phase four and one
+  // afterward. Native keeps the stack atomic and does not repeat funds per
+  // part; the original's 17fd calls pass preview 0 and ignore their results.
   const std::uint8_t variant =
       original_day_phase(document.header.frame_time) < 4 ? 0U : 1U;
   auto working = document;
   const auto upper = build_original_deferred_facility(
-      working, 31U, 2, left, variant, construction_costs, false);
+      working, 31U, floor, left, variant, construction_costs, false);
   if (!upper.succeeded()) {
     return upper;
   }
   const auto middle = build_original_deferred_facility(
-      working, 32U, 1, left, variant, construction_costs, false);
+      working, 32U, middle_floor, left, variant, construction_costs, false);
   if (!middle.succeeded()) {
     return middle;
   }
   const auto lower = build_original_deferred_facility(
-      working, 33U, 0, left, variant, construction_costs, false);
+      working, 33U, bottom_floor, left, variant, construction_costs, false);
   if (!lower.succeeded()) {
     return lower;
   }
 
-  store_original_header_word(working, 30U, 2U);
+  // 11f8:0d3e stores the selected top floor in DS:b3e8.
+  store_original_header_word(working, 30U,
+                             static_cast<std::uint16_t>(floor));
   const auto actual_cost = static_cast<std::int32_t>(
       upper.cost + middle.cost + lower.cost);
   document = std::move(working);

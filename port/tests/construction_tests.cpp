@@ -1148,6 +1148,38 @@ int main() {
   }
 
   {
+    // 11f8:0d04 only requires that no Metro exists, and 2f5a's type-31
+    // branch accepts any basement floor 2..9 whose floor two below is empty.
+    // 20e7 then stacks 31/32/33 downward from the selected floor and 0d3e
+    // stores that floor in DS:b3e8.
+    auto tower = simtower::make_original_new_tdt();
+    assert(simtower::build_original_initial_lobby(
+               tower, 100, 200, 1, costs)
+               .succeeded());
+    for (int floor = 9; floor >= 4; --floor) {
+      assert(simtower::build_original_floor(
+                 tower, static_cast<std::int16_t>(floor), 120, 150, costs)
+                 .succeeded());
+    }
+    tower.header.frame_time = 0U;
+    tower.header.balance = 30000;
+    const auto result =
+        simtower::build_original_metro_station(tower, 5, 120, costs);
+    assert(result.succeeded());
+    assert(tower.header.exact_bytes[30] == std::byte{5});
+    assert(tower.header.exact_bytes[31] == std::byte{0});
+    const auto has_type = [&](int floor, std::int8_t type) {
+      const auto& tenants = tower.floors[static_cast<std::size_t>(floor)].tenants;
+      return std::any_of(tenants.begin(), tenants.end(),
+                         [&](const auto& tenant) {
+                           return tenant.type == -type;
+                         });
+    };
+    assert(has_type(5, 31) && has_type(4, 32) && has_type(3, 33));
+    assert(tower.floors[2].tenants.empty());
+  }
+
+  {
     // Direct 11f8:2291 and 1220:0d61 coverage: preflight the fixed five-floor
     // span, then emit type 40 at floor 109 through type 36 at floor 113 in
     // bottom-up queue order with eight family-36 people per part and one
