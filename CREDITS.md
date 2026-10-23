@@ -58,6 +58,12 @@ Mention of a person, company, or product does not imply endorsement.
 - Verticopolis `.TDT` codec portions used by the rejected prototype harness:
   Copyright 2026 maniator, MIT License. See
   `THIRD_PARTY_LICENSES/verticopolis-MIT.md`.
+- stb_truetype v1.26 (software canvas text): Copyright 2017 Sean Barrett,
+  MIT License (dual licensed with the Unlicense). See
+  `THIRD_PARTY_LICENSES/stb_truetype-MIT-or-Unlicense.txt`.
+- Liberation Sans 2.1.5 (bundled font of the SDL frontend): Copyright 2010
+  Google Corporation and 2012 Red Hat, Inc., SIL Open Font License 1.1. See
+  `THIRD_PARTY_LICENSES/liberation-fonts-OFL-1.1.txt`.
 
 The native `port/` implementation is the release source of truth; the earlier
 WebView/TypeScript program is retained only as a rejected prototype harness.

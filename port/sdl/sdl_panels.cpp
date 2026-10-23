@@ -155,12 +155,17 @@ OriginalWorldRaster compose_window(const Session& session) {
                       client);
   };
   const auto draw_info = [&] {
-    // TEMP placeholder: frame only. The Info painter (1118:0143) draws text
-    // with the Win16 font, which waits for the bundled metric font.
+    // INFOWNDPROC 1120:0215: white client, frame at the 431-pixel surface
+    // width, then the Info content as the session last painted it
+    // (Session::info_raster, rows 8.. only).
     const auto& client = layout.info_client;
     canvas.outline(layout.info_outer, kBorderRgb);
     canvas.fill(client, kWhiteRgb);
     draw_frame_row(canvas, client, kOriginalInfoWidth, active == Panel::info);
+    const auto& info = session.info_raster();
+    canvas.blit(info, client.x, client.y,
+                {client.x, client.y + kOriginalInfoClientTop, client.width,
+                 client.height - kOriginalInfoClientTop});
   };
   const auto draw_command = [&] {
     // CMDBTNWNDPROC 1050:010d: white client, frame at the 64-pixel surface
