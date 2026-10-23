@@ -20,6 +20,7 @@ add_library(simtower_port_core STATIC
   src/original_elevator_control.cpp
   src/original_finance.cpp
   src/original_find.cpp
+  src/original_idle_pass.cpp
   src/original_info.cpp
   src/original_information.cpp
   src/original_map.cpp
@@ -105,7 +106,8 @@ option(SIMTOWER_BUILD_SDL "Build the SDL3 frontend simtower_sdl"
        ${SIMTOWER_BUILD_SDL_DEFAULT})
 if(SIMTOWER_BUILD_SDL)
   find_package(SDL3 REQUIRED CONFIG)
-  add_executable(simtower_sdl sdl/sdl_main.cpp sdl/sdl_session.cpp)
+  add_executable(simtower_sdl sdl/sdl_main.cpp sdl/sdl_session.cpp
+                              sdl/sdl_scenario.cpp)
   target_link_libraries(simtower_sdl PRIVATE simtower_port_core SDL3::SDL3)
 endif()
 
@@ -251,6 +253,19 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
   )
 
+  # Locks the shared idle pass's host-hook order on a staged tower. The
+  # scenario builder is portable (no SDL), so this runs on every platform.
+  add_executable(simtower_idle_pass_tests tests/idle_pass_tests.cpp
+                                          sdl/sdl_scenario.cpp)
+  target_include_directories(simtower_idle_pass_tests PRIVATE
+                             ${CMAKE_CURRENT_SOURCE_DIR}/sdl)
+  target_link_libraries(simtower_idle_pass_tests PRIVATE simtower_port_core)
+  add_test(
+    NAME simtower_idle_pass_tests
+    COMMAND simtower_idle_pass_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+
   # These executables intentionally use assert() as their test primitive.
   # Release configurations define NDEBUG globally; removing it per test keeps
   # both the checks and any setup calls inside them active.
@@ -266,7 +281,8 @@ if(BUILD_TESTING)
       simtower_information_tests
       simtower_find_tests
       simtower_about_tests
-      simtower_elevator_control_tests)
+      simtower_elevator_control_tests
+      simtower_idle_pass_tests)
   if(WIN32)
     list(APPEND SIMTOWER_ASSERT_TESTS
          simtower_resource_tests
