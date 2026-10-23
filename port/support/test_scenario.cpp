@@ -1,4 +1,4 @@
-#include "sdl_scenario.hpp"
+#include "test_scenario.hpp"
 
 #include "original_construction.hpp"
 #include "original_simulation.hpp"
@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace simtower::sdl {
+namespace simtower {
 namespace {
 
 // Runtime floor 10 is the ground lobby, 11+ above ground, 9..0 basement.
@@ -301,6 +301,107 @@ ScenarioSummary build_scenario(std::string_view name,
   return summary;
 }
 
+bool apply_direct_build(OriginalTdtDocument& document,
+                        const OriginalPartTable& part,
+                        const OriginalYenTable& costs,
+                        const OriginalYenTable& rent_income,
+                        const DirectBuild& build) {
+  const auto type = build.type;
+  const auto floor = build.floor;
+  const auto left = build.left;
+  if (build.shift) {
+    const auto width = original_facility_width_cells(type);
+    if (width == 0U) {
+      throw std::runtime_error("direct build: no footprint for shift with "
+                               "type " + std::to_string(type));
+    }
+    const auto replacement = apply_original_replacement_demolition(
+        document, rent_income, type, floor, static_cast<std::int16_t>(left),
+        static_cast<std::int16_t>(left + width));
+    if (!replacement.completed) return false;
+  }
+  OriginalConstructionResult result{};
+  switch (type) {
+    case 0:
+      result = build_original_floor(document, floor, left,
+                                    static_cast<std::uint16_t>(left + 1U),
+                                    costs);
+      break;
+    case 24: {
+      const auto right = static_cast<std::uint16_t>(left + 4U);
+      if (floor == kGround && document.header.lobby_height == 0U) {
+        result = build_original_initial_lobby(document, left, right, 1U, costs);
+      } else if (floor == kGround) {
+        result = extend_original_lobby(document, left, right, costs);
+      } else {
+        result = build_original_sky_lobby(document, floor, left, right, costs);
+      }
+      break;
+    }
+    case 1: case 42: case 43:
+      result = build_original_elevator(document, type, floor, left, costs,
+                                       part);
+      break;
+    case 22: case 27:
+      result = build_original_vertical_transport(
+          document, static_cast<std::uint8_t>(type), floor, left, costs);
+      break;
+    case 3: case 4: case 5:
+      result = build_original_hotel_room(document,
+                                         static_cast<std::uint8_t>(type),
+                                         floor, left, build.variant, costs);
+      break;
+    case 6: result = build_original_restaurant(document, floor, left, costs);
+      break;
+    case 7:
+      result = build_original_office(document, floor, left, build.variant,
+                                     costs);
+      break;
+    case 9:
+      result = build_original_condo(document, floor, left, build.variant,
+                                    costs);
+      break;
+    case 10: result = build_original_retail_shop(document, floor, left, costs);
+      break;
+    case 12: result = build_original_fast_food(document, floor, left, costs);
+      break;
+    case 13:
+      result = build_original_medical_center(document, floor, left,
+                                             build.variant, costs);
+      break;
+    case 14: result = build_original_security(document, floor, left, costs);
+      break;
+    case 15: result = build_original_housekeeping(document, floor, left, costs);
+      break;
+    case 17: result = build_original_secom_center(document, floor, left, costs);
+      break;
+    case 18:
+      result = build_original_movie_theater(document, floor, left, costs);
+      break;
+    case 20:
+      result = build_original_recycling_center(document, floor, left, costs);
+      break;
+    case 29: result = build_original_party_hall(document, floor, left, costs);
+      break;
+    case 31:
+      result = build_original_metro_station(document, floor, left, costs);
+      break;
+    case 36: result = build_original_cathedral(document, floor, left, costs);
+      break;
+    default:
+      throw std::runtime_error("direct build: no constructor for type " +
+                               std::to_string(type));
+  }
+  if (!result.succeeded()) return false;
+  const auto rating = complete_original_rating_construction(document, part,
+                                                            type);
+  (void)rating;
+  if (original_construction_rebuilds_routes(type)) {
+    rebuild_original_transport_route_graphs(document);
+  }
+  return true;
+}
+
 std::string scenario_type_name(int type) {
   switch (type) {
     case 0: return "floor";
@@ -329,4 +430,4 @@ std::string scenario_type_name(int type) {
   }
 }
 
-}  // namespace simtower::sdl
+}  // namespace simtower

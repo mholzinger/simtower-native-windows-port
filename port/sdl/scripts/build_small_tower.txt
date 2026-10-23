@@ -1,0 +1,65 @@
+# Builds a small tower through the Command palette and the Main view: a
+# ground lobby, three floors, three offices and a standard elevator, then
+# extends the elevator with the Finger.
+#
+# Coordinates are window logical coordinates for the default --size (Main
+# client 791x513 at window 208,95) on a New tower (view 1104,3483). There,
+# floor 10 is window y 536..571 and each floor above is 36 pixels higher.
+# The Command client starts at window 135,179 (rating one).
+#
+#   simtower_sdl --input-script build_small_tower.txt --passes 40 \
+#                --state-digest --headless-window tower.bmp
+
+pass 2
+# Lobby group (cell 0). A plain click: its release lands on the selector
+# row aligned with the cell, so the current choice (Lobby) is kept.
+click-command 151 256
+expect-type 24
+expect-mode 3
+# Ground lobby on floor 10, dragged from client x 200 to 600.
+down 408 550
+move 508 550
+move 608 550
+move 808 550
+up 808 550
+pass 6
+# Floor: press the Lobby group, move to the second selector row (Floor),
+# release there.
+down 151 256
+move 151 287
+up 151 287
+expect-type 0
+# Floors 11, 12 and 13, one drag each.
+down 410 518
+move 806 518
+up 806 518
+down 410 482
+move 806 482
+up 806 482
+down 410 446
+move 806 446
+up 806 446
+pass 10
+# Offices (cell 2) on floor 11.
+click-command 151 288
+expect-type 7
+click 450 518
+click 530 518
+click 610 518
+pass 14
+# Standard elevator (cell 1) on floor 10; a new shaft selects the Finger.
+click-command 181 256
+expect-type 1
+click 720 550
+expect-mode 1
+# Finger: press the cap one floor above the shaft (floor 11) and drag it
+# up. 10a0:07b7 keeps the top one floor below the pointer, so releasing on
+# floor 14 (window y 392..427) extends the shaft to floor 13.
+down 720 518
+move 720 482
+move 720 446
+move 720 410
+up 720 410
+expect-mode 1
+pass 18
+digest

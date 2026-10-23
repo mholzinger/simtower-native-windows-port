@@ -4,6 +4,8 @@
 
 namespace simtower {
 
+struct OriginalWorldRaster;
+
 inline constexpr int kOriginalPaletteFrameHeight = 8;
 
 struct OriginalPaletteFrameRect {
@@ -45,5 +47,15 @@ original_palette_frame_hit_test(int x, int y) noexcept {
              ? OriginalPaletteFrameHit::close
              : OriginalPaletteFrameHit::drag;
 }
+
+// Portable pixels of 1078:00c6's frame (draw_original_palette_frame in
+// original_palette_frame_win32.cpp), as a width x 8 raster of 0x00RRGGBB.
+// Active: the bar in caption_rgb (Win32 reads COLOR_ACTIVECAPTION) with a
+// white close square. Inactive: a white bar with a one-pixel black outline
+// around the close square (FrameRect).
+[[nodiscard]] OriginalWorldRaster render_original_palette_frame(
+    int width,
+    bool active,
+    std::uint32_t caption_rgb);
 
 }  // namespace simtower

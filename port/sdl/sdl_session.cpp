@@ -5,6 +5,7 @@
 #include "original_startup_data.hpp"
 #include "original_tdt_file.hpp"
 #include "original_time.hpp"
+#include "original_palette_frame.hpp"
 #include "original_ui.hpp"
 
 #include <algorithm>
@@ -47,13 +48,238 @@ void verify_pack_extent(std::span<const std::byte> pack) {
 
 }  // namespace
 
+// The SDL host of the shared world input (original_world_input.hpp). Win32
+// window operations become session state: panel dirty flags, a plain
+// viewport, a tracked capture owner, and logged dialog requests answered
+// with fixed or scripted values. Every request it logs uses a RequestKind
+// that only input reaches, so runs without input keep their digests.
+class Session::WorldInputHost final : public OriginalWorldInputHost {
+ public:
+  explicit WorldInputHost(Session& session) : s_(session) {}
+
+  // The clock, DS:b3ae, the notification line and the Command
+  // invalidation are the session's idle-pass implementations.
+  OriginalHostServices& services() override {
+    return static_cast<OriginalIdlePassHost&>(s_);
+  }
+  // SIMTOWER.INI BeepOnly (DS:de28) has no SDL profile yet: off.
+  bool beep_only() override { return false; }
+  bool modal_input_locked() override { return s_.modal_depth_ != 0; }
+  // No Find dialog yet: DS:77c0 is never set.
+  bool find_exit_latch_set() override { return false; }
+  void reset_find_marker() override {}
+  bool primary_button_down() override { return s_.left_button_down_; }
+
+  void set_capture(OriginalInputSurface surface) override {
+    s_.capture_ = surface;
+    s_.log_request(RequestKind::capture, {static_cast<int>(surface)});
+  }
+  void release_capture() override {
+    s_.capture_.reset();
+    s_.log_request(RequestKind::capture, {-1});
+  }
+  // TEMP: the custom CURSOR resources are not decoded yet; the window host
+  // maps the id to an SDL system cursor.
+  void set_cursor(std::uint16_t cursor_id) override {
+    s_.cursor_id_ = cursor_id;
+  }
+  void refresh_cursor() override {
+    // 1258:0505 with the panel under the last pointer.
+    if (!s_.last_pointer_) return;
+    const int x = s_.last_pointer_->x + s_.layout_.main_client.x;
+    const int y = s_.last_pointer_->y + s_.layout_.main_client.y;
+    const auto plan = original_main_cursor_point_plan(
+        s_.layout_.map_outer.contains(x, y), s_.map_visible_,
+        s_.layout_.info_outer.contains(x, y), s_.info_visible_,
+        s_.layout_.command_outer.contains(x, y), s_.command_visible_,
+        s_.layout_.main_client.contains(x, y), false,
+        s_.world_input_.build_mode_enabled, s_.world_input_.command_mode,
+        s_.capture_ == OriginalInputSurface::main);
+    if (plan.set_cursor) s_.cursor_id_ = plan.selector;
+  }
+
+  OriginalWorldPoint main_view() override {
+    return {s_.viewport_.x, s_.viewport_.y};
+  }
+  std::optional<OriginalMapRect> main_client() override {
+    return OriginalMapRect{0, 0, s_.viewport_.width, s_.viewport_.height};
+  }
+  void set_main_view(int x, int y) override {
+    // set_original_view: SetScrollInfo's clamp, then 1080:0000/0054's
+    // camera refresh (synchronous 1080:0a1e(1), Map, Command, Map focus).
+    s_.log_request(RequestKind::view, {x, y});
+    s_.scroll_to(x, y);
+  }
+  void set_main_scroll_position(int x, int y) override {
+    s_.log_request(RequestKind::view, {x, y, 0});
+    s_.set_viewport_origin(x, y);
+  }
+
+  void mark_document_dirty() override { s_.document_dirty_ = true; }
+  void invalidate_main() override {
+    s_.main_backing_dirty_ = true;
+    s_.present_requested_ = true;
+  }
+  void mark_main_backing_dirty() override { s_.main_backing_dirty_ = true; }
+  // The panels are recomposed on every present, so the remaining
+  // invalidations only request one.
+  void invalidate_map() override { s_.present_requested_ = true; }
+  void present_info_status() override { s_.present_requested_ = true; }
+  void present_command_now() override { s_.present_requested_ = true; }
+  void resize_command(int outer_height) override {
+    s_.command_outer_height_ = outer_height;
+    s_.layout_ = make_window_layout(s_.viewport_.width, s_.viewport_.height,
+                                    outer_height);
+  }
+  void request_main_pass(OriginalMainSurfacePass pass,
+                         bool synchronous) override {
+    // request_original_main_surface_pass: UpdateWindow runs the pending
+    // pass at once; otherwise the next WM_PAINT does, before the next idle
+    // pass.
+    if (synchronous) {
+      s_.rebuild_main(pass, true);
+      s_.present_requested_ = true;
+    } else {
+      s_.pending_main_pass_ = pass;
+      s_.main_backing_dirty_ = true;
+      s_.present_requested_ = true;
+    }
+  }
+  void hide_palette(OriginalAuxiliaryWindow kind) override {
+    bool* visible = kind == OriginalAuxiliaryWindow::command
+                        ? &s_.command_visible_
+                        : kind == OriginalAuxiliaryWindow::info
+                              ? &s_.info_visible_
+                              : &s_.map_visible_;
+    const auto plan = original_auxiliary_visibility_plan(
+        OriginalAuxiliaryVisibilityTrigger::close_box, *visible);
+    *visible = plan.visible;
+    s_.log_request(RequestKind::panel, {static_cast<int>(kind), *visible});
+    s_.present_requested_ = true;
+  }
+
+  void construction_status(std::uint16_t code) override {
+    ++s_.host_requests_.status;
+    const bool shown = set_original_info_construction_status(
+        s_.resources_, s_.info_status_, code, s_.coarse_tick_now());
+    s_.log_request(RequestKind::construction_status, {code, shown});
+    s_.tally("construction status");
+  }
+  void command_status(std::uint16_t code) override {
+    ++s_.host_requests_.status;
+    const bool shown = set_original_info_command_status(
+        s_.resources_, s_.info_status_, code, s_.coarse_tick_now());
+    s_.log_request(RequestKind::command_status, {code, shown});
+    s_.tally("command status");
+  }
+  void play_sound(std::int32_t resource,
+                  std::uint16_t repeat,
+                  std::uint16_t priority) override {
+    s_.sound(resource, "input");
+    s_.play_audio(resource, repeat, priority);
+  }
+  void play_reserved_if_idle(std::int32_t resource,
+                             std::uint16_t repeat,
+                             std::uint32_t) override {
+    s_.sound(resource, "input reserved");
+    s_.play_audio(resource, repeat, 0U, true);
+  }
+  void play_event_sounds(
+      std::span<const OriginalEventSoundRequest> requests) override {
+    s_.play_event_sounds(requests);
+  }
+  void beep() override {
+    s_.log_request(RequestKind::beep, {});
+    s_.tally("beep");
+  }
+  void audio_pump() override {
+    if (s_.audio_) s_.audio_->pump(s_.clock_ms_());
+  }
+  void audio_transition(OriginalIdleAudioTransition transition) override {
+    if (!s_.audio_) return;
+    if (transition == OriginalIdleAudioTransition::activate) {
+      s_.audio_->activate();
+    } else if (transition == OriginalIdleAudioTransition::deactivate) {
+      s_.audio_->deactivate();
+    }
+  }
+  void sample_auxiliary_pointer_tick() override {
+    s_.last_auxiliary_tick_ = s_.coarse_tick_now();
+  }
+
+  int alert(int resource_id, std::string_view text) override {
+    const int answer = s_.alert_answer_;
+    s_.alert_answer_ = 1;
+    ++s_.host_requests_.dialogs;
+    s_.log_request(RequestKind::alert, {resource_id, answer});
+    s_.tally("alert " + std::to_string(resource_id));
+    log_line("alert " + std::to_string(resource_id) + " \"" +
+             std::string(text) + "\" -> " + std::to_string(answer));
+    return answer;
+  }
+  int event_dialog(const OriginalEventDialogRequest& request) override {
+    return s_.log_dialog(request, kAcknowledgeChoice, "construction");
+  }
+  void open_elevator_control(std::size_t elevator_index,
+                             std::int16_t pointer_x,
+                             std::int16_t pointer_y) override {
+    ++s_.host_requests_.dialogs;
+    s_.log_request(RequestKind::elevator_control,
+                   {static_cast<std::int64_t>(elevator_index), pointer_x,
+                    pointer_y});
+    s_.tally("elevator control");
+    log_line("elevator control " + std::to_string(elevator_index));
+  }
+  void transport_information(const OriginalMagnifierTarget& target) override {
+    ++s_.host_requests_.dialogs;
+    s_.log_request(RequestKind::info_dialog,
+                   {static_cast<int>(target.kind), target.dialog_id});
+    s_.tally("transport information");
+  }
+  void facility_information(std::int16_t floor,
+                            std::size_t tenant_index) override {
+    ++s_.host_requests_.dialogs;
+    s_.log_request(RequestKind::info_dialog,
+                   {-1, floor, static_cast<std::int64_t>(tenant_index)});
+    s_.tally("facility information");
+    log_line("facility information floor " + std::to_string(floor) +
+             " tenant " + std::to_string(tenant_index));
+  }
+  void person_information(std::size_t person_index) override {
+    ++s_.host_requests_.dialogs;
+    s_.log_request(RequestKind::info_dialog,
+                   {-2, static_cast<std::int64_t>(person_index)});
+    s_.tally("person information");
+  }
+  OriginalWorldPoint command_outer_origin() override {
+    return {s_.layout_.command_outer.x, s_.layout_.command_outer.y};
+  }
+  bool run_command_selector(
+      OriginalCommandSelectorSession& session) override {
+    return s_.run_selector_modal(session);
+  }
+
+  void consume_person_family_dispatches(
+      std::span<const OriginalPersonFamilyDispatchResult> dispatches)
+      override {
+    for (const auto& dispatch : dispatches) {
+      consume_original_person_family_dispatch(
+          static_cast<OriginalIdlePassHost&>(s_), dispatch);
+    }
+  }
+
+ private:
+  Session& s_;
+};
+
 Session::Session(std::vector<std::byte> pack,
                  std::function<std::uint32_t()> clock_ms,
                  SessionFlags flags,
                  OriginalAudioDevice* audio_device)
     : pack_(std::move(pack)),
       clock_ms_(std::move(clock_ms)),
-      flags_(flags) {
+      flags_(flags),
+      world_host_(std::make_unique<WorldInputHost>(*this)) {
   verify_pack_extent(pack_);
   // WinMain: the portable span constructor replaces from_current_module.
   resources_ = OriginalResources(std::span<const std::byte>(pack_));
@@ -83,7 +309,10 @@ Session::Session(std::vector<std::byte> pack,
   construction_costs_ = std::move(startup.construction_costs);
   rent_income_ = std::move(startup.rent_income);
   maintenance_costs_ = std::move(startup.maintenance_costs);
-  command_ratings_ = std::move(startup.command_ratings);
+  world_input_.command_ratings = std::move(startup.command_ratings);
+  // DS:3218 starts from the host flag until the first mouse message
+  // publishes the live modifier (1058:0028).
+  world_input_.control_modifier = flags_.world_control_modifier;
 
   // Deliberately omitted Win32 startup steps (WinMain), none of which
   // touches the document RNG or simulation state:
@@ -103,6 +332,8 @@ Session::Session(std::vector<std::byte> pack,
   reset_original_palette_runtime(resources_, &startup_bootstrap,
                                  palette_runtime_, coarse_tick_now());
 }
+
+Session::~Session() = default;
 
 std::uint32_t Session::coarse_tick_now() {
   // 1208:05e6 through original_runtime_coarse_tick: every coarse-clock read
@@ -154,6 +385,8 @@ void Session::resize(int width, int height) {
   const bool first_size = viewport_.width == 0 && viewport_.height == 0;
   viewport_.width = std::max(0, width);
   viewport_.height = std::max(0, height);
+  layout_ = make_window_layout(viewport_.width, viewport_.height,
+                               command_outer_height_);
   if (first_size) {
     // Window creation: 1128:08d6 (create_original_windows) installs the
     // initial view, centred horizontally with the bottom 324 px above the
@@ -226,10 +459,9 @@ void Session::reset_simulation_state() {
 }
 
 void Session::reset_command_state() {
-  // reset_original_command_state fields this frontend consults.
-  build_mode_enabled_ = true;
-  command_mode_ = 3U;
-  map_mode_ = 0U;
+  // reset_original_command_state: the shared edit/command part, then the
+  // Info status. There is no Find marker yet.
+  reset_original_world_input_state(world_input_, false);
   info_status_ = {};
 }
 
@@ -239,10 +471,13 @@ void Session::install_document(OriginalTdtDocument document) {
   document_ = std::move(document);
   reset_simulation_state();
   reset_command_state();
-  // refresh_original_rating_command(rating, 0) only repaints Command and
-  // dirties the backing here. restore_original_derived_view_position then
-  // clamps the header view, and the document transition's Main step is a
-  // synchronous 1080:0a1e(1) (present_original_document_transition_...).
+  // 10d0:0ac2 -> 1140:010d(rating, 0): replaces the rating TABL, resizes
+  // Command and dirties the backing (no RNG). restore_original_derived_
+  // view_position then clamps the header view, and the document
+  // transition's Main step is a synchronous 1080:0a1e(1)
+  // (present_original_document_transition_synchronously).
+  refresh_original_rating_command(world_input_context(), *world_host_,
+                                  document_->header.rating, 0U);
   set_viewport_origin(document_->header.view_x, document_->header.view_y);
   rebuild_main(OriginalMainSurfacePass::rebuild_with_sky, true);
   present_requested_ = true;
@@ -289,7 +524,21 @@ void Session::rebuild_main(OriginalMainSurfacePass pass,
       resources_, document(), viewport_.x, viewport_.y, viewport_.width,
       viewport_.height, transfer_visuals_,
       palette_runtime_.initialized ? &palette_runtime_.colors : nullptr,
-      &sky_decorations_, map_mode_, nullptr, {}, full_frame_surface_dirty);
+      &sky_decorations_, world_input_.map_mode, nullptr, {},
+      full_frame_surface_dirty);
+  // 1090:03df/05ee: the construction outline over the rebuilt backing, as
+  // rebuild_original_main_backing composites it.
+  const auto preview_rect = original_world_input_preview_rect(
+      world_input_, {viewport_.x, viewport_.y});
+  if (plan.update_construction_preview_rect) {
+    world_input_.preview_rect = preview_rect;
+  }
+  if (preview_rect) {
+    composite_original_construction_preview(
+        world_input_.selected_build_type, world_input_.pointer.client_x,
+        world_input_.pointer.client_y, viewport_.x, viewport_.y,
+        main_raster_);
+  }
   main_backing_dirty_ = false;
   if (plan.consume_elevator_transfer_visuals) transfer_visuals_.clear();
 }
@@ -308,7 +557,7 @@ bool Session::advance_main_surface_state(OriginalMainSurfacePass pass) {
     const auto people = step_original_visible_facility_people(
         *document_, viewport_.x, viewport_.y, viewport_.width,
         viewport_.height, flags_.people_animation_enabled,
-        flags_.world_control_modifier);
+        world_input_.control_modifier);
     return people.dispatched_tenants != 0U;
   }
   return false;
@@ -416,6 +665,12 @@ bool Session::run_idle_pass() {
   // single-window equivalent), and of the 1258:0285-02d9 epilogue only the
   // 11c8:0135(0) audio finish (no Elevator Control yet). The shared pass
   // runs 1258:023a through 1090:03ab(1), calling back into the hooks below.
+  if (pending_main_pass_) {
+    // The pending WM_PAINT of a non-synchronous request_main_pass.
+    const auto pass = *pending_main_pass_;
+    pending_main_pass_.reset();
+    rebuild_main(pass, true);
+  }
   ++idle_passes_;
   log_request(RequestKind::pass_begin,
               {static_cast<std::int64_t>(idle_passes_)});
@@ -567,17 +822,71 @@ void Session::rating_promoted_after_dialog(std::uint16_t /*rating*/) {
   // 1140:010d(1) resets DS:783c to edit mode two.
   if (original_rating_command_refresh_plan(1U, false, false)
           .force_command_mode_two) {
-    command_mode_ = 2U;
-    log_request(RequestKind::command_mode, {command_mode_});
+    world_input_.command_mode = 2U;
+    log_request(RequestKind::command_mode, {world_input_.command_mode});
   }
 }
 
+void Session::before_scheduler_step(bool sample_cursor) {
+  // 1258:0256 samples the cursor into the Main client (even outside it;
+  // 11f8:3c13 intersects later). The SDL host samples the last pointer
+  // event; before the first one there is nothing to sample.
+  if (sample_cursor && last_pointer_) {
+    world_input_.pointer = {true, last_pointer_->x, last_pointer_->y};
+  }
+  // 1090:03ab saves DS:77ac before the preview-only or full-frame pass.
+  previous_preview_rect_ = world_input_.preview_rect;
+}
+
+void Session::preview_only_pass() {
+  // 1090:03bf-0427 through the shared plan, as Win32IdlePassHost runs it.
+  const auto plan = original_preview_only_pass_plan(
+      world_input_, false, previous_preview_rect_,
+      original_world_input_preview_rect(world_input_,
+                                        {viewport_.x, viewport_.y}));
+  for (std::uint8_t index = 0; index < plan.checkpoints_before; ++index) {
+    checkpoint(OriginalIdleCheckpoint::construction);
+  }
+  if (plan.clear_previous) world_input_.preview_rect.reset();
+  if (plan.present_main_direct) {
+    rebuild_main(OriginalMainSurfacePass::preview_repaint, false);
+  } else {
+    world_input_.preview_rect = plan.new_rect;
+  }
+  for (std::uint8_t index = 0; index < plan.checkpoints_after; ++index) {
+    checkpoint(OriginalIdleCheckpoint::construction);
+  }
+  if (plan.present_main_direct) present_main();
+}
+
+void Session::restore_preview() {
+  // 1090:04a7 11f8:3b94.
+  const auto restore = original_construction_preview_restore_plan(
+      world_input_.preview_scratch, false, previous_preview_rect_.has_value());
+  for (std::uint8_t index = 0; index < restore.audio_checkpoints; ++index) {
+    checkpoint(OriginalIdleCheckpoint::construction);
+  }
+  if (restore.clear_previous_rectangle) world_input_.preview_rect.reset();
+}
+
 bool Session::render_full_frame(bool renderer_surface_dirty) {
-  // 1090:0580 renderer. No construction outline yet, so the preview
-  // rectangle never changes.
+  // 1090:0580 renderer and the 1090:05ee outline.
+  current_preview_rect_ = original_world_input_preview_rect(
+      world_input_, {viewport_.x, viewport_.y});
+  const bool preview_changed = previous_preview_rect_ != current_preview_rect_;
   rebuild_main(OriginalMainSurfacePass::simulation_frame, false,
                renderer_surface_dirty);
-  return false;
+  const auto draw = original_construction_preview_draw_plan(
+      world_input_.preview_scratch, world_input_.build_mode_enabled,
+      world_input_.command_mode);
+  for (std::uint8_t index = 0; index < draw.audio_checkpoints; ++index) {
+    checkpoint(OriginalIdleCheckpoint::construction);
+  }
+  return preview_changed;
+}
+
+void Session::commit_full_frame_preview() {
+  world_input_.preview_rect = current_preview_rect_;
 }
 
 void Session::palette_recolor_rebuild() {
@@ -588,6 +897,329 @@ void Session::final_effect_palette_changed() {
   // Fourth 1020:00cb (1090:06dc).
   rebuild_main(OriginalMainSurfacePass::palette_repaint, false);
   present_main();
+}
+
+OriginalWorldInputContext Session::world_input_context() {
+  return {document_ ? &*document_ : nullptr,
+          resources_,
+          part_,
+          construction_costs_,
+          rent_income_,
+          world_input_};
+}
+
+bool Session::run_selector_modal(OriginalCommandSelectorSession& selector) {
+  // DialogBoxIndirectParamW's own loop: DS:24b8 is held, the selector has
+  // the capture, and no idle pass runs until it ends.
+  log_request(RequestKind::selector,
+              {selector.group().tabm_number, selector.choice()});
+  ++modal_depth_;
+  selector_ = &selector;
+  if (input_source_) input_source_->modal_changed();
+  bool accepted = false;
+  while (input_source_) {
+    const auto event = input_source_->next_modal_event();
+    if (!event) break;
+    if (event->kind == InputKind::down ||
+        event->kind == InputKind::double_click) {
+      left_button_down_ = true;
+    } else if (event->kind == InputKind::up) {
+      left_button_down_ = false;
+    }
+    last_pointer_ = OriginalWorldPoint{event->x - layout_.main_client.x,
+                                       event->y - layout_.main_client.y};
+    // The desktop bottom of 1050:05d6 is the window bottom.
+    const auto row = OriginalCommandSelectorSession::row_at(
+        event->x - selector.anchor_left(),
+        event->y - selector.top(layout_.window_height), selector.width(),
+        selector.height());
+    OriginalCommandSelectorStep step{};
+    switch (event->kind) {
+      case InputKind::move: step = selector.on_move(row); break;
+      // The dialog class has no CS_DBLCLKS: a double click is a down.
+      case InputKind::down:
+      case InputKind::double_click: step = selector.on_lbutton_down(row);
+        break;
+      case InputKind::up: step = selector.on_lbutton_up(row); break;
+      case InputKind::right_down: step = selector.on_rbutton_down(); break;
+    }
+    if (step.redraw) input_source_->modal_changed();
+    if (step.end) {
+      accepted = step.accepted;
+      break;
+    }
+  }
+  selector_ = nullptr;
+  --modal_depth_;
+  if (input_source_) input_source_->modal_changed();
+  log_request(RequestKind::selector, {accepted, selector.choice()});
+  present_requested_ = true;
+  return accepted;
+}
+
+void Session::pointer_event(const InputEvent& event) {
+  // MK_LBUTTON from the tracked button state.
+  switch (event.kind) {
+    case InputKind::down:
+    case InputKind::double_click:
+      left_button_down_ = true;
+      break;
+    case InputKind::up:
+      left_button_down_ = false;
+      break;
+    case InputKind::move:
+    case InputKind::right_down:
+      break;
+  }
+  const std::uint16_t keys = static_cast<std::uint16_t>(
+      (event.keys & (kOriginalKeyShift | kOriginalKeyControl)) |
+      (left_button_down_ ? kOriginalKeyLButton : 0U));
+  // GetCursorPos converted to the Main client on every motion, even outside
+  // Main (1258:0256 never clears "inside").
+  last_pointer_ = OriginalWorldPoint{event.x - layout_.main_client.x,
+                                     event.y - layout_.main_client.y};
+  if (event.kind == InputKind::right_down) return;
+
+  const bool down =
+      event.kind == InputKind::down || event.kind == InputKind::double_click;
+  // A press on a palette's HTCAPTION area enters DefWindowProc's SC_MOVE
+  // loop, which captures the mouse until the release: no procedure sees
+  // the moves or the release. TEMP: panels do not move yet, so the loop
+  // only swallows the gesture.
+  if (nonclient_press_) {
+    if (event.kind == InputKind::up) nonclient_press_ = false;
+    return;
+  }
+
+  // SetCapture routes every mouse message to its owner, without
+  // WM_NCHITTEST.
+  Panel panel = Panel::none;
+  if (capture_ == OriginalInputSurface::main) {
+    panel = Panel::main;
+  } else if (capture_ == OriginalInputSurface::map) {
+    panel = Panel::map;
+  } else {
+    // Topmost first: the drawing order of compose_window, reversed. Main
+    // takes only its client; a palette takes its whole outer rectangle.
+    for (auto it = kPanelZOrder.rbegin(); it != kPanelZOrder.rend(); ++it) {
+      const auto& area = *it == Panel::main      ? layout_.main_client
+                         : *it == Panel::map     ? layout_.map_outer
+                         : *it == Panel::info    ? layout_.info_outer
+                                                 : layout_.command_outer;
+      if (panel_visible(*it) && area.contains(event.x, event.y)) {
+        panel = *it;
+        break;
+      }
+    }
+    if (panel == Panel::none) return;
+    if (panel != Panel::main) {
+      const auto hit = palette_hit(panel, event.x, event.y);
+      if (hit != PaletteHit::client) {
+        // Nonclient: a press still activates the palette, and HTCAPTION
+        // starts the move loop. HTBORDER does nothing more.
+        if (down) {
+          active_panel_ = panel;
+          nonclient_press_ = hit == PaletteHit::caption;
+        }
+        return;
+      }
+    }
+  }
+  if (down) active_panel_ = panel;
+  route_pointer(panel, event, keys);
+}
+
+Session::PaletteHit Session::palette_hit(Panel panel, int x, int y) const {
+  // The CMDBTNWNDPROC / INFOWNDPROC / MAPWNDPROC WM_NCHITTEST split
+  // (original_palette_frame_hit_test) runs on every point of the window,
+  // its one-pixel WS_BORDER included: the close box is HTCLIENT, every
+  // other point above client y 8 (the top border too) HTCAPTION. The
+  // remaining border pixels fall through to DefWindowProc's HTBORDER.
+  const PanelRect& client = panel == Panel::command ? layout_.command_client
+                            : panel == Panel::map   ? layout_.map_client
+                                                    : layout_.info_client;
+  const auto hit =
+      original_palette_frame_hit_test(x - client.x, y - client.y);
+  if (hit == OriginalPaletteFrameHit::drag) return PaletteHit::caption;
+  return client.contains(x, y) ? PaletteHit::client : PaletteHit::border;
+}
+
+void Session::route_pointer(Panel panel,
+                            const InputEvent& event,
+                            std::uint16_t keys) {
+  const auto ctx = world_input_context();
+  auto& host = *world_host_;
+  const auto client_x = [&](const PanelRect& rect) { return event.x - rect.x; };
+  const auto client_y = [&](const PanelRect& rect) { return event.y - rect.y; };
+  // Only Main's class has CS_DBLCLKS; elsewhere the second press is a down.
+  const bool down =
+      event.kind == InputKind::down || event.kind == InputKind::double_click;
+  switch (panel) {
+    case Panel::main: {
+      const OriginalWorldInputPoint point{client_x(layout_.main_client),
+                                          client_y(layout_.main_client), keys};
+      if (down) {
+        original_main_pointer_down(ctx, host, point,
+                                   event.kind == InputKind::double_click);
+      } else if (event.kind == InputKind::move) {
+        original_main_pointer_move(ctx, host, point);
+      } else if (event.kind == InputKind::up) {
+        original_main_pointer_up(ctx, host, point);
+      }
+      break;
+    }
+    case Panel::command: {
+      // CMDBTNWNDPROC handles no WM_MOUSEMOVE.
+      const int x = client_x(layout_.command_client);
+      const int y = client_y(layout_.command_client);
+      if (down) {
+        original_command_pointer_down(ctx, host, x, y);
+      } else if (event.kind == InputKind::up) {
+        original_command_pointer_up(ctx, host, x, y);
+      }
+      break;
+    }
+    case Panel::map: {
+      const int x = client_x(layout_.map_client);
+      const int y = client_y(layout_.map_client);
+      if (down) {
+        original_map_pointer_down(ctx, host, x, y);
+      } else if (event.kind == InputKind::move) {
+        (void)original_map_pointer_move(ctx, host, x, y, keys);
+      } else if (event.kind == InputKind::up) {
+        (void)original_map_pointer_up(ctx, host);
+      }
+      break;
+    }
+    case Panel::info:
+      if (down) {
+        (void)original_info_pointer_down(ctx, host,
+                                         client_x(layout_.info_client),
+                                         client_y(layout_.info_client));
+      }
+      break;
+    case Panel::none:
+      break;
+  }
+}
+
+void Session::select_tool(std::optional<std::uint16_t> edit_mode,
+                          std::optional<std::uint16_t> build_type) {
+  if (edit_mode) {
+    world_input_.command_mode = *edit_mode;
+  }
+  if (build_type) {
+    world_input_.selected_build_type = *build_type;
+    world_input_.command_mode = 3U;
+    const auto& rating = active_original_command_rating(
+        world_input_context(), world_input_.active_command_rating);
+    const auto catalog = original_command_catalog(resources_, rating);
+    for (std::size_t index = 0; index < catalog.size(); ++index) {
+      if (original_command_build_type(resources_, catalog[index]) ==
+          *build_type) {
+        world_input_.command_mode = static_cast<std::uint16_t>(index + 3U);
+        break;
+      }
+    }
+  }
+  present_requested_ = true;
+}
+
+bool Session::panel_visible(Panel panel) const {
+  switch (panel) {
+    case Panel::map: return map_visible_;
+    case Panel::info: return info_visible_;
+    case Panel::command: return command_visible_;
+    case Panel::main: return true;
+    case Panel::none: return false;
+  }
+  return false;
+}
+
+const OriginalCommandRatingState& Session::active_rating_state() const {
+  const auto bounded = std::clamp<std::uint16_t>(
+      world_input_.active_command_rating, 1U, 6U);
+  return world_input_.command_ratings[bounded - 1U];
+}
+
+std::uint64_t Session::input_digest() const {
+  const auto& state = world_input_;
+  Fnv64 hash;
+  hash.boolean(state.build_mode_enabled);
+  hash.boolean(state.command_toggle_pressed);
+  hash.unsigned_integer(state.command_mode);
+  hash.unsigned_integer(state.selected_build_type);
+  hash.unsigned_integer(state.map_mode);
+  hash.unsigned_integer(state.active_command_rating);
+  for (const auto& rating : state.command_ratings) {
+    hash.unsigned_integer(rating.rating);
+    hash.unsigned_integer(rating.encoded_entries.size());
+    for (const auto entry : rating.encoded_entries) {
+      hash.unsigned_integer(entry);
+    }
+  }
+  hash.unsigned_integer(state.office_variant);
+  for (const auto variant : state.facility_variants) {
+    hash.unsigned_integer(variant);
+  }
+  hash.boolean(state.pointer_armed);
+  hash.boolean(state.control_modifier);
+  hash.boolean(state.shift_modifier);
+  hash.boolean(state.capture_held);
+  for (const auto& span : {state.lobby_drag, state.floor_drag}) {
+    hash.boolean(span.active);
+    hash.integer(span.floor);
+    hash.integer(span.anchor_left);
+    hash.integer(span.anchor_right);
+  }
+  hash.unsigned_integer(static_cast<std::uint8_t>(state.parking_drag.kind));
+  hash.integer(state.parking_drag.press_floor);
+  hash.integer(state.parking_drag.snapped_left);
+  hash.integer(state.parking_drag.snapped_right);
+  hash.boolean(state.completion.active);
+  hash.unsigned_integer(state.completion.type);
+  hash.unsigned_integer(state.completion.successful_steps);
+  hash.integer(state.completion.balance_at_press);
+  hash.boolean(state.completion.priority_sound_latch_armed);
+  hash.boolean(state.shaft_drag.capture_active);
+  hash.unsigned_integer(static_cast<std::uint8_t>(state.shaft_drag.direction));
+  hash.unsigned_integer(state.shaft_drag.elevator_index);
+  hash.boolean(state.pointer.inside);
+  hash.integer(state.pointer.client_x);
+  hash.integer(state.pointer.client_y);
+  hash.boolean(state.preview_rect.has_value());
+  if (state.preview_rect) {
+    hash.integer(state.preview_rect->left);
+    hash.integer(state.preview_rect->top);
+    hash.integer(state.preview_rect->right);
+    hash.integer(state.preview_rect->bottom);
+  }
+  hash.boolean(state.preview_scratch.backing_saved);
+  hash.boolean(state.map_drag_active);
+  hash.boolean(state.map_pointer_down);
+  hash.boolean(state.map_focus.has_value());
+  hash.boolean(last_pointer_.has_value());
+  if (last_pointer_) {
+    hash.integer(last_pointer_->x);
+    hash.integer(last_pointer_->y);
+  }
+  hash.boolean(map_visible_);
+  hash.boolean(info_visible_);
+  hash.boolean(command_visible_);
+  hash.integer(command_outer_height_);
+  hash.boolean(document_dirty_);
+  return hash.value();
+}
+
+bool Session::direct_build(const DirectBuild& build) {
+  if (!document_) throw std::runtime_error("direct build needs a tower");
+  const bool built = apply_direct_build(*document_, part_, construction_costs_,
+                                        rent_income_, build);
+  // As apply_original_construction_mutation_presentation: no synchronous
+  // rebuild (no RNG draw) here.
+  main_backing_dirty_ = true;
+  present_requested_ = true;
+  return built;
 }
 
 void Session::log_request(RequestKind kind,
@@ -687,9 +1319,9 @@ SessionDigest Session::state_digest() const {
     host.boolean(visual.direction_up);
     host.unsigned_integer(visual.person_index);
   }
-  host.boolean(build_mode_enabled_);
-  host.unsigned_integer(command_mode_);
-  host.unsigned_integer(map_mode_);
+  host.boolean(world_input_.build_mode_enabled);
+  host.unsigned_integer(world_input_.command_mode);
+  host.unsigned_integer(world_input_.map_mode);
   host.integer(viewport_.x);
   host.integer(viewport_.y);
   host.integer(viewport_.width);
@@ -723,7 +1355,7 @@ std::uint32_t Session::milliseconds_until_due() const {
     return delta > 0 ? static_cast<std::uint32_t>(delta) : 0U;
   };
   std::uint32_t wait = 100U;
-  if (document_ && build_mode_enabled_) {
+  if (document_ && world_input_.build_mode_enabled) {
     wait = std::min(
         wait, flags_.fast_mode_enabled
                   ? remaining(fast_frame_ms_ + kNativeFastModeFramePeriodMs)

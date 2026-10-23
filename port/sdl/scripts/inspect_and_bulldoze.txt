@@ -1,0 +1,20 @@
+# Edit tools on the staged busy tower: the Magnifier opens Facility
+# Information for an office (logged), then the Bulldozer removes it.
+# Floor 14 is window y 392..427 at the default view; client x 400 is
+# window x 608.
+#
+#   simtower_sdl --scenario busy --input-script inspect_and_bulldoze.txt \
+#                --passes 6 --state-digest
+
+pass 2
+# Magnifier cell (edit mode 2) in the Command mode strip.
+click-command 182 228
+expect-mode 2
+click 608 410
+pass 3
+# Bulldozer cell (edit mode 0).
+click-command 140 228
+expect-mode 0
+click 608 410
+pass 6
+digest

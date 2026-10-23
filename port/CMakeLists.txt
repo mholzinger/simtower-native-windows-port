@@ -27,6 +27,7 @@ add_library(simtower_port_core STATIC
   src/original_info.cpp
   src/original_information.cpp
   src/original_map.cpp
+  src/original_palette_frame.cpp
   src/original_people.cpp
   src/original_resources_index.cpp
   src/original_simulation.cpp
@@ -38,6 +39,8 @@ add_library(simtower_port_core STATIC
   src/original_ui.cpp
   src/original_wave.cpp
   src/original_world.cpp
+  src/original_world_input.cpp
+  src/original_palette_input.cpp
 )
 target_include_directories(simtower_port_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -107,11 +110,21 @@ else()
 endif()
 option(SIMTOWER_BUILD_SDL "Build the SDL3 frontend simtower_sdl"
        ${SIMTOWER_BUILD_SDL_DEFAULT})
+# Test support (staged scenario towers and the --direct-build reference
+# constructor). Portable: it depends only on the core, never on SDL or
+# Win32. Used by simtower_sdl's test-only flags and the portable tests.
+add_library(simtower_test_support STATIC support/test_scenario.cpp)
+target_include_directories(simtower_test_support PUBLIC
+                           ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(simtower_test_support PUBLIC simtower_port_core)
+
 if(SIMTOWER_BUILD_SDL)
   find_package(SDL3 REQUIRED CONFIG)
   add_executable(simtower_sdl sdl/sdl_main.cpp sdl/sdl_session.cpp
-                              sdl/sdl_scenario.cpp sdl/sdl_audio.cpp)
-  target_link_libraries(simtower_sdl PRIVATE simtower_port_core SDL3::SDL3)
+                              sdl/sdl_audio.cpp sdl/sdl_layout.cpp
+                              sdl/sdl_panels.cpp sdl/sdl_input_script.cpp)
+  target_link_libraries(simtower_sdl PRIVATE simtower_test_support
+                                             SDL3::SDL3)
 endif()
 
 include(CTest)
@@ -271,14 +284,29 @@ if(BUILD_TESTING)
 
   # Locks the shared idle pass's host-hook order on a staged tower. The
   # scenario builder is portable (no SDL), so this runs on every platform.
-  add_executable(simtower_idle_pass_tests tests/idle_pass_tests.cpp
-                                          sdl/sdl_scenario.cpp)
-  target_include_directories(simtower_idle_pass_tests PRIVATE
-                             ${CMAKE_CURRENT_SOURCE_DIR}/sdl)
-  target_link_libraries(simtower_idle_pass_tests PRIVATE simtower_port_core)
+  add_executable(simtower_idle_pass_tests tests/idle_pass_tests.cpp)
+  target_link_libraries(simtower_idle_pass_tests PRIVATE
+                        simtower_test_support)
   add_test(
     NAME simtower_idle_pass_tests
     COMMAND simtower_idle_pass_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+
+  # The shared world input module (Main construction, edit tools, Command
+  # and Map pointer input) against direct constructor calls, through a
+  # recording host. Portable (no SDL or Win32), so it also runs under Wine.
+  add_executable(simtower_world_input_tests tests/world_input_tests.cpp)
+  target_link_libraries(simtower_world_input_tests PRIVATE
+                        simtower_test_support)
+  if(MINGW)
+    # Each case keeps several complete tower copies on the stack.
+    target_link_options(simtower_world_input_tests PRIVATE
+                        -Wl,--stack,16777216)
+  endif()
+  add_test(
+    NAME simtower_world_input_tests
+    COMMAND simtower_world_input_tests
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
   )
 
@@ -295,6 +323,41 @@ if(BUILD_TESTING)
     add_test(NAME simtower_sdl_audio_tests COMMAND simtower_sdl_audio_tests)
     set_tests_properties(simtower_sdl_audio_tests PROPERTIES
                          ENVIRONMENT "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy")
+
+    # Scripted input end to end: window coordinates through the panel
+    # router into the shared module must match --direct-build's tower (or,
+    # for "same-digest-as" scripts, a reference script's whole digest).
+    foreach(script place_lobby selector_floor place_office
+                   palette_nonclient selector_inner_click)
+      add_test(
+        NAME simtower_sdl_input_${script}
+        COMMAND ${CMAKE_COMMAND}
+          -DBIN=$<TARGET_FILE:simtower_sdl>
+          -DPACK=${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+          -DSCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/${script}.txt
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_input_test.cmake)
+      set_tests_properties(simtower_sdl_input_${script} PROPERTIES
+                           ENVIRONMENT
+                           "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy")
+    endforeach()
+
+    # The documented example scripts must keep running (exit 0) with the
+    # --scenario and --passes their usage line names.
+    file(GLOB SIMTOWER_SDL_EXAMPLE_SCRIPTS CONFIGURE_DEPENDS
+         ${CMAKE_CURRENT_SOURCE_DIR}/sdl/scripts/*.txt)
+    foreach(script_path IN LISTS SIMTOWER_SDL_EXAMPLE_SCRIPTS)
+      get_filename_component(script ${script_path} NAME_WE)
+      add_test(
+        NAME simtower_sdl_example_${script}
+        COMMAND ${CMAKE_COMMAND}
+          -DBIN=$<TARGET_FILE:simtower_sdl>
+          -DPACK=${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+          -DSCRIPT=${script_path}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_example_script_test.cmake)
+      set_tests_properties(simtower_sdl_example_${script} PROPERTIES
+                           ENVIRONMENT
+                           "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy")
+    endforeach()
   endif()
 
   # These executables intentionally use assert() as their test primitive.
@@ -314,7 +377,8 @@ if(BUILD_TESTING)
       simtower_about_tests
       simtower_elevator_control_tests
       simtower_audio_tests
-      simtower_idle_pass_tests)
+      simtower_idle_pass_tests
+      simtower_world_input_tests)
   if(SIMTOWER_BUILD_SDL)
     list(APPEND SIMTOWER_ASSERT_TESTS simtower_sdl_audio_tests)
   endif()
