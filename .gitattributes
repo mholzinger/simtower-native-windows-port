@@ -3,3 +3,5 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.ps1 text eol=crlf
+# Vendored third-party files stay byte-exact (SHA-256s in port/third_party/README.md).
+port/third_party/** -text

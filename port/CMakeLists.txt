@@ -54,6 +54,7 @@ if(WIN32)
     src/original_command_palette_win32.cpp
     src/original_dialog_win32.cpp
     src/original_dib_win32.cpp
+    src/original_draw_context_win32.cpp
     src/original_dtmp_runtime_win32.cpp
     src/original_font_win32.cpp
     src/original_info_win32.cpp
@@ -99,6 +100,40 @@ if(WIN32)
   endif()
 endif()
 
+# Software drawing canvas: the portable OriginalDrawContext over a raster,
+# with TrueType text through the vendored stb_truetype and the bundled
+# Liberation Sans Regular (port/third_party, licenses in
+# ../THIRD_PARTY_LICENSES). Built on every platform for the portable tests;
+# only the SDL frontend links it into a game executable. The Win32 host keeps
+# GDI and the system Arial / MS Sans Serif.
+set(SIMTOWER_CANVAS_FONT
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/liberation-fonts/LiberationSans-Regular.ttf)
+set(SIMTOWER_CANVAS_FONT_SOURCE
+    ${CMAKE_CURRENT_BINARY_DIR}/generated_canvas_font.cpp)
+add_custom_command(
+  OUTPUT ${SIMTOWER_CANVAS_FONT_SOURCE}
+  COMMAND ${CMAKE_COMMAND} -DINPUT=${SIMTOWER_CANVAS_FONT}
+          -DOUTPUT=${SIMTOWER_CANVAS_FONT_SOURCE}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
+  DEPENDS ${SIMTOWER_CANVAS_FONT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
+  VERBATIM
+)
+add_library(simtower_canvas STATIC
+  src/original_canvas_font.cpp
+  src/original_draw_canvas.cpp
+  ${SIMTOWER_CANVAS_FONT_SOURCE}
+)
+target_include_directories(simtower_canvas SYSTEM PRIVATE
+                           ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
+target_link_libraries(simtower_canvas PUBLIC simtower_port_core)
+if(NOT MSVC)
+  # Keep stb_truetype's float rasterizer free of fused multiply-adds, so
+  # glyph masks (and the canvas test hashes) match across compilers and
+  # architectures.
+  target_compile_options(simtower_canvas PRIVATE -ffp-contract=off)
+endif()
+
 # SDL3 frontend (port/sdl). On by default off Windows; the Windows build
 # keeps the Win32 host and can opt in once an SDL3 package is available.
 # A non-Windows configure therefore requires an SDL3 CMake package: CI jobs
@@ -124,7 +159,7 @@ if(SIMTOWER_BUILD_SDL)
                               sdl/sdl_audio.cpp sdl/sdl_layout.cpp
                               sdl/sdl_panels.cpp sdl/sdl_input_script.cpp)
   target_link_libraries(simtower_sdl PRIVATE simtower_test_support
-                                             SDL3::SDL3)
+                                             simtower_canvas SDL3::SDL3)
 endif()
 
 include(CTest)
@@ -223,12 +258,17 @@ if(BUILD_TESTING)
   )
 
   add_executable(simtower_info_tests tests/info_tests.cpp)
-  target_link_libraries(simtower_info_tests PRIVATE simtower_port_core)
+  target_link_libraries(simtower_info_tests PRIVATE simtower_canvas)
   add_test(
     NAME simtower_info_tests
     COMMAND simtower_info_tests
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
   )
+
+  # OriginalCanvasDrawContext primitives on synthetic input (no assets).
+  add_executable(simtower_draw_canvas_tests tests/draw_canvas_tests.cpp)
+  target_link_libraries(simtower_draw_canvas_tests PRIVATE simtower_canvas)
+  add_test(NAME simtower_draw_canvas_tests COMMAND simtower_draw_canvas_tests)
 
   add_executable(simtower_information_tests tests/information_tests.cpp)
   target_link_libraries(simtower_information_tests PRIVATE simtower_port_core)
@@ -372,6 +412,7 @@ if(BUILD_TESTING)
       simtower_command_palette_tests
       simtower_map_tests
       simtower_info_tests
+      simtower_draw_canvas_tests
       simtower_information_tests
       simtower_find_tests
       simtower_about_tests
