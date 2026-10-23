@@ -1,0 +1,32 @@
+#pragma once
+
+// Asset-free stand-in for the generated original_resources.generated.hpp,
+// configured by CMake when the extracted resource pack is absent (for
+// example in CI). It declares the same interface as
+// tools/build_resource_pack.py writes, with an empty descriptor table, so
+// the portable code compiles and every resource lookup finds nothing. Keep
+// the declarations in step with that generator.
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+#define SIMTOWER_RESOURCES_STUB 1
+
+namespace simtower::generated {
+
+inline constexpr int kResourcePackRCDATAId = 101;
+
+struct ResourceDescriptor {
+  std::string_view type;
+  std::int32_t numeric_id;
+  std::string_view string_id;
+  std::uint32_t offset;
+  std::uint32_t size;
+  std::string_view sha256;
+};
+
+inline constexpr std::array<ResourceDescriptor, 0> kResources = {};
+
+}  // namespace simtower::generated
