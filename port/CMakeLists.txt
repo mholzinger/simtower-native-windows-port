@@ -20,7 +20,7 @@ set(SIMTOWER_ASSET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/generated CACHE PATH
 set(SIMTOWER_HELP_FILE
     ${CMAKE_CURRENT_SOURCE_DIR}/../original/extracted/MAXIS/SIMTOWER/SIMTOWER.HLP
     CACHE FILEPATH "The original SIMTOWER.HLP (embedded by the Win32 host)")
-set(SIMTOWER_TDT_SAMPLE_DIR ${SIMTOWER_TDT_SAMPLE_DIR}
+set(SIMTOWER_TDT_SAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../references/tdt-samples
     CACHE PATH "Directory with the sample .TDT towers used by some tests")
 set(SIMTOWER_ASSETS AUTO CACHE STRING
     "Use the extracted resource pack: AUTO, ON or OFF")
@@ -396,7 +396,9 @@ if(BUILD_TESTING)
     COMMAND simtower_menu_tests
       ${SIMTOWER_RESOURCE_PACK}
   )
-  set_tests_properties(simtower_menu_tests PROPERTIES SKIP_RETURN_CODE 77)
+  if(NOT SIMTOWER_HAVE_ASSETS)
+    set_tests_properties(simtower_menu_tests PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 
   # The shared WM_COMMAND dispatcher against a recording host (no assets).
   add_executable(simtower_main_command_tests tests/main_command_tests.cpp)
@@ -427,7 +429,9 @@ if(BUILD_TESTING)
     COMMAND simtower_audio_tests
       ${SIMTOWER_RESOURCE_PACK}
   )
-  set_tests_properties(simtower_audio_tests PROPERTIES SKIP_RETURN_CODE 77)
+  if(NOT SIMTOWER_HAVE_ASSETS)
+    set_tests_properties(simtower_audio_tests PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 
   # Locks the shared idle pass's host-hook order on a staged tower. The
   # scenario builder is portable (no SDL), so this runs on every platform.
@@ -500,8 +504,10 @@ if(BUILD_TESTING)
       NAME simtower_sdl_menu_tests
       COMMAND simtower_sdl_menu_tests
         ${SIMTOWER_RESOURCE_PACK})
-    set_tests_properties(simtower_sdl_menu_tests PROPERTIES
-                         SKIP_RETURN_CODE 77)
+    if(NOT SIMTOWER_HAVE_ASSETS)
+      set_tests_properties(simtower_sdl_menu_tests PROPERTIES
+                           SKIP_RETURN_CODE 77)
+    endif()
 
     # Save As and Open through the scripted File menu and picker: a fresh
     # menu Open of the saved file must continue exactly like --open of it.
