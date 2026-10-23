@@ -269,9 +269,11 @@ void render_original_background(const OriginalResources& resources,
                                 int view_x,
                                 int view_y,
                                 OriginalWorldRaster& raster) {
-  // 1048:0000 assembles BITMAP/850..857 into one 32x2880 WinG strip in
-  // reverse resource order. Direct per-strip sampling is pixel-equivalent.
-  const std::array<IndexedDib, 8> sky = {
+  // 1048:0000 assembles BITMAP/857..849 into one 32x3240 WinG strip in
+  // reverse resource order: its loop runs k=7 down to -1 (0047, 0092-0096)
+  // loading 0x352+k, so the ninth pass puts the BITMAP/849 earth gradient in
+  // strip rows 2880..3239. Direct per-strip sampling is pixel-equivalent.
+  const std::array<IndexedDib, 9> sky = {
       IndexedDib(resources.find("BITMAP", 857)),
       IndexedDib(resources.find("BITMAP", 856)),
       IndexedDib(resources.find("BITMAP", 855)),
@@ -280,20 +282,22 @@ void render_original_background(const OriginalResources& resources,
       IndexedDib(resources.find("BITMAP", 852)),
       IndexedDib(resources.find("BITMAP", 851)),
       IndexedDib(resources.find("BITMAP", 850)),
+      IndexedDib(resources.find("BITMAP", 849)),
   };
   const IndexedDib skyline(resources.find("BITMAP", 905));
 
   for (int y = 0; y < raster.height; ++y) {
     const int world_y = view_y + y;
-    int strip_y = world_y;
-    if (world_y >= 1080) {
-      strip_y -= 1080;
-    }
+    // 1048:03a3 copies strip rows 0..359 three times to world y 0..1079
+    // (the source rect set at 03c2-03d0 never changes; 03f6-0403 only moves
+    // the destination by i*360), then the whole strip to world y 1080..4319
+    // (047a-04af), so the underground (3960..4319) shows BITMAP/849.
+    const int strip_y = world_y < 1080 ? world_y % 360 : world_y - 1080;
     for (int x = 0; x < raster.width; ++x) {
       const int world_x = view_x + x;
       std::uint32_t color = 0x00ffffffU;
       if (world_y >= 0 && world_y < kOriginalWorldHeight &&
-          strip_y >= 0 && strip_y < 2880) {
+          strip_y >= 0 && strip_y < 3240) {
         const auto bitmap = static_cast<std::size_t>(strip_y / 360);
         color = palette[sky[bitmap].sample_index(
             positive_mod(world_x, 32), strip_y % 360)];
