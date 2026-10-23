@@ -5,6 +5,7 @@
 #include "original_startup_data.hpp"
 #include "original_tdt_file.hpp"
 #include "original_time.hpp"
+#include "original_ui.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -48,13 +49,31 @@ void verify_pack_extent(std::span<const std::byte> pack) {
 
 Session::Session(std::vector<std::byte> pack,
                  std::function<std::uint32_t()> clock_ms,
-                 SessionFlags flags)
+                 SessionFlags flags,
+                 OriginalAudioDevice* audio_device)
     : pack_(std::move(pack)),
       clock_ms_(std::move(clock_ms)),
       flags_(flags) {
   verify_pack_extent(pack_);
   // WinMain: the portable span constructor replaces from_current_module.
   resources_ = OriginalResources(std::span<const std::byte>(pack_));
+
+  // WinMain constructs the runtime right after the resources and runs
+  // 11c8:006b (initialize_original_audio); a failure turns the master
+  // switch off, which also stops the ambient RNG draw. There is no
+  // SIMTOWER.INI here, so the three categories keep the shipped profile
+  // (all on).
+  if (flags_.sound_enabled && audio_device) {
+    audio_ = std::make_unique<OriginalAudioRuntime>(resources_, *audio_device,
+                                                    clock_ms_);
+    audio_->set_sound_enabled(true);
+    if (!audio_->initialize()) {
+      log_line("audio: no PCM output device, sound off");
+      audio_->set_sound_enabled(false);
+      audio_.reset();
+      flags_.sound_enabled = false;
+    }
+  }
 
   // validate_original_startup_data: the same portable loader the
   // Win32 host calls, so a truncated or mismatched pack fails here. The
@@ -68,13 +87,14 @@ Session::Session(std::vector<std::byte> pack,
 
   // Deliberately omitted Win32 startup steps (WinMain), none of which
   // touches the document RNG or simulation state:
-  // - WAVMIX init, SIMTOWER.INI profile, logical palette, font bank, cursors,
-  //   icon, accelerators and menu (no audio, menus or fonts yet);
+  // - SIMTOWER.INI profile, logical palette, font bank, cursors, icon,
+  //   accelerators and menu (no menus or fonts yet);
   // - the BITMAP/128 -> 256 splash and its 180-tick wait (1128:0042-00a7);
   // - the bootstrap reset_original_command_state(true),
   //   refresh_original_rating_command(rating, 0) and Map-focus adjustment
   //   (10d0:0ac2): New/Open reset the command state again before any pass;
-  // - the fire-menu update and WAVE/20000.
+  // - the fire-menu update, and WAVE/20000 (play_startup_sound, which only
+  //   the interactive window calls).
   // WinMain's base palette, then its never-stored bootstrap tower
   // (its frame 0x09e5 selects the CLUT 1002->1001 transition).
   reset_original_palette_runtime(resources_, nullptr, palette_runtime_,
@@ -84,9 +104,40 @@ Session::Session(std::vector<std::byte> pack,
                                  palette_runtime_, coarse_tick_now());
 }
 
-std::uint32_t Session::coarse_tick_now() const {
-  // 1208:05e6. The Win32 wrapper also pumps audio here; there is none yet.
-  return original_coarse_tick(clock_ms_());
+std::uint32_t Session::coarse_tick_now() {
+  // 1208:05e6 through original_runtime_coarse_tick: every coarse-clock read
+  // first enters 11e0:0e84's 48-ms audio pump, which reaps voices and calls
+  // the device, so this is not a const read.
+  const std::uint32_t now = clock_ms_();
+  if (audio_) audio_->pump(now);
+  return original_coarse_tick(now);
+}
+
+void Session::play_startup_sound() {
+  play_audio(20000, 0U, 1U);
+}
+
+void Session::play_audio(std::int32_t resource,
+                         std::uint16_t repeat,
+                         std::uint16_t priority,
+                         bool reserved_if_idle) {
+  // The Win32 host passes a fresh GetTickCount to each request
+  // (play_original_event_sounds, Win32IdlePassHost::play_sound). Results
+  // are discarded there too; the line below is diagnostic only.
+  if (!audio_) return;
+  const std::uint32_t now = clock_ms_();
+  const bool started =
+      reserved_if_idle
+          ? audio_->play_reserved_if_idle(resource, repeat, now)
+          : audio_->play_resource(resource, repeat, priority, now);
+  if (flags_.log_sounds) {
+    log_line("audio " + std::to_string(resource) + " repeat " +
+             std::to_string(repeat) + " priority " +
+             (reserved_if_idle ? std::string("5 (reserved if idle)")
+                               : std::to_string(priority)) +
+             " at " + std::to_string(now) +
+             (started ? " started" : " refused"));
+  }
 }
 
 void Session::set_viewport_origin(int x, int y) {
@@ -306,6 +357,13 @@ std::uint16_t Session::log_dialog(const OriginalEventDialogRequest& dialog,
            std::to_string(dialog.argument) + " wave " +
            std::to_string(dialog.wave_resource) + " -> " +
            std::to_string(choice) + " (" + std::string(meaning) + ")");
+  if (audio_ && dialog.valid()) {
+    // run_original_event_dialog: 1068:0000 forcibly stops both mixer
+    // channels, then submits the dialog's WAVE resource at priority four
+    // before opening it.
+    audio_->stop_all(true);
+    if (dialog.wave_resource != 0) play_audio(dialog.wave_resource, 0U, 4U);
+  }
   return choice;
 }
 
@@ -353,16 +411,34 @@ OriginalIdlePassContext Session::idle_pass_context() {
 }
 
 bool Session::run_idle_pass() {
-  // run_original_idle_simulation. The 1258:0195-023a prelude (WAVMIX
-  // activation, TOPMOST window repair) has no single-window equivalent, and
-  // neither has the 1258:0285-02d9 epilogue (no Elevator Control or audio
-  // yet). The shared pass runs 1258:023a through 1090:03ab(1), calling back
-  // into the hooks below.
+  // run_original_idle_simulation. Of the 1258:0195-023a prelude only the
+  // WAVMIX activation reconcile applies (TOPMOST window repair has no
+  // single-window equivalent), and of the 1258:0285-02d9 epilogue only the
+  // 11c8:0135(0) audio finish (no Elevator Control yet). The shared pass
+  // runs 1258:023a through 1090:03ab(1), calling back into the hooks below.
   ++idle_passes_;
   log_request(RequestKind::pass_begin,
               {static_cast<std::int64_t>(idle_passes_)});
+  if (audio_) {
+    // 1258:0195-01c3: losing activation or minimizing stops every channel;
+    // regaining it retries activation while the latch is clear.
+    switch (original_idle_audio_transition(window_active_, window_iconic_,
+                                           audio_->active())) {
+      case OriginalIdleAudioTransition::activate:
+        audio_->activate();
+        break;
+      case OriginalIdleAudioTransition::deactivate:
+        audio_->deactivate();
+        break;
+      case OriginalIdleAudioTransition::none:
+        break;
+    }
+  }
   auto context = idle_pass_context();
   (void)run_original_idle_pass(context, *this);
+  // 1258:02d9 always ends through 11c8:0135(0); the zero force word makes
+  // both channel stops deliberate no-ops.
+  if (audio_) audio_->stop_all(false);
   // A pending WM_PAINT is processed before the next empty-queue pass.
   if (present_requested_) present_main();
   const bool present = present_requested_;
@@ -372,7 +448,8 @@ bool Session::run_idle_pass() {
 }
 
 std::uint32_t Session::coarse_tick(std::uint32_t now_ms) {
-  // 1208:05e6. The Win32 wrapper also pumps audio here; there is none yet.
+  // 1208:05e6 with the Win32 wrapper's 11e0:0e84 pump first.
+  if (audio_) audio_->pump(now_ms);
   return original_coarse_tick(now_ms);
 }
 
@@ -435,37 +512,44 @@ void Session::expire_info_status() {
 }
 
 void Session::play_sound(std::int32_t resource,
-                         std::uint16_t /*repeat*/,
-                         std::uint16_t /*priority*/,
+                         std::uint16_t repeat,
+                         std::uint16_t priority,
                          OriginalIdleSound source) {
+  // Logged first (digest), then played (Win32IdlePassHost::play_sound).
+  const char* label = "other";
   switch (source) {
-    case OriginalIdleSound::scheduler:
-      return sound(resource, "scheduler");
-    case OriginalIdleSound::ambient:
-      return sound(resource, "ambient");
-    case OriginalIdleSound::recycling:
-      return sound(resource, "recycling");
-    case OriginalIdleSound::metro:
-      return sound(resource, "metro");
-    case OriginalIdleSound::bomb_payment:
-      return sound(resource, "bomb payment");
-    case OriginalIdleSound::cathedral:
-      return sound(resource, "cathedral");
-    case OriginalIdleSound::elevator:
-      return sound(resource, "elevator");
-    case OriginalIdleSound::hotel_checkout:
-      return sound(resource, "hotel checkout");
+    case OriginalIdleSound::scheduler: label = "scheduler"; break;
+    case OriginalIdleSound::ambient: label = "ambient"; break;
+    case OriginalIdleSound::recycling: label = "recycling"; break;
+    case OriginalIdleSound::metro: label = "metro"; break;
+    case OriginalIdleSound::bomb_payment: label = "bomb payment"; break;
+    case OriginalIdleSound::cathedral: label = "cathedral"; break;
+    case OriginalIdleSound::elevator: label = "elevator"; break;
+    case OriginalIdleSound::hotel_checkout: label = "hotel checkout"; break;
   }
-  sound(resource, "other");
+  sound(resource, label);
+  play_audio(resource, repeat, priority);
 }
 
 void Session::play_event_sounds(
     std::span<const OriginalEventSoundRequest> requests) {
-  for (const auto& request : requests) sound(request.resource, "event");
+  // play_original_event_sounds: 10e8:0450's requests go through 11c8:0100
+  // (reserved channel, only while idle); the others through 11c8:0167.
+  for (const auto& request : requests) {
+    sound(request.resource, "event");
+    play_audio(request.resource, request.repeat, request.priority,
+               request.reserved_if_idle);
+  }
 }
 
-void Session::stop_all_audio(bool /*force*/) {
-  // No audio yet: the Cathedral ceremony's channel stop is a no-op.
+void Session::stop_all_audio(bool force) {
+  // 11c8:0135 (the Cathedral ceremony passes force).
+  if (audio_) audio_->stop_all(force);
+}
+
+void Session::checkpoint(OriginalIdleCheckpoint) {
+  // Direct 11e0:0e84 pump inside 1090:03ab(1), on a fresh clock read.
+  if (audio_) audio_->pump(clock_ms_());
 }
 
 void Session::idle_palette_changed() {

@@ -1,5 +1,5 @@
 #include "original_alert_win32.hpp"
-#include "original_audio.hpp"
+#include "original_audio_waveout_win32.hpp"
 #include "original_resources.hpp"
 #include "original_resources.generated.hpp"
 #include "original_dialog_win32.hpp"
@@ -1198,82 +1198,8 @@ int main(int argc, char** argv) {
   assert(valid_wave_count == 55);
   assert(total_sample_bytes == 1638925);
 
-  // Headless branch coverage for 11c8:0167/0597 arbitration and category
-  // gates. No audio device or audible playback is opened by these tests.
-  simtower::OriginalAudioArbiter audio;
-  assert(audio.select_channel(1) == 0);
-  audio.start(0, 1577, 1);
-  assert(audio.select_channel(1) == 1);
-  audio.start(1, 1384, 1);
-  assert(audio.select_channel(1) == -1);
-  assert(audio.select_channel(2) == 0);
-  assert(audio.select_channel(5) == 1);
-  // Direct 11c8:09d2 completion-state tail: after the backend frees the
-  // completed wave, both active/priority words for the channel are cleared.
-  audio.stop(0);
-  assert(audio.select_channel(0) == 0);
-  // Direct 11c8:02c0 gate coverage and 11c8:0135 ordering: the latter's fixed
-  // loop invokes the gated stop for channel zero and then channel one—never a
-  // dynamic count. These pure checks do not initialize waveOut.
-  static_assert(!simtower::original_audio_stop_channel_allowed(
-      false, true, true, 0U));
-  static_assert(!simtower::original_audio_stop_channel_allowed(
-      true, false, true, 0U));
-  static_assert(!simtower::original_audio_stop_channel_allowed(
-      true, true, false, 0U));
-  static_assert(simtower::original_audio_stop_channel_allowed(
-      true, true, true, 0U));
-  static_assert(simtower::original_audio_stop_channel_allowed(
-      true, true, true, 1U));
-  static_assert(!simtower::original_audio_stop_channel_allowed(
-      true, true, true, 2U));
-  // Direct 11c8:0100 coverage without initializing waveOut: the reserved
-  // priority-five request is submitted exactly when channel one is idle.
-  static_assert(simtower::original_reserved_audio_should_submit(false));
-  static_assert(!simtower::original_reserved_audio_should_submit(true));
-  // Direct 11c8:0978 coverage without playback: zero leaves an ordinary
-  // one-shot header, while nonzero counts enable a loop for that many total
-  // waveOut passes.
-  static_assert(simtower::original_audio_loop_plan(0U) ==
-                simtower::OriginalAudioLoopPlan{});
-  static_assert(simtower::original_audio_loop_plan(1U) ==
-                (simtower::OriginalAudioLoopPlan{
-                    WHDR_BEGINLOOP | WHDR_ENDLOOP, 1U}));
-  static_assert(simtower::original_audio_loop_plan(0xffffU) ==
-                (simtower::OriginalAudioLoopPlan{
-                    WHDR_BEGINLOOP | WHDR_ENDLOOP, 0xffffU}));
-  audio.stop_all();
-  assert(!audio.channels()[0].active && !audio.channels()[1].active);
-  assert(audio.channels()[0].resource_id == -1);
-  assert(simtower::original_audio_priority_enabled(0, {true, false, false}));
-  assert(!simtower::original_audio_priority_enabled(1, {true, false, false}));
-  assert(simtower::original_audio_priority_enabled(5, {false, false, true}));
-  static_assert(simtower::kOriginalAudioSaturationTicks == 600U);
-  static_assert(simtower::kOriginalAudioSaturationNominalMs == 9600U);
-  static_assert(!simtower::original_audio_saturation_elapsed(599U, 0U));
-  static_assert(simtower::original_audio_saturation_elapsed(600U, 0U));
-  static_assert(simtower::original_audio_saturation_elapsed(599U, 0xffffffffU));
-  static_assert(!simtower::original_audio_saturation_elapsed(0U, 1U));
-
-  // Direct 11e0:0e84 coverage: the unsigned deadline comparison is strict,
-  // one due call advances by 0x30 rather than snapping to now, callback 03BD
-  // is drained even with all categories disabled, and wraparound is literal.
-  using PumpPlan = simtower::OriginalWaveMixPumpPlan;
-  static_assert(simtower::original_wavemix_pump_plan(
-                    100U, 147U, true, false, false) ==
-                PumpPlan{false, false, false, 100U});
-  static_assert(simtower::original_wavemix_pump_plan(
-                    100U, 148U, false, false, false) ==
-                PumpPlan{true, true, false, 148U});
-  static_assert(simtower::original_wavemix_pump_plan(
-                    100U, 1'000U, false, true, false) ==
-                PumpPlan{true, true, true, 148U});
-  static_assert(simtower::original_wavemix_pump_plan(
-                    0xfffffff0U, 0x10U, true, true, true) ==
-                PumpPlan{false, false, false, 0xfffffff0U});
-  static_assert(simtower::original_wavemix_pump_plan(
-                    0xfffffff0U, 0x20U, false, false, true) ==
-                PumpPlan{true, true, true, 0x20U});
+  // The portable 11c8 audio rule checks and the runtime's device
+  // transaction live in audio_tests.cpp, which runs on every platform.
 
   // Native Fast Mode retains the reference Win16 full-frame host cadence
   // without changing 1200:0196's recovered gate/bypass behavior. The due
@@ -1289,7 +1215,7 @@ int main(int argc, char** argv) {
   // 11c8:0390 inactive-channel query. The runtime is deliberately disabled
   // before initialization, so this opens no device and produces no audible
   // output.
-  simtower::OriginalAudioRuntime silent_audio(resources);
+  simtower::OriginalWaveOutAudioRuntime silent_audio(resources);
   silent_audio.set_sound_enabled(false);
   assert(silent_audio.initialize());
   assert(!silent_audio.active() && !silent_audio.sound_enabled());

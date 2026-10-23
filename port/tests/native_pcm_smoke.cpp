@@ -1,4 +1,4 @@
-#include "original_audio.hpp"
+#include "original_audio_waveout_win32.hpp"
 #include "original_resources.hpp"
 #include "original_wave.hpp"
 
@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
   // initialize/open/prepare/write/stop/close path runs against WAVE_MAPPER;
   // only the payload bytes are replaced with digital silence of the same
   // format and length, so this cannot make audible noise.
-  simtower::OriginalAudioRuntime audio(resources);
+  simtower::OriginalWaveOutAudioRuntime audio(resources);
   audio.set_host_output_muted(true);
   if (!audio.initialize()) {
     std::cerr << "no native PCM output endpoint\n";

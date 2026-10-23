@@ -6,10 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Portable core: builds on every platform. The Win32 host modules
-# (*_win32, the waveOut audio runtime) are added below on Windows only.
+# (*_win32, including the waveOut audio device) are added below on Windows
+# only.
 add_library(simtower_port_core STATIC
   src/original_about.cpp
   src/original_alert.cpp
+  src/original_audio.cpp
+  src/original_audio_capture.cpp
   src/original_audio_rules.cpp
   src/original_command_palette.cpp
   src/original_construction.cpp
@@ -44,7 +47,7 @@ if(WIN32)
   target_compile_definitions(simtower_port_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_sources(simtower_port_core PRIVATE
     src/original_alert_win32.cpp
-    src/original_audio.cpp
+    src/original_audio_waveout_win32.cpp
     src/original_command_palette_win32.cpp
     src/original_dialog_win32.cpp
     src/original_dib_win32.cpp
@@ -107,7 +110,7 @@ option(SIMTOWER_BUILD_SDL "Build the SDL3 frontend simtower_sdl"
 if(SIMTOWER_BUILD_SDL)
   find_package(SDL3 REQUIRED CONFIG)
   add_executable(simtower_sdl sdl/sdl_main.cpp sdl/sdl_session.cpp
-                              sdl/sdl_scenario.cpp)
+                              sdl/sdl_scenario.cpp sdl/sdl_audio.cpp)
   target_link_libraries(simtower_sdl PRIVATE simtower_port_core SDL3::SDL3)
 endif()
 
@@ -253,6 +256,19 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
   )
 
+  # Portable audio runtime rules and the device transaction, on a fake
+  # device and the capture device. No audio device is opened. The parts that
+  # need WAVE resources read the pack at run time and are skipped (exit 77)
+  # when it is missing.
+  add_executable(simtower_audio_tests tests/audio_tests.cpp)
+  target_link_libraries(simtower_audio_tests PRIVATE simtower_port_core)
+  add_test(
+    NAME simtower_audio_tests
+    COMMAND simtower_audio_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_audio_tests PROPERTIES SKIP_RETURN_CODE 77)
+
   # Locks the shared idle pass's host-hook order on a staged tower. The
   # scenario builder is portable (no SDL), so this runs on every platform.
   add_executable(simtower_idle_pass_tests tests/idle_pass_tests.cpp
@@ -265,6 +281,21 @@ if(BUILD_TESTING)
     COMMAND simtower_idle_pass_tests
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
   )
+
+  # SdlAudioDevice on SDL's dummy audio driver with synthetic buffers (no
+  # assets): U8/S16 playback, loop passes, partial frames, stop and teardown.
+  # The test also forces the dummy driver itself, so it is never audible.
+  if(SIMTOWER_BUILD_SDL)
+    add_executable(simtower_sdl_audio_tests tests/sdl_audio_tests.cpp
+                                            sdl/sdl_audio.cpp)
+    target_include_directories(simtower_sdl_audio_tests PRIVATE
+                               ${CMAKE_CURRENT_SOURCE_DIR}/sdl)
+    target_link_libraries(simtower_sdl_audio_tests PRIVATE
+                          simtower_port_core SDL3::SDL3)
+    add_test(NAME simtower_sdl_audio_tests COMMAND simtower_sdl_audio_tests)
+    set_tests_properties(simtower_sdl_audio_tests PROPERTIES
+                         ENVIRONMENT "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy")
+  endif()
 
   # These executables intentionally use assert() as their test primitive.
   # Release configurations define NDEBUG globally; removing it per test keeps
@@ -282,7 +313,11 @@ if(BUILD_TESTING)
       simtower_find_tests
       simtower_about_tests
       simtower_elevator_control_tests
+      simtower_audio_tests
       simtower_idle_pass_tests)
+  if(SIMTOWER_BUILD_SDL)
+    list(APPEND SIMTOWER_ASSERT_TESTS simtower_sdl_audio_tests)
+  endif()
   if(WIN32)
     list(APPEND SIMTOWER_ASSERT_TESTS
          simtower_resource_tests
