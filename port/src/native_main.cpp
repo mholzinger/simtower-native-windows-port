@@ -1,6 +1,6 @@
 #include "original_about.hpp"
 #include "original_alert_win32.hpp"
-#include "original_audio.hpp"
+#include "original_audio_waveout_win32.hpp"
 #include "original_command_palette_win32.hpp"
 #include "original_construction.hpp"
 #include "original_dib_win32.hpp"
@@ -267,7 +267,7 @@ simtower::OriginalYenTable g_construction_costs{};
 simtower::OriginalYenTable g_rent_income{};
 simtower::OriginalYenTable g_maintenance_costs{};
 simtower::OriginalPartTable g_part{};
-std::unique_ptr<simtower::OriginalAudioRuntime> g_audio;
+std::unique_ptr<simtower::OriginalWaveOutAudioRuntime> g_audio;
 
 void original_runtime_audio_pump(std::uint32_t milliseconds) {
   if (g_audio) g_audio->pump(milliseconds);
@@ -9268,7 +9268,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
       return 0;
     }
     g_resources = simtower::OriginalResources::from_current_module();
-    g_audio = std::make_unique<simtower::OriginalAudioRuntime>(g_resources);
+    g_audio = std::make_unique<simtower::OriginalWaveOutAudioRuntime>(g_resources);
     g_audio->set_sound_enabled(startup_sound_available);
     if (!initialize_original_audio()) {
       return 0;
