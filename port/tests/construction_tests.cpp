@@ -1108,14 +1108,23 @@ int main() {
     assert(poor.header.exact_bytes[30] == std::byte{0xff});
     assert(poor.header.exact_bytes[31] == std::byte{0xff});
 
+    // 1178:011d adds the 150 floor charge to the 10,000 facility charge in
+    // one accumulator ([bp-8], never reset between its loops), so a balance
+    // covering only the facility fails the second comparison with message 8.
     auto split_gate = make_metro_ready_tower(costs);
     split_gate.header.balance = 10000;
     result = simtower::build_original_metro_station(
         split_gate, 2, 120, costs);
+    assert(result.status ==
+           simtower::OriginalConstructionStatus::insufficient_funds);
+    assert(result.cost == 10150);
+    assert(result.construction_status_code == 8U);
+
+    auto exact = make_metro_ready_tower(costs);
+    exact.header.balance = 10150;
+    result = simtower::build_original_metro_station(exact, 2, 120, costs);
     assert(result.succeeded() && result.cost == 10150);
-    // 1178:011d compares the 10,000 facility and 150 floor previews to the
-    // same starting balance independently, so the final debit may be below 0.
-    assert(split_gate.header.balance == -150);
+    assert(exact.header.balance == 0);
 
     auto late_phase = make_metro_ready_tower(costs);
     late_phase.header.frame_time = 1600U;
@@ -1136,6 +1145,38 @@ int main() {
          {std::uint8_t{2}, std::uint8_t{1}, std::uint8_t{0}}) {
       assert(wrapped_phase.floors[floor].tenants[0].variant == 0U);
     }
+  }
+
+  {
+    // 11f8:0d04 only requires that no Metro exists, and 2f5a's type-31
+    // branch accepts any basement floor 2..9 whose floor two below is empty.
+    // 20e7 then stacks 31/32/33 downward from the selected floor and 0d3e
+    // stores that floor in DS:b3e8.
+    auto tower = simtower::make_original_new_tdt();
+    assert(simtower::build_original_initial_lobby(
+               tower, 100, 200, 1, costs)
+               .succeeded());
+    for (int floor = 9; floor >= 4; --floor) {
+      assert(simtower::build_original_floor(
+                 tower, static_cast<std::int16_t>(floor), 120, 150, costs)
+                 .succeeded());
+    }
+    tower.header.frame_time = 0U;
+    tower.header.balance = 30000;
+    const auto result =
+        simtower::build_original_metro_station(tower, 5, 120, costs);
+    assert(result.succeeded());
+    assert(tower.header.exact_bytes[30] == std::byte{5});
+    assert(tower.header.exact_bytes[31] == std::byte{0});
+    const auto has_type = [&](int floor, std::int8_t type) {
+      const auto& tenants = tower.floors[static_cast<std::size_t>(floor)].tenants;
+      return std::any_of(tenants.begin(), tenants.end(),
+                         [&](const auto& tenant) {
+                           return tenant.type == -type;
+                         });
+    };
+    assert(has_type(5, 31) && has_type(4, 32) && has_type(3, 33));
+    assert(tower.floors[2].tenants.empty());
   }
 
   {
