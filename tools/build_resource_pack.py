@@ -44,8 +44,10 @@ def main() -> None:
     args = parser.parse_args()
 
     report: dict[str, Any] = json.loads(args.report.read_text(encoding="utf-8"))
+    # RT_NAMETABLE (type 15) only supplies names, which inspect_ne.py has
+    # already applied; builds without one pack the same resource set.
     resources = sorted(
-        report["resources"],
+        (item for item in report["resources"] if item["type_id"] != 15),
         key=lambda item: (
             normalized_type(item["type_id"]),
             0 if isinstance(item["resource_id"], int) else 1,
