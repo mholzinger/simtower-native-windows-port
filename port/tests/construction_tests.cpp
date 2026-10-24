@@ -1384,9 +1384,10 @@ int main() {
     assert(first.exact_bytes[15] == std::byte{0xff});
     assert(first.exact_bytes[16] == std::byte{4});
 
-    // A separate adjacent placement remains a distinct 11f8:17fd record.
-    // During a real drag, 11f8:26dd instead resubmits the cumulative span and
-    // 11f8:284d replaces the covered run with one record.
+    // A separate adjacent placement is inserted as its own 11f8:17fd record,
+    // then 17fd's unconditional 11f8:3a31 call at 1f51 coalesces adjacent
+    // type-0 records (11f8:3a87 compares only the type byte), keeping the
+    // first record's fields.
     // Direct 1178:0697 coverage for 284d's shared direct-amount transaction:
     // a nonzero overlap-path charge wraps both accounting dwords equally.
     const auto balance_before_direct_debit = tower.header.balance;
@@ -1396,34 +1397,30 @@ int main() {
     assert(tower.header.balance == balance_before_direct_debit - 45);
     assert(tower.header.construction_costs ==
            costs_before_direct_debit - 45);
-    assert(tower.floors[11].tenants.size() == 2U);
+    assert(tower.floors[11].tenants.size() == 1U);
     assert(tower.floors[11].tenants[0].left == 120U);
-    assert(tower.floors[11].tenants[0].right == 121U);
-    assert(tower.floors[11].tenants[1].left == 121U);
-    assert(tower.floors[11].tenants[1].right == 130U);
+    assert(tower.floors[11].tenants[0].right == 130U);
+    assert(tower.floors[11].tenants[0].status == 2U);
 
     // A disjoint request fills the unrepresented gap to the old edge and
     // charges all fifteen newly exposed cells, not only the requested five.
-    // 11f8:30ef preserves the gap and the clicked interval as separate rows.
+    // 11f8:30ef inserts the gap and the clicked interval as separate rows;
+    // on a non-Lobby story both are type 0, so 3a31 merges the whole run.
     result = simtower::build_original_floor(tower, 11, 140, 145, costs);
     assert(result.succeeded() && result.cost == 75);
-    assert(tower.floors[11].tenants.size() == 4U);
+    assert(tower.floors[11].tenants.size() == 1U);
     assert(tower.floors[11].tenants[0].left == 120U);
-    assert(tower.floors[11].tenants[1].right == 130U);
-    assert(tower.floors[11].tenants[2].left == 130U);
-    assert(tower.floors[11].tenants[2].right == 140U);
-    assert(tower.floors[11].tenants[3].left == 140U);
-    assert(tower.floors[11].tenants[3].right == 145U);
+    assert(tower.floors[11].tenants[0].right == 145U);
 
+    // An already-covered request costs nothing; the overlap split is merged
+    // back into the single run.
     const auto balance_before_noop = tower.header.balance;
     result = simtower::build_original_floor(tower, 11, 125, 130, costs);
     assert(result.succeeded() && result.cost == 0);
     assert(tower.header.balance == balance_before_noop);
-    assert(tower.floors[11].tenants.size() == 5U);
-    assert(tower.floors[11].tenants[1].left == 121U);
-    assert(tower.floors[11].tenants[1].right == 125U);
-    assert(tower.floors[11].tenants[2].left == 125U);
-    assert(tower.floors[11].tenants[2].right == 130U);
+    assert(tower.floors[11].tenants.size() == 1U);
+    assert(tower.floors[11].tenants[0].left == 120U);
+    assert(tower.floors[11].tenants[0].right == 145U);
 
     // A supported next story and first basement story use the two distinct
     // 11f8:2e64 branches.
@@ -1435,9 +1432,9 @@ int main() {
 
     const auto bytes = simtower::serialize_original_tdt(tower);
     const auto reparsed = simtower::parse_original_tdt(bytes);
-    assert(reparsed.floors[11].tenants.size() == 5U);
+    assert(reparsed.floors[11].tenants.size() == 1U);
     assert(reparsed.floors[11].tenants[0].left == 120U);
-    assert(reparsed.floors[11].tenants[4].right == 145U);
+    assert(reparsed.floors[11].tenants[0].right == 145U);
     assert(reparsed.floors[11].tenants[0].status == 2U);
     assert(simtower::serialize_original_tdt(reparsed) == bytes);
   }
@@ -1544,6 +1541,23 @@ int main() {
     tower.post_elevator.b92d = 7U;
     simtower::refresh_original_medical_for_day(tower);
     assert(tower.post_elevator.b92d == 7U);
+  }
+
+  {
+    // Floor built in two placements is one coalesced type-0 run, so an Office
+    // across the former seam at 121 fits instead of being rejected as
+    // occupied.
+    auto tower = simtower::make_original_new_tdt();
+    assert(simtower::build_original_initial_lobby(
+               tower, 100, 200, 1, costs)
+               .succeeded());
+    assert(simtower::build_original_floor(tower, 11, 115, 121, costs)
+               .succeeded());
+    assert(simtower::build_original_floor(tower, 11, 121, 140, costs)
+               .succeeded());
+    assert(tower.floors[11].tenants.size() == 1U);
+    assert(simtower::build_original_office(tower, 11, 117, 0, costs)
+               .succeeded());
   }
 
   {
@@ -2425,20 +2439,18 @@ int main() {
     assert(result.cost == 0);
     assert(!result.construction_sound_requested);
     assert(result.document_changed);
-    const auto& split = tower.floors[10].tenants;
-    assert(split.size() == 3U);
-    assert(split[0].type == 0x18 && split[0].left == 156 &&
-           split[0].right == 160);
-    assert(split[1].type == 0x18 && split[1].left == 160 &&
-           split[1].right == 164);
-    assert(split[2].type == 0x18 && split[2].left == 164 &&
-           split[2].right == 172);
+    // 284d's overlap path splits the run at the request, then its 11f8:3a31
+    // call at 2dec coalesces the adjacent type-0x18 records back into one.
+    const auto& merged = tower.floors[10].tenants;
+    assert(merged.size() == 1U);
+    assert(merged[0].type == 0x18 && merged[0].left == 156 &&
+           merged[0].right == 172);
 
     const auto bytes = simtower::serialize_original_tdt(tower);
     const auto reparsed = simtower::parse_original_tdt(bytes);
     assert(reparsed.floors[10].left_edge == 156);
     assert(reparsed.floors[10].right_edge == 172);
-    assert(reparsed.floors[10].tenants.size() == 3U);
+    assert(reparsed.floors[10].tenants.size() == 1U);
     assert(simtower::serialize_original_tdt(reparsed) == bytes);
   }
 

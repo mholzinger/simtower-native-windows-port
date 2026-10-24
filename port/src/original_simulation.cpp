@@ -2492,24 +2492,14 @@ void merge_original_floor_type(OriginalTdtFloor& floor,
 
 void rebuild_original_floor_after_damage(OriginalTdtDocument& document,
                                          std::int16_t floor_number) {
-  // Exact persisted portion of 11f8:3a31: coalesce adjacent type-0 records,
-  // then type-24 records, and rebuild the live-key lookup. The native host
-  // performs the original conditional redraw after this model mutation.
+  // 11f8:35ac ends with 11f8:3a31 for the damaged floor.
   if (floor_number < 0 ||
       static_cast<std::size_t>(floor_number) >= document.floors.size()) {
     return;
   }
-  auto& floor = document.floors[static_cast<std::size_t>(floor_number)];
-  merge_original_floor_type(floor, 0, document.header.byte_swapped);
-  merge_original_floor_type(floor, 24, document.header.byte_swapped);
-  // 1228:0e30 overwrites only keys represented by live records.
-  for (std::size_t index = 0; index < floor.tenants.size(); ++index) {
-    const auto key = std::to_integer<std::uint8_t>(
-        floor.tenants[index].exact_bytes[12]);
-    if (key < floor.tenant_index.size()) {
-      floor.tenant_index[key] = static_cast<std::uint16_t>(index);
-    }
-  }
+  coalesce_original_floor_records(
+      document.floors[static_cast<std::size_t>(floor_number)],
+      document.header.byte_swapped);
 }
 
 std::optional<std::size_t> original_tenant_at_damage_x(
@@ -2722,6 +2712,20 @@ void append_original_rebuilt_floor(OriginalFacilityDamageResult& result,
 }
 
 }  // namespace
+
+void coalesce_original_floor_records(OriginalTdtFloor& floor,
+                                     bool byte_swapped) {
+  merge_original_floor_type(floor, 0, byte_swapped);
+  merge_original_floor_type(floor, 24, byte_swapped);
+  // 1228:0e30 overwrites only keys represented by live records.
+  for (std::size_t index = 0; index < floor.tenants.size(); ++index) {
+    const auto key = std::to_integer<std::uint8_t>(
+        floor.tenants[index].exact_bytes[12]);
+    if (key < floor.tenant_index.size()) {
+      floor.tenant_index[key] = static_cast<std::uint16_t>(index);
+    }
+  }
+}
 
 OriginalFacilityDamageResult apply_original_facility_damage(
     OriginalTdtDocument& document,
