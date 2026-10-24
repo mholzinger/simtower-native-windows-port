@@ -1618,9 +1618,8 @@ void rebuild_original_parking_index(OriginalTdtDocument& document) {
         std::to_integer<std::uint8_t>(record[1]));
     if (key == -1) {
       record[0] = std::byte{0xff};
-      if (parking_count != 0U) {
-        --parking_count;
-      }
+      // 1198:0200 is an unconditional 16-bit DEC, so zero wraps to 0xffff.
+      --parking_count;
       continue;
     }
     if (floor_number >= static_cast<std::int8_t>(document.floors.size()) ||
