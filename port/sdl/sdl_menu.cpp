@@ -369,7 +369,10 @@ MenuStep MenuTracker::choose(const OriginalMenuItems& items, int index,
 MenuStep MenuTracker::pointer(const InputEvent& event) {
   const bool down =
       event.kind == InputKind::down || event.kind == InputKind::double_click;
-  if (event.kind == InputKind::right_down) return {};
+  if (event.kind == InputKind::right_down ||
+      event.kind == InputKind::right_up) {
+    return {};
+  }
   if (down) button_down_ = true;
   if (event.kind == InputKind::up) button_down_ = false;
 

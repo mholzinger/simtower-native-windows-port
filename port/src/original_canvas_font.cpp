@@ -53,7 +53,9 @@ enum : std::uint8_t {
 // - across the stroke, neither neighbour is on and it has the most coverage
 //   of the three (>= the first, > the second, so a 50/50 straddle picks
 //   one), and
-// - along the stroke, it bridges two on pixels or the stroke continues
+// - along the stroke, it bridges two on pixels (8-connected: one step along
+//   on each side, that pixel or a neighbour across the stroke) or the
+//   stroke continues
 //   (stepping over on pixels, the next pixel has coverage >=
 //   kDropoutThreshold). This leaves stubs such as the extremes of bowls
 //   and the tops of round letters alone.
@@ -75,7 +77,16 @@ void apply_dropout_control(const std::vector<unsigned char>& coverage,
   // stroke, so the walk steps over them like plain on pixels.
   const auto continues = [&](int x, int y, int dx, int dy,
                              std::uint8_t rule) {
-    if (on(x - dx, y - dy) && on(x + dx, y + dy)) return true;
+    // Bridge: one step along the stroke on each side, the pixel or either
+    // of its neighbours across the stroke is on (8-connected), so a curve
+    // that shifts by a column or row between rows (the right side of 'o'
+    // and the bowl of 'a' at 11 pixels) still counts as continuing.
+    const auto on_ahead = [&](int sign) {
+      const int ax = x + sign * dx;
+      const int ay = y + sign * dy;
+      return on(ax, ay) || on(ax + dy, ay + dx) || on(ax - dy, ay - dx);
+    };
+    if (on_ahead(-1) && on_ahead(1)) return true;
     for (const int sign : {-1, 1}) {
       int cx = x + sign * dx;
       int cy = y + sign * dy;
@@ -127,6 +138,50 @@ std::uint32_t original_cp1252_to_unicode(unsigned char ansi) noexcept {
       0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178};
   if (ansi >= 0x80U && ansi < 0xa0U) return kHigh[ansi - 0x80U];
   return ansi;
+}
+
+std::string original_utf8_to_cp1252(std::string_view utf8) {
+  std::string result;
+  std::size_t index = 0U;
+  while (index < utf8.size()) {
+    const auto lead = static_cast<unsigned char>(utf8[index]);
+    std::uint32_t code = 0U;
+    std::size_t length = 0U;
+    if (lead < 0x80U) {
+      code = lead;
+      length = 1U;
+    } else if ((lead & 0xE0U) == 0xC0U) {
+      code = lead & 0x1FU;
+      length = 2U;
+    } else if ((lead & 0xF0U) == 0xE0U) {
+      code = lead & 0x0FU;
+      length = 3U;
+    } else if ((lead & 0xF8U) == 0xF0U) {
+      code = lead & 0x07U;
+      length = 4U;
+    }
+    // The continuation bytes that are there (none past the end).
+    std::size_t taken = 1U;
+    while (taken < length && index + taken < utf8.size() &&
+           (static_cast<unsigned char>(utf8[index + taken]) & 0xC0U) ==
+               0x80U) {
+      code = (code << 6U) |
+             (static_cast<unsigned char>(utf8[index + taken]) & 0x3FU);
+      ++taken;
+    }
+    index += taken;
+    // A stray continuation byte, an invalid lead or a truncated sequence.
+    if (length == 0U || taken != length) continue;
+    for (unsigned byte = 0x20U; byte <= 0xFFU; ++byte) {
+      if (byte == 0x7FU) continue;
+      if (original_cp1252_to_unicode(static_cast<unsigned char>(byte)) ==
+          code) {
+        result.push_back(static_cast<char>(byte));
+        break;
+      }
+    }
+  }
+  return result;
 }
 
 OriginalCanvasFont::OriginalCanvasFont(std::span<const std::byte> ttf)

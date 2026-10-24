@@ -56,6 +56,9 @@ bool dialog_op(ScriptOp op) {
   switch (op) {
     case ScriptOp::dialog_click:
     case ScriptOp::dialog_key:
+    case ScriptOp::dialog_type:
+    case ScriptOp::dialog_list:
+    case ScriptOp::dialog_at:
     case ScriptOp::dialog_wait:
     case ScriptOp::dialog_timer:
     case ScriptOp::dialog_hold:
@@ -69,6 +72,9 @@ std::string op_name(ScriptOp op) {
   switch (op) {
     case ScriptOp::dialog_click: return "dialog-click";
     case ScriptOp::dialog_key: return "dialog-key";
+    case ScriptOp::dialog_type: return "dialog-type";
+    case ScriptOp::dialog_list: return "dialog-list";
+    case ScriptOp::dialog_at: return "dialog-at";
     case ScriptOp::dialog_wait: return "dialog-wait";
     case ScriptOp::dialog_timer: return "dialog-timer";
     case ScriptOp::dialog_hold: return "dialog-hold";
@@ -233,11 +239,23 @@ std::vector<ScriptCommand> parse_input_script(
       command.op = ScriptOp::expect_dialog;
       const auto usage = [&]() {
         return fail(
-            "expect-dialog takes event ID, alert ID, about, box replace "
-            "or box invalid-filename");
+            "expect-dialog takes event ID, alert ID, about, box replace, "
+            "box invalid-filename, finance, find person, find tenant, "
+            "rename person, rename tenant or movie");
       };
+      const std::string rest =
+          words.size() == 3 ? words[1] + " " + words[2] : std::string{};
       if (words.size() == 2 && words[1] == "about") {
         command.text = kAboutDialogLabel;
+      } else if (words.size() == 2 &&
+                 (words[1] == kFinanceDialogLabel ||
+                  words[1] == kMovieDialogLabel)) {
+        command.text = words[1];
+      } else if (rest == kFindPersonDialogLabel ||
+                 rest == kFindTenantDialogLabel ||
+                 rest == kRenamePersonDialogLabel ||
+                 rest == kRenameTenantDialogLabel) {
+        command.text = rest;
       } else if (words.size() == 3 &&
                  (words[1] == "event" || words[1] == "alert")) {
         const auto id = parse_integer(words[2], where);
@@ -261,21 +279,80 @@ std::vector<ScriptCommand> parse_input_script(
       command.op = ScriptOp::dialog_key;
       if (words.size() != 2) throw fail("dialog-key needs one key");
       static const std::pair<const char*, DialogKey> kKeys[] = {
-          {"enter", DialogKey::enter}, {"esc", DialogKey::escape},
-          {"tab", DialogKey::tab},     {"shift-tab", DialogKey::shift_tab},
-          {"space", DialogKey::space}, {"arrow", DialogKey::arrow},
-          {"other", DialogKey::other},
+          {"enter", DialogKey::enter},     {"esc", DialogKey::escape},
+          {"tab", DialogKey::tab},         {"shift-tab", DialogKey::shift_tab},
+          {"space", DialogKey::space},     {"left", DialogKey::left},
+          {"right", DialogKey::right},     {"up", DialogKey::up},
+          {"down", DialogKey::down},       {"home", DialogKey::home},
+          {"end", DialogKey::end},         {"pgup", DialogKey::page_up},
+          {"pgdn", DialogKey::page_down},  {"backspace", DialogKey::backspace},
+          {"delete", DialogKey::delete_key}, {"f4", DialogKey::f4},
+          {"alt", DialogKey::menu},        {"other", DialogKey::other},
       };
+      auto name = words[1];
+      if (name.rfind("shift-", 0) == 0 && name != "shift-tab") {
+        command.shift = true;
+        name = name.substr(6);
+        if (name != "left" && name != "right" && name != "home" &&
+            name != "end") {
+          throw fail("shift- takes left, right, home or end");
+        }
+      }
       const auto* found = std::ranges::find_if(
-          kKeys, [&](const auto& entry) { return words[1] == entry.first; });
+          kKeys, [&](const auto& entry) { return name == entry.first; });
       if (found != std::end(kKeys)) {
         command.dialog_key = found->second;
-      } else if (words[1].size() == 1 && words[1][0] >= 'a' &&
-                 words[1][0] <= 'z') {
+      } else if (name.size() == 1 && name[0] >= 'a' && name[0] <= 'z') {
         command.dialog_key = DialogKey::other;
-        command.character = words[1][0];
+        command.character = name[0];
       } else {
         throw fail("unknown dialog key '" + words[1] + "'");
+      }
+    } else if (verb == "dialog-type") {
+      command.op = ScriptOp::dialog_type;
+      command.text = rest_of_line(line, verb);
+      if (command.text.empty()) throw fail("dialog-type needs TEXT");
+    } else if (verb == "dialog-list") {
+      command.op = ScriptOp::dialog_list;
+      if (words.size() != 3 && !(words.size() == 4 && words[3] == "double")) {
+        throw fail("dialog-list takes ID INDEX [double]");
+      }
+      command.value = parse_integer(words[1], where);
+      if (command.value < 0 || command.value > 0xFFFF) {
+        throw fail("control id must be 0..65535");
+      }
+      const auto index = parse_integer(words[2], where);
+      if (index < 0 || index > 0x7FFF) throw fail("row must be 0..32767");
+      command.numbers = {static_cast<int>(index), words.size() == 4 ? 1 : 0};
+    } else if (verb == "dialog-at") {
+      command.op = ScriptOp::dialog_at;
+      if (words.size() != 3 && !(words.size() == 4 && words[3] == "right")) {
+        throw fail("dialog-at takes X Y [right]");
+      }
+      command.x = parse_coordinate(words[1], where);
+      command.y = parse_coordinate(words[2], where);
+      command.keys = words.size() == 4 ? 1U : 0U;
+    } else if (verb == "open-dialog") {
+      command.op = ScriptOp::open_dialog;
+      const auto usage = [&]() {
+        return fail(
+            "open-dialog takes rename-person PERSON, rename-tenant FLOOR "
+            "TENANT or movie RECORD");
+      };
+      if (words.size() < 3) throw usage();
+      command.text = words[1];
+      for (std::size_t index = 2; index < words.size(); ++index) {
+        const auto value = parse_integer(words[index], where);
+        if (value < -32768 || value > 0x7FFFFFFF) throw usage();
+        command.numbers.push_back(static_cast<int>(value));
+      }
+      if (!((command.text == "rename-person" && command.numbers.size() == 1U &&
+             command.numbers[0] >= 0) ||
+            (command.text == "rename-tenant" && command.numbers.size() == 2U &&
+             command.numbers[1] >= 0) ||
+            (command.text == "movie" && command.numbers.size() == 1U &&
+             command.numbers[0] >= 0))) {
+        throw usage();
       }
     } else if (verb == "dialog-wait") {
       command.op = ScriptOp::dialog_wait;
@@ -374,7 +451,7 @@ ScriptPlayer::next_file_pick() {
       std::in_place, std::filesystem::path(command.text));
 }
 
-bool ScriptPlayer::drives_dialog(const ModalDialog& dialog) {
+bool ScriptPlayer::drives_dialog(const DialogWindow& dialog) {
   if (next_ >= commands_.size()) return false;
   const auto& command = commands_[next_];
   if (command.op == ScriptOp::expect_dialog) {
@@ -423,11 +500,86 @@ std::optional<DialogInput> ScriptPlayer::next_dialog_input(
         break;
       }
       case ScriptOp::dialog_key: {
+        // A key stroke: WM_KEYDOWN, the WM_CHAR a letter or Space types,
+        // then WM_KEYUP.
         ++next_;
         DialogInput input{};
         input.kind = DialogInput::Kind::key;
         input.key = command.dialog_key;
         input.character = command.character;
+        input.shift = command.shift;
+        pending_dialog_.push_back(input);
+        if (command.character != '\0' ||
+            command.dialog_key == DialogKey::space) {
+          DialogInput typed{};
+          typed.kind = DialogInput::Kind::character;
+          typed.character =
+              command.character != '\0' ? command.character : ' ';
+          pending_dialog_.push_back(typed);
+        }
+        input.kind = DialogInput::Kind::key_up;
+        pending_dialog_.push_back(input);
+        break;
+      }
+      case ScriptOp::dialog_type: {
+        ++next_;
+        const auto dialogs = session_.dialogs();
+        const auto* focused =
+            dialogs.empty() ? nullptr : dialogs.back()->focused_control();
+        if (!focused || focused->kind != DialogControlKind::edit) {
+          const auto label = dialogs.empty() ? std::string("none")
+                                             : dialogs.back()->label();
+          throw ScriptFailure(2, command.where +
+                                     ": dialog-type: the focused control of " +
+                                     label + " is not an edit");
+        }
+        for (const char character : command.text) {
+          DialogInput typed{};
+          typed.kind = DialogInput::Kind::character;
+          typed.character = character;
+          pending_dialog_.push_back(typed);
+        }
+        break;
+      }
+      case ScriptOp::dialog_list: {
+        ++next_;
+        const auto dialogs = session_.dialogs();
+        const auto id = static_cast<std::uint16_t>(command.value);
+        const int row = command.numbers[0];
+        const auto point = dialogs.empty()
+                               ? std::nullopt
+                               : dialogs.back()->list_item_point(id, row);
+        if (!point) {
+          throw ScriptFailure(2, command.where + ": dialog-list " +
+                                     std::to_string(id) + " " +
+                                     std::to_string(row) +
+                                     ": no visible row of a visible, enabled "
+                                     "list box");
+        }
+        const int presses = command.numbers[1] != 0 ? 2 : 1;
+        for (int press = 0; press < presses; ++press) {
+          DialogInput input{};
+          input.pointer = {InputKind::down, point->first, point->second, 0U};
+          pending_dialog_.push_back(input);
+          input.pointer.kind = InputKind::up;
+          pending_dialog_.push_back(input);
+        }
+        break;
+      }
+      case ScriptOp::dialog_at: {
+        ++next_;
+        const auto dialogs = session_.dialogs();
+        if (dialogs.empty()) {
+          throw ScriptFailure(2, command.where + ": dialog-at: no dialog");
+        }
+        const int x = dialogs.back()->client_x() + command.x;
+        const int y = dialogs.back()->client_y() + command.y;
+        const bool right = command.keys != 0U;
+        DialogInput input{};
+        input.pointer = {right ? InputKind::right_down : InputKind::down, x, y,
+                         0U};
+        pending_dialog_.push_back(input);
+        input.pointer.kind = right ? InputKind::right_up : InputKind::up;
         pending_dialog_.push_back(input);
         break;
       }
@@ -516,7 +668,8 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
       session_.select_tool(command.edit_mode, command.build_type);
       break;
     case ScriptOp::alert:
-      session_.set_alert_answer(static_cast<int>(command.value));
+      session_.set_alert_answer(static_cast<int>(command.value),
+                                command.where);
       break;
     case ScriptOp::set_balance:
       session_.set_balance_for_test(static_cast<std::int32_t>(command.value));
@@ -585,12 +738,32 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
     case ScriptOp::expect_saved:
       check_expectation(command);
       break;
+    case ScriptOp::open_dialog:
+      if (command.text == "rename-person") {
+        OriginalRenameTarget target{};
+        target.person = true;
+        target.person_index = static_cast<std::size_t>(command.numbers[0]);
+        (void)session_.open_rename_dialog_for_test(target);
+      } else if (command.text == "rename-tenant") {
+        OriginalRenameTarget target{};
+        target.person = false;
+        target.floor = static_cast<std::int16_t>(command.numbers[0]);
+        target.tenant_index = static_cast<std::size_t>(command.numbers[1]);
+        (void)session_.open_rename_dialog_for_test(target);
+      } else {
+        (void)session_.open_movie_dialog_for_test(
+            static_cast<std::size_t>(command.numbers[0]));
+      }
+      break;
     case ScriptOp::expect_dialog:
       // Read by drives_dialog when a dialog opens.
       throw ScriptFailure(3, command.where + ": expect-dialog " +
                                  command.text + ", but no dialog opened");
     case ScriptOp::dialog_click:
     case ScriptOp::dialog_key:
+    case ScriptOp::dialog_type:
+    case ScriptOp::dialog_list:
+    case ScriptOp::dialog_at:
     case ScriptOp::dialog_wait:
     case ScriptOp::dialog_timer:
     case ScriptOp::dialog_hold:

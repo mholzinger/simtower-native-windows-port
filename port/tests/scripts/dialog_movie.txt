@@ -1,0 +1,19 @@
+# New Movie: below both prices only Cancel can be focused (the arrows skip
+# the disabled buttons) and Esc cancels (0); with money, a click on the
+# classic choice answers 1.
+# args: --scenario busy --passes 3
+# expect-stderr: dialog movie record 0 -> 0
+# expect-stderr: dialog movie record 0 -> 1
+# held: movie.bmp
+pass 1
+set-balance 100
+open-dialog movie 0
+expect-dialog movie
+dialog-key down
+dialog-hold movie.bmp
+dialog-key esc
+set-balance 50000000
+open-dialog movie 0
+expect-dialog movie
+dialog-click 3
+pass 3

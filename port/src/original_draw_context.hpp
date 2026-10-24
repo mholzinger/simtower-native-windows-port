@@ -25,6 +25,12 @@ struct OriginalRect {
   friend bool operator==(const OriginalRect&, const OriginalRect&) = default;
 };
 
+// PtInRect: whether (x, y) is inside rect (right and bottom exclusive).
+[[nodiscard]] constexpr bool original_rect_contains(const OriginalRect& rect,
+                                                    int x, int y) noexcept {
+  return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+}
+
 // SetTextAlign flags, with the Win32 values (TA_LEFT and TA_TOP are 0).
 inline constexpr std::uint16_t kOriginalTaUpdateCp = 1U;   // TA_UPDATECP
 inline constexpr std::uint16_t kOriginalTaRight = 2U;      // TA_RIGHT

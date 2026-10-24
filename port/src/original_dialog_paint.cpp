@@ -3,11 +3,6 @@
 namespace simtower {
 namespace {
 
-constexpr OriginalRgb gray(std::uint8_t level) {
-  return (static_cast<OriginalRgb>(level) << 16U) |
-         (static_cast<OriginalRgb>(level) << 8U) | level;
-}
-
 void line(OriginalDrawContext& context, int x0, int y0, int x1, int y1,
           int x2, int y2) {
   context.move_to(x0, y0);
@@ -19,7 +14,7 @@ void line(OriginalDrawContext& context, int x0, int y0, int x1, int y1,
 // own pen created, selected, restored and deleted.
 void outer_top_left(OriginalDrawContext& context, const OriginalRect& rect,
                     std::uint8_t level) {
-  context.push_solid_pen(gray(level));
+  context.push_solid_pen(original_gray(level));
   for (int inset = 0; inset < 3; ++inset) {
     line(context, rect.right - 2 - inset, rect.top + inset, rect.left + inset,
          rect.top + inset, rect.left + inset, rect.bottom - 2 - inset);
@@ -29,7 +24,7 @@ void outer_top_left(OriginalDrawContext& context, const OriginalRect& rect,
 
 void outer_bottom_right(OriginalDrawContext& context, const OriginalRect& rect,
                         std::uint8_t level) {
-  context.push_solid_pen(gray(level));
+  context.push_solid_pen(original_gray(level));
   for (int inset = 0; inset < 3; ++inset) {
     line(context, rect.left + inset, rect.bottom - 1 - inset,
          rect.right - 1 - inset, rect.bottom - 1 - inset,
@@ -40,7 +35,7 @@ void outer_bottom_right(OriginalDrawContext& context, const OriginalRect& rect,
 
 void inner_top_left(OriginalDrawContext& context, const OriginalRect& rect,
                     std::uint8_t level) {
-  context.push_solid_pen(gray(level));
+  context.push_solid_pen(original_gray(level));
   for (int inset = 0; inset < 3; ++inset) {
     line(context, rect.right - 1 - inset, rect.top + inset, rect.left + inset,
          rect.top + inset, rect.left + inset, rect.bottom - 1 - inset);
@@ -50,22 +45,13 @@ void inner_top_left(OriginalDrawContext& context, const OriginalRect& rect,
 
 void inner_bottom_right(OriginalDrawContext& context, const OriginalRect& rect,
                         std::uint8_t level) {
-  context.push_solid_pen(gray(level));
+  context.push_solid_pen(original_gray(level));
   for (int inset = 0; inset < 3; ++inset) {
     line(context, rect.left + inset + 1, rect.bottom - 1 - inset,
          rect.right - 1 - inset, rect.bottom - 1 - inset,
          rect.right - 1 - inset, rect.top + inset + 1);
   }
   context.pop_pen();
-}
-
-// InflateRect(&rect, -by, -by).
-OriginalRect deflate(OriginalRect rect, int by) {
-  rect.left += by;
-  rect.top += by;
-  rect.right -= by;
-  rect.bottom -= by;
-  return rect;
 }
 
 // IsRectEmpty.
@@ -85,28 +71,28 @@ void paint_original_dtmp_frame(OriginalDrawContext& context,
   // 230, and 204 in that order.
   outer_top_left(context, rect, 179);
   outer_bottom_right(context, rect, 140);
-  const auto inner = deflate(rect, 3);
+  const auto inner = original_deflate_rect(rect, 3);
   inner_top_left(context, inner, 102);
   inner_bottom_right(context, inner, 230);
-  context.fill_rect(deflate(inner, 3), gray(204));
+  context.fill_rect(original_deflate_rect(inner, 3), original_gray(204));
 }
 
 void paint_original_dtmp_placeholder(OriginalDrawContext& context,
                                      const OriginalRect& rect) {
-  context.push_solid_pen(gray(89));
+  context.push_solid_pen(original_gray(89));
   for (int inset = 0; inset < 2; ++inset) {
     line(context, rect.right - 1 - inset, rect.top + inset, rect.left + inset,
          rect.top + inset, rect.left + inset, rect.bottom - 2 - inset);
   }
   context.pop_pen();
-  context.push_solid_pen(gray(255));
+  context.push_solid_pen(original_gray(255));
   for (int inset = 0; inset < 2; ++inset) {
     line(context, rect.left + inset, rect.bottom - 1 - inset,
          rect.right - 1 - inset, rect.bottom - 1 - inset,
          rect.right - 1 - inset, rect.top + inset + 1);
   }
   context.pop_pen();
-  context.fill_rect(deflate(rect, 2), gray(230));
+  context.fill_rect(original_deflate_rect(rect, 2), original_gray(230));
 }
 
 void paint_original_dtmp_chrome(OriginalDrawContext& context,

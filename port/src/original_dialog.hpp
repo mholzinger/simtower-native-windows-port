@@ -21,6 +21,17 @@ inline constexpr std::uint32_t kOriginalWindowStyleChild = 0x40000000U;
 inline constexpr std::uint32_t kOriginalWindowStyleVisible = 0x10000000U;
 inline constexpr std::uint32_t kOriginalWindowStyleDisabled = 0x08000000U;
 inline constexpr std::uint32_t kOriginalWindowStyleTabStop = 0x00010000U;
+inline constexpr std::uint32_t kOriginalWindowStyleGroup = 0x00020000U;
+inline constexpr std::uint32_t kOriginalWindowStyleVScroll = 0x00200000U;
+inline constexpr std::uint32_t kOriginalWindowStyleBorder = 0x00800000U;
+inline constexpr std::uint32_t kOriginalWindowStyleCaption = 0x00C00000U;
+// Edit, list box, combo box and scroll bar styles the templates use.
+inline constexpr std::uint32_t kOriginalEditAutoHScroll = 0x00000080U;
+inline constexpr std::uint32_t kOriginalListBoxNotify = 0x00000001U;
+inline constexpr std::uint32_t kOriginalListBoxSort = 0x00000002U;
+inline constexpr std::uint32_t kOriginalComboBoxTypeMask = 0x00000003U;
+inline constexpr std::uint32_t kOriginalComboBoxDropDownList = 0x00000003U;
+inline constexpr std::uint32_t kOriginalScrollBarVertical = 0x00000001U;
 // DLGITEMTEMPLATE predefined class ordinals.
 inline constexpr std::uint16_t kOriginalDialogClassButton = 0x0080U;
 inline constexpr std::uint16_t kOriginalDialogClassEdit = 0x0081U;

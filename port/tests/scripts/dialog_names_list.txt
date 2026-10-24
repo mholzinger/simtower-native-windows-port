@@ -1,0 +1,42 @@
+# Rename Person through the edit (typing, Rename), Enter in the edit is the
+# template default Cancel, then Find Person lists the names in order; Find
+# on someone not in the tower is ALRT/1002 and Find stays open; Remove
+# deletes the selected name; OK closes.
+# args: --scenario busy --passes 3
+# expect-stderr: dialog rename person -> changed, name "Ann Example"
+# expect-stderr: dialog rename person -> unchanged, name ""
+# expect-stderr: dialog rename person -> changed, name "Cid"
+# expect-stderr: alert 1002 "Ann Example is not in this tower\." -> 1
+# expect-stderr: dialog find person: closed
+# held: rename_typed.bmp
+# held: find_list.bmp
+pass 1
+open-dialog rename-person 0
+expect-dialog rename person
+dialog-type Ann Example
+dialog-hold rename_typed.bmp
+dialog-click 1
+open-dialog rename-person 1
+expect-dialog rename person
+dialog-type Bob
+dialog-key enter
+open-dialog rename-person 2
+expect-dialog rename person
+dialog-type Cix
+dialog-key backspace
+dialog-type d
+dialog-key home
+dialog-key shift-end
+dialog-key right
+dialog-click 1
+menu 40019
+expect-dialog find person
+dialog-list 5 0
+dialog-hold find_list.bmp
+dialog-click 4
+expect-dialog alert 1002
+dialog-key enter
+dialog-list 5 1
+dialog-click 3
+dialog-key enter
+pass 3

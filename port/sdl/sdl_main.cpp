@@ -67,6 +67,7 @@
 #include "sdl_session.hpp"
 
 #include "original_audio_capture.hpp"
+#include "original_canvas_font.hpp"
 #include "original_menu.hpp"
 #include "original_resources.generated.hpp"
 #include "original_simulation.hpp"
@@ -85,6 +86,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -901,6 +903,9 @@ std::optional<simtower::sdl::InputEvent> pointer_input(const SDL_Event& event) {
       if (event.button.button == SDL_BUTTON_LEFT) {
         return at(InputKind::up, event.button.x, event.button.y);
       }
+      if (event.button.button == SDL_BUTTON_RIGHT) {
+        return at(InputKind::right_up, event.button.x, event.button.y);
+      }
       return std::nullopt;
     default:
       return std::nullopt;
@@ -954,7 +959,7 @@ class WindowModalSource final : public simtower::sdl::InputSource {
   }
 
   // The window answers every dialog.
-  bool drives_dialog(const simtower::sdl::ModalDialog& /*dialog*/) override {
+  bool drives_dialog(const simtower::sdl::DialogWindow& /*dialog*/) override {
     return true;
   }
 
@@ -969,6 +974,15 @@ class WindowModalSource final : public simtower::sdl::InputSource {
     using simtower::sdl::DialogKey;
     // 1068:00fb / 1010:057b select the stock arrow.
     window_.set_cursor(0U);
+    if (!text_input_) {
+      // Typed characters (WM_CHAR) for edits and list searches.
+      text_input_ = SDL_StartTextInput(window_.handle());
+    }
+    if (!pending_.empty()) {
+      auto input = pending_.front();
+      pending_.pop_front();
+      return input;
+    }
     const Uint64 started = SDL_GetTicks();
     const auto with_elapsed = [&](DialogInput input) {
       input.elapsed_ms = static_cast<std::uint32_t>(std::min<Uint64>(
@@ -1010,22 +1024,54 @@ class WindowModalSource final : public simtower::sdl::InputSource {
       if (const auto input = pointer_input(event)) {
         return with_elapsed({DialogInput::Kind::pointer, *input, {}});
       }
-      if (event.type == SDL_EVENT_KEY_DOWN) {
-        DialogInput input{DialogInput::Kind::key, {}, DialogKey::other};
+      if (event.type == SDL_EVENT_TEXT_INPUT && event.text.text) {
+        // WM_CHAR: each typed character in Windows-1252 (others dropped).
+        for (const char character :
+             simtower::original_utf8_to_cp1252(event.text.text)) {
+          DialogInput input{DialogInput::Kind::character, {},
+                            DialogKey::other};
+          input.character = character;
+          pending_.push_back(input);
+        }
+        if (!pending_.empty()) {
+          auto input = pending_.front();
+          pending_.pop_front();
+          return with_elapsed(input);
+        }
+        continue;
+      }
+      if (event.type == SDL_EVENT_KEY_DOWN ||
+          event.type == SDL_EVENT_KEY_UP) {
+        DialogInput input{event.type == SDL_EVENT_KEY_DOWN
+                              ? DialogInput::Kind::key
+                              : DialogInput::Kind::key_up,
+                          {},
+                          DialogKey::other};
+        const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
+        input.shift = shift;
         switch (event.key.key) {
           case SDLK_RETURN:
           case SDLK_KP_ENTER: input.key = DialogKey::enter; break;
           case SDLK_ESCAPE: input.key = DialogKey::escape; break;
           case SDLK_TAB:
-            input.key = (event.key.mod & SDL_KMOD_SHIFT) != 0
-                            ? DialogKey::shift_tab
-                            : DialogKey::tab;
+            input.key = shift ? DialogKey::shift_tab : DialogKey::tab;
             break;
           case SDLK_SPACE: input.key = DialogKey::space; break;
-          case SDLK_LEFT:
-          case SDLK_RIGHT:
-          case SDLK_UP:
-          case SDLK_DOWN: input.key = DialogKey::arrow; break;
+          case SDLK_LEFT: input.key = DialogKey::left; break;
+          case SDLK_RIGHT: input.key = DialogKey::right; break;
+          case SDLK_UP: input.key = DialogKey::up; break;
+          case SDLK_DOWN: input.key = DialogKey::down; break;
+          case SDLK_HOME: input.key = DialogKey::home; break;
+          case SDLK_END: input.key = DialogKey::end; break;
+          case SDLK_PAGEUP: input.key = DialogKey::page_up; break;
+          case SDLK_PAGEDOWN: input.key = DialogKey::page_down; break;
+          case SDLK_BACKSPACE: input.key = DialogKey::backspace; break;
+          case SDLK_DELETE: input.key = DialogKey::delete_key; break;
+          case SDLK_F4: input.key = DialogKey::f4; break;
+          // WM_SYSKEYDOWN: Alt or F10 alone.
+          case SDLK_LALT:
+          case SDLK_RALT:
+          case SDLK_F10: input.key = DialogKey::menu; break;
           default:
             // A letter is a button mnemonic (SDL keycodes of letters are
             // their lower-case ASCII).
@@ -1044,10 +1090,21 @@ class WindowModalSource final : public simtower::sdl::InputSource {
     return std::nullopt;
   }
 
+  void dialog_closed() override {
+    pending_.clear();
+    if (text_input_ && session_.dialogs().empty()) {
+      SDL_StopTextInput(window_.handle());
+      text_input_ = false;
+    }
+  }
+
  private:
   Window& window_;
   simtower::sdl::Session& session_;
   bool quit_requested_{};
+  bool text_input_{};
+  // The rest of a multi-character SDL text event.
+  std::deque<simtower::sdl::DialogInput> pending_{};
 };
 
 // The native Open / Save As sheets (SDL_ShowOpenFileDialog /
