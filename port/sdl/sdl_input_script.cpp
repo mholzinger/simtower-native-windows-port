@@ -241,7 +241,7 @@ std::vector<ScriptCommand> parse_input_script(
         return fail(
             "expect-dialog takes event ID, alert ID, about, box replace, "
             "box invalid-filename, finance, find person, find tenant, "
-            "rename person, rename tenant or movie");
+            "rename person, rename tenant, movie or elevator popup");
       };
       const std::string rest =
           words.size() == 3 ? words[1] + " " + words[2] : std::string{};
@@ -263,6 +263,8 @@ std::vector<ScriptCommand> parse_input_script(
         command.text = words[1] == "event"
                            ? event_dialog_label(static_cast<std::uint16_t>(id))
                            : alert_dialog_label(static_cast<int>(id));
+      } else if (rest == kElevatorPopupDialogLabel) {
+        command.text = rest;
       } else if (words.size() == 3 && words[1] == "box" &&
                  (words[2] == "replace" || words[2] == "invalid-filename")) {
         command.text = "box " + words[2];
@@ -275,9 +277,10 @@ std::vector<ScriptCommand> parse_input_script(
       if (command.value < 0 || command.value > 0xFFFF) {
         throw fail("control id must be 0..65535");
       }
-    } else if (verb == "dialog-key") {
-      command.op = ScriptOp::dialog_key;
-      if (words.size() != 2) throw fail("dialog-key needs one key");
+    } else if (verb == "dialog-key" || verb == "panel-key") {
+      command.op =
+          verb == "dialog-key" ? ScriptOp::dialog_key : ScriptOp::panel_key;
+      if (words.size() != 2) throw fail(verb + " needs one key");
       static const std::pair<const char*, DialogKey> kKeys[] = {
           {"enter", DialogKey::enter},     {"esc", DialogKey::escape},
           {"tab", DialogKey::tab},         {"shift-tab", DialogKey::shift_tab},
@@ -354,6 +357,62 @@ std::vector<ScriptCommand> parse_input_script(
              command.numbers[0] >= 0))) {
         throw usage();
       }
+    } else if (verb == "open-elevator-control") {
+      command.op = ScriptOp::open_elevator_control;
+      single_value();
+      if (command.value < 0 || command.value > 23) {
+        throw fail("shaft index must be 0..23");
+      }
+    } else if (verb == "expect-panel") {
+      command.op = ScriptOp::expect_panel;
+      if (words.size() == 2 && words[1] == "none") {
+        command.value = -1;
+      } else if (words.size() == 3 && words[1] == "elevator-control") {
+        command.value = parse_integer(words[2], where);
+      } else {
+        throw fail("expect-panel takes elevator-control INDEX or none");
+      }
+    } else if (verb == "panel-at") {
+      command.op = ScriptOp::panel_at;
+      if (words.size() != 3 && !(words.size() == 4 && words[3] == "right")) {
+        throw fail("panel-at takes X Y [right]");
+      }
+      command.x = parse_coordinate(words[1], where);
+      command.y = parse_coordinate(words[2], where);
+      command.keys = words.size() == 4 ? 1U : 0U;
+    } else if (verb == "panel-down" || verb == "panel-move" ||
+               verb == "panel-up" || verb == "panel-dblclick") {
+      command.op = verb == "panel-down"     ? ScriptOp::panel_down
+                   : verb == "panel-move"   ? ScriptOp::panel_move
+                   : verb == "panel-up"     ? ScriptOp::panel_up
+                                            : ScriptOp::panel_double_click;
+      point(false);
+    } else if (verb == "expect-served") {
+      command.op = ScriptOp::expect_served;
+      if (words.size() != 4 || (words[3] != "yes" && words[3] != "no")) {
+        throw fail("expect-served takes INDEX FLOOR yes|no");
+      }
+      command.numbers = {static_cast<int>(parse_integer(words[1], where)),
+                         static_cast<int>(parse_integer(words[2], where))};
+      command.value = words[3] == "yes" ? 1 : 0;
+    } else if (verb == "expect-scroll") {
+      command.op = ScriptOp::expect_scroll;
+      single_value();
+    } else if (verb == "expect-waiting") {
+      command.op = ScriptOp::expect_waiting;
+      single_value();
+    } else if (verb == "expect-isolation") {
+      command.op = ScriptOp::expect_isolation;
+      if (words.size() != 2 || (words[1] != "on" && words[1] != "off")) {
+        throw fail("expect-isolation takes on or off");
+      }
+      command.value = words[1] == "on" ? 1 : 0;
+    } else if (verb == "expect-idle-passes") {
+      command.op = ScriptOp::expect_idle_passes;
+      single_value();
+    } else if (verb == "hold") {
+      command.op = ScriptOp::hold;
+      command.text = rest_of_line(line, verb);
     } else if (verb == "dialog-wait") {
       command.op = ScriptOp::dialog_wait;
       single_value();
@@ -683,6 +742,12 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
       print_digest_();
       break;
     case ScriptOp::menu:
+      if (!session_.panel_enabled(Panel::main)) {
+        throw ScriptFailure(2, command.where + ": menu " +
+                                   std::to_string(command.value) +
+                                   ": Main and its menu are disabled while "
+                                   "Elevator Control is open");
+      }
       if (!find_original_menu_command(session_.menu(),
                                       static_cast<std::uint16_t>(
                                           command.value))) {
@@ -754,6 +819,85 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
         (void)session_.open_movie_dialog_for_test(
             static_cast<std::size_t>(command.numbers[0]));
       }
+      break;
+    case ScriptOp::open_elevator_control:
+      session_.open_elevator_control_for_test(
+          static_cast<std::size_t>(command.value));
+      break;
+    case ScriptOp::panel_at:
+    case ScriptOp::panel_down:
+    case ScriptOp::panel_move:
+    case ScriptOp::panel_up:
+    case ScriptOp::panel_double_click: {
+      const auto* panel = session_.elevator_control();
+      if (!panel) {
+        throw ScriptFailure(2, command.where +
+                                   ": no Elevator Control is open");
+      }
+      const int x = panel->client_x() + command.x;
+      const int y = panel->client_y() + command.y;
+      const auto deliver = [&](InputKind kind) {
+        session_.pointer_event({kind, x, y, 0U});
+        while (!pending_.empty()) {
+          const auto queued = pending_.front();
+          pending_.pop_front();
+          session_.pointer_event(queued);
+        }
+      };
+      if (command.op == ScriptOp::panel_at) {
+        const bool right = command.keys != 0U;
+        // A press that ran a modal (a phase button's ELVPOPUP) gave its
+        // release to that modal: under USER's capture the popup ends on
+        // it, so ELVDLOGMAIN never sees it. Otherwise the release follows.
+        const auto dialogs = session_.host_requests().dialogs;
+        deliver(right ? InputKind::right_down : InputKind::down);
+        if (session_.host_requests().dialogs == dialogs) {
+          deliver(right ? InputKind::right_up : InputKind::up);
+        }
+      } else {
+        deliver(command.op == ScriptOp::panel_down   ? InputKind::down
+                : command.op == ScriptOp::panel_move ? InputKind::move
+                : command.op == ScriptOp::panel_up   ? InputKind::up
+                                                     : InputKind::double_click);
+      }
+      break;
+    }
+    case ScriptOp::panel_key: {
+      if (!session_.elevator_control()) {
+        throw ScriptFailure(2, command.where +
+                                   ": no Elevator Control is open");
+      }
+      DialogInput input{};
+      input.kind = DialogInput::Kind::key;
+      input.key = command.dialog_key;
+      input.character = command.character;
+      input.shift = command.shift;
+      session_.elevator_control_input(input);
+      if (command.character != '\0' ||
+          command.dialog_key == DialogKey::space) {
+        DialogInput typed{};
+        typed.kind = DialogInput::Kind::character;
+        typed.character = command.character != '\0' ? command.character : ' ';
+        session_.elevator_control_input(typed);
+      }
+      input.kind = DialogInput::Kind::key_up;
+      session_.elevator_control_input(input);
+      break;
+    }
+    case ScriptOp::expect_panel:
+    case ScriptOp::expect_served:
+    case ScriptOp::expect_scroll:
+    case ScriptOp::expect_waiting:
+    case ScriptOp::expect_isolation:
+    case ScriptOp::expect_idle_passes:
+      check_expectation(command);
+      break;
+    case ScriptOp::hold:
+      if (!hold_dialog_) {
+        throw ScriptFailure(2, command.where + ": hold cannot write a frame "
+                                               "here");
+      }
+      hold_dialog_(command.text, command.where);
       break;
     case ScriptOp::expect_dialog:
       // Read by drives_dialog when a dialog opens.
@@ -833,6 +977,70 @@ void ScriptPlayer::check_expectation(const ScriptCommand& command) const {
       }
       return;
     }
+    case ScriptOp::expect_panel: {
+      const auto* controller = session_.elevator_controller();
+      const std::int64_t open =
+          controller ? static_cast<std::int64_t>(
+                           controller->state().elevator_index)
+                     : -1;
+      if (open != command.value) {
+        throw ScriptFailure(
+            3, command.where + ": expected " +
+                   (command.value < 0 ? std::string("no Elevator Control")
+                                      : "Elevator Control on shaft " +
+                                            std::to_string(command.value)) +
+                   ", got " +
+                   (open < 0 ? std::string("none")
+                             : "shaft " + std::to_string(open)));
+      }
+      return;
+    }
+    case ScriptOp::expect_served: {
+      const auto* document = session_.document();
+      const auto index = static_cast<std::size_t>(command.numbers[0]);
+      const int floor = command.numbers[1];
+      if (!document || index >= document->elevators.size() || floor < 0 ||
+          floor >= 120) {
+        throw ScriptFailure(2, command.where + ": no such shaft or floor");
+      }
+      actual = document->elevators[index]
+                           .serviced_floors[static_cast<std::size_t>(floor)] !=
+                       std::byte{0}
+                   ? 1
+                   : 0;
+      what = "served";
+      break;
+    }
+    case ScriptOp::expect_scroll:
+    case ScriptOp::expect_waiting:
+    case ScriptOp::expect_isolation: {
+      const auto* controller = session_.elevator_controller();
+      if (!controller) {
+        throw ScriptFailure(3, command.where +
+                                   ": no Elevator Control is open");
+      }
+      if (command.op == ScriptOp::expect_scroll) {
+        actual = controller->state().scroll_position;
+        what = "scroll position";
+      } else if (command.op == ScriptOp::expect_waiting) {
+        const auto* document = session_.document();
+        const auto& state = controller->state();
+        if (!document || state.elevator_index >= document->elevators.size()) {
+          throw ScriptFailure(2, command.where + ": no such shaft");
+        }
+        actual = original_elevator_control_waiting_value(
+            document->elevators[state.elevator_index], state);
+        what = "waiting count";
+      } else {
+        actual = controller->state().isolation_active ? 1 : 0;
+        what = "isolation";
+      }
+      break;
+    }
+    case ScriptOp::expect_idle_passes:
+      actual = static_cast<std::int64_t>(session_.idle_passes());
+      what = "idle passes";
+      break;
     case ScriptOp::expect_title:
       if (session_.window_title() != command.text) {
         throw ScriptFailure(3, command.where + ": expected title '" +

@@ -1,0 +1,16 @@
+# The phase buttons (DTMP 23-28) open ELVPOPUP modally on the press: a
+# driven popup answers with the band under the release (Express To Top,
+# mode 1); an undriven one takes its cancel (the mode it opened with).
+# The popup takes the release of the press that opened it (USER's
+# capture), so no panel-up follows: ELVDLOGMAIN keeps DS:31b4 = 23 / 24.
+# args: --scenario busy --passes 310
+# expect-stderr: elevator popup 23 mode 0 -> 1
+# expect-stderr: elevator popup 24 mode 0 -> 0 \(not driven: cancel\)
+pass 300
+open-elevator-control 0
+panel-down 40 53
+expect-dialog elevator popup
+dialog-at 40 30
+panel-at 64 53
+panel-at 148 413
+pass 310

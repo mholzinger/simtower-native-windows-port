@@ -1,0 +1,31 @@
+# Elevator Control on a standard shaft of the busy tower (15 floors, no
+# scroll bar): one instance (a second open is ignored), the floor-12 label
+# toggles its service off and on, Waiting +1 and SHOW, then Close.
+# Client points: the label column x 24, row 2 y 358 (DTMP 6 grid from
+# y 195, 13-pixel rows from the bottom); Waiting + (DTMP 8) 70,98; SHOW
+# (DTMP 5) 166,216; OK / Close (DTMP 1) 148,413.
+# args: --scenario busy --passes 320
+# expect-stderr: elevator control 0
+# expect-stderr: elevator control already open: ignored
+# expect-stderr: elevator control closed
+pass 300
+open-elevator-control 0
+expect-panel elevator-control 0
+open-elevator-control 1
+expect-panel elevator-control 0
+expect-served 0 12 yes
+panel-at 24 358
+expect-served 0 12 no
+panel-at 24 358
+expect-served 0 12 yes
+panel-at 70 98
+panel-at 166 216
+# Clicks over the disabled panels reach nothing; Esc and Enter go to the
+# dialog manager, which ELVDLOGMAIN ignores.
+click 600 300
+panel-key esc
+panel-key enter
+expect-panel elevator-control 0
+panel-at 148 413
+expect-panel none
+pass 320

@@ -178,6 +178,8 @@ struct OriginalDialogSignal {
     key_up,     // WM_KEYUP reaching the procedure: id is the virtual key
     button_down,  // WM_LBUTTONDOWN reaching the procedure at client (x, y)
     button_up,    // WM_LBUTTONUP reaching the procedure at client (x, y)
+    mouse_move,   // WM_MOUSEMOVE reaching the procedure at client (x, y)
+    right_button_up,  // WM_RBUTTONUP reaching the procedure at (x, y)
   };
   Kind kind{Kind::command};
   std::uint16_t id{};

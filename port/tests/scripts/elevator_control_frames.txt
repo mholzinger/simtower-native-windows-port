@@ -1,0 +1,43 @@
+# Review frames of Elevator Control on the busy tower plus a one-floor
+# express shaft (index 2): the standard shaft open, after a floor's
+# service is toggled, its phase popup (ELVPOPUP, modal over the panel),
+# the express shaft, the bomb offer (a Main-owned modal) over it, and an
+# alert it owns (a grid click while isolated). ec_popup is the frame where
+# a modal overlaps the panel: the bomb offer and the alert are centered in
+# the window and clear the panel (x 8..210) even at the minimum size; the
+# z-order holds for every modal (compose_window draws the open dialogs
+# after Elevator Control).
+# args: --scenario busy --passes 330 --direct-build 42,10,140@3 --event bomb@311
+# held: ec_standard.bmp
+# held: ec_popup.bmp
+# held: ec_toggled.bmp
+# held: ec_express.bmp
+# held: ec_modal.bmp
+# held: ec_alert.bmp
+pass 300
+open-elevator-control 0
+hold ec_standard.bmp
+panel-down 40 53
+expect-dialog elevator popup
+dialog-hold ec_popup.bmp
+dialog-at 40 10
+panel-at 24 358
+hold ec_toggled.bmp
+panel-at 148 413
+open-elevator-control 2
+hold ec_express.bmp
+panel-at 148 413
+pass 311
+open-elevator-control 0
+pass 312
+expect-dialog event 3020
+dialog-hold ec_modal.bmp
+dialog-click 1
+pass 320
+panel-at 50 413
+panel-at 24 345
+expect-dialog alert 1000
+dialog-hold ec_alert.bmp
+dialog-click 1
+panel-at 148 413
+pass 330

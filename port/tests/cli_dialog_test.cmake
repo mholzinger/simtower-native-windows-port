@@ -20,6 +20,9 @@
 #   "# same-digest-as: FILE"   the final digest line equals that of FILE
 #                              (relative to the script) run with the same
 #                              args
+#   "# same-tower-as: FILE"    only the final digest's tower and process
+#                              fields equal FILE's (host and request logs
+#                              may differ, e.g. a logged open and close)
 
 foreach(variable BIN PACK SCRIPT WORK)
   if(NOT DEFINED ${variable})
@@ -41,6 +44,7 @@ set(expect_patterns)
 set(reject_patterns)
 set(held_files)
 set(reference_script)
+set(compare_tower_only FALSE)
 foreach(line IN LISTS script_lines)
   if(line MATCHES "^# args: (.+)$")
     separate_arguments(parsed UNIX_COMMAND "${CMAKE_MATCH_1}")
@@ -56,6 +60,10 @@ foreach(line IN LISTS script_lines)
   elseif(line MATCHES "^# same-digest-as: (.+)$")
     get_filename_component(script_directory "${SCRIPT}" DIRECTORY)
     set(reference_script "${script_directory}/${CMAKE_MATCH_1}")
+  elseif(line MATCHES "^# same-tower-as: (.+)$")
+    get_filename_component(script_directory "${SCRIPT}" DIRECTORY)
+    set(reference_script "${script_directory}/${CMAKE_MATCH_1}")
+    set(compare_tower_only TRUE)
   endif()
 endforeach()
 if(NOT arguments)
@@ -124,7 +132,18 @@ if(reference_script)
             "cli_dialog_test: reference ${reference_script} exited "
             "${reference_result}\n${reference_errors}")
   endif()
-  if(NOT scripted_digest STREQUAL reference_digest)
+  set(scripted_compared "${scripted_digest}")
+  set(reference_compared "${reference_digest}")
+  if(compare_tower_only)
+    string(REGEX MATCH "tower [0-9a-f]+ process [0-9a-f]+" scripted_compared
+           "${scripted_digest}")
+    string(REGEX MATCH "tower [0-9a-f]+ process [0-9a-f]+" reference_compared
+           "${reference_digest}")
+    if(NOT scripted_compared)
+      message(FATAL_ERROR "cli_dialog_test: ${SCRIPT}: no tower digest")
+    endif()
+  endif()
+  if(NOT scripted_compared STREQUAL reference_compared)
     message(FATAL_ERROR
             "cli_dialog_test: ${SCRIPT}:\n  ${scripted_digest}\n"
             "differs from ${reference_script}:\n  ${reference_digest}")

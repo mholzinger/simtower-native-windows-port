@@ -1,0 +1,37 @@
+# Scroll bar 7 tracking holds the idle passes: Win32 runs USER's own
+# tracking loop from the press to the release, so SimTower's PeekMessage
+# idle loop (the simulation) does not run meanwhile. A thumb drag across
+# passes 50..60 and an arrow held across 61..65 run no pass; the passes
+# after each release do.
+# args: --scenario full --passes 70
+# expect-stderr: idle passes held: scroll bar tracking
+pass 50
+expect-idle-passes 50
+open-elevator-control 0
+expect-scroll 10
+panel-key pgup
+panel-key down
+panel-key down
+expect-scroll 3
+# Thumb at 3 (y 244..260): grab it and hold it across passes 50..60.
+panel-down 143 252
+panel-move 143 300
+pass 60
+expect-idle-passes 50
+panel-move 143 380
+panel-up 143 380
+expect-scroll 10
+pass 61
+expect-idle-passes 51
+# The up arrow (client 143,200): SB_LINEUP on the press, held to pass 65.
+panel-down 143 200
+expect-scroll 9
+pass 65
+expect-idle-passes 51
+panel-up 143 200
+pass 66
+expect-idle-passes 52
+panel-at 148 413
+expect-panel none
+pass 70
+expect-idle-passes 56

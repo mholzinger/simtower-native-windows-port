@@ -168,9 +168,10 @@ void triangle(OriginalDrawContext& context, const OriginalRect& r, bool up,
 // A vertical scroll bar: arrow buttons, the gray trough and the thumb (none
 // for an empty range). tracking: the thumb's ghost position while dragged.
 void draw_scroll_bar(OriginalDrawContext& context, const OriginalRect& bar,
-                     int min, int max, int position, bool enabled) {
+                     int min, int max, int position, bool enabled,
+                     OriginalRgb trough = kButtonFace) {
   const auto parts = dialog_scroll_parts(bar, min, max, position);
-  context.fill_rect(bar, kButtonFace);
+  context.fill_rect(bar, trough);
   draw_dialog_outline(context, bar, kBlack);
   raised_box(context, parts.up);
   raised_box(context, parts.down);
@@ -362,8 +363,11 @@ void paint_dialog_controls(OriginalDrawContext& context,
         break;
       case DialogControlKind::scroll_bar: {
         const auto ghost = dialog.scroll_tracking(it->id);
-        draw_scroll_bar(context, it->rect, it->scroll_min, it->scroll_max,
-                        ghost.value_or(it->scroll_pos), it->enabled);
+        // WM_CTLCOLORSCROLLBAR's brush (Elevator Control: white).
+        draw_scroll_bar(
+            context, it->rect, it->scroll_min, it->scroll_max,
+            ghost.value_or(it->scroll_pos), it->enabled,
+            dialog.descriptor().scroll_bar_background.value_or(kButtonFace));
         break;
       }
       case DialogControlKind::other:

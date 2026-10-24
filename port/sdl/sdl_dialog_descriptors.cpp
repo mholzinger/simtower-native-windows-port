@@ -6,6 +6,8 @@
 #include "original_dialog.hpp"
 #include "original_dialog_paint.hpp"
 #include "original_dtmp_runtime.hpp"
+#include "original_elevator_control.hpp"
+#include "original_elevator_control_controller.hpp"
 #include "original_information.hpp"
 
 #include <algorithm>
@@ -619,6 +621,128 @@ DialogWindow make_about_dialog(OriginalAboutDialogModel model) {
   };
   return DialogWindow(std::move(descriptor), shared->dialog, {}, client_width,
                      client_height, 0U);
+}
+
+namespace {
+
+// The pointer messages a procedure reads: presses and releases on no
+// control (WM_LBUTTONDOWN / WM_LBUTTONUP, WM_RBUTTONUP when right) and
+// moves (WM_MOUSEMOVE), in client coordinates.
+std::optional<DialogSignal> pointer_signal(const DialogPointer& pointer, int x,
+                                           int y, bool left_down,
+                                           bool right_up) {
+  DialogSignal signal{};
+  switch (pointer.kind) {
+    case DialogPointer::Kind::down:
+      if (!left_down) return std::nullopt;
+      signal.kind = DialogSignal::Kind::button_down;
+      break;
+    case DialogPointer::Kind::up:
+      signal.kind = DialogSignal::Kind::button_up;
+      break;
+    case DialogPointer::Kind::right_up:
+      if (!right_up) return std::nullopt;
+      signal.kind = DialogSignal::Kind::right_button_up;
+      break;
+    case DialogPointer::Kind::move:
+      signal.kind = DialogSignal::Kind::mouse_move;
+      break;
+    case DialogPointer::Kind::right_down:
+      return std::nullopt;
+  }
+  signal.x = x;
+  signal.y = y;
+  return signal;
+}
+
+}  // namespace
+
+DialogWindow make_elevator_control_dialog(const OriginalResources& resources,
+                                         int requested_left,
+                                         std::string caption,
+                                         DialogDescriptor::Painter client) {
+  auto dialog = parse_original_dialog(
+      resources.find("DIALOG", kOriginalElevatorControlDialogId));
+  const auto dtmp = parse_original_dtmp(
+      resources.find("DTMP", kOriginalElevatorControlDialogId));
+  const int font_pixels = original_dialog_font_pixels(dialog.font_point_size);
+  auto& font = OriginalCanvasFont::bundled();
+  // render_original_dtmp moves and shows scroll bar 7 at DTMP rectangle 7.
+  auto controls =
+      dialog_template_controls(dialog, dialog_base_units(font, font_pixels));
+  apply_dtmp_child_placement(controls, dtmp);
+
+  DialogDescriptor descriptor{};
+  descriptor.label = kElevatorControlDialogLabel;
+  // 1098:0773: 11e0:0b52(dialog, 8), on the fixed desktop of the panels.
+  descriptor.placement = DialogPlacement::fixed_desktop;
+  descriptor.requested_left = requested_left;
+  descriptor.font_pixels = font_pixels;
+  // 0x92c00040: WS_CAPTION without WS_SYSMENU (no close box).
+  descriptor.frame = {kCaptionFrameBorder,
+                      kCaptionFrameBorder + kCaptionFrameHeight,
+                      kCaptionFrameBorder, kCaptionFrameBorder};
+  descriptor.paint_frame = [caption = std::move(caption)](
+                               OriginalDrawContext& context,
+                               OriginalCanvasFont& frame_font,
+                               const DialogWindow& shown,
+                               const OriginalResources&) {
+    paint_caption_frame(caption, context, frame_font, shown);
+  };
+  descriptor.paint_client = std::move(client);
+  // 1098:091e: WHITE_BRUSH for CTLCOLOR_SCROLLBAR; NULL_BRUSH (nothing
+  // erased) for the dialog itself, which BITMAP/400 covers.
+  if (original_elevator_control_stock_brush(true) ==
+      OriginalElevatorControlStockBrush::white) {
+    descriptor.scroll_bar_background = 0xFFFFFFU;
+  }
+  descriptor.unhandled_pointer = [](const DialogPointer& pointer, int x,
+                                    int y) {
+    return pointer_signal(pointer, x, y, true, false);
+  };
+  descriptor.mouse_move = [](const DialogPointer& pointer, int x, int y) {
+    return pointer_signal(pointer, x, y, true, false);
+  };
+  return DialogWindow(std::move(descriptor), std::move(dialog),
+                     std::move(controls), kOriginalElevatorControlClientWidth,
+                     kOriginalElevatorControlClientHeight, 0U);
+}
+
+DialogWindow make_elevator_popup_dialog(const OriginalResources& resources,
+                                       int x, int y) {
+  auto dialog = parse_original_dialog(
+      resources.find("DIALOG", kOriginalElevatorPopupDialogId));
+  DialogDescriptor descriptor{};
+  descriptor.label = kElevatorPopupDialogLabel;
+  descriptor.placement = DialogPlacement::at;
+  descriptor.origin_x = x;
+  descriptor.origin_y = y;
+  // run_original_modal_dialog holds DS:24b8.
+  descriptor.counts_modal_lock = true;
+  descriptor.font_pixels = original_dialog_font_pixels(dialog.font_point_size);
+  descriptor.capture_pointer = true;
+  descriptor.clip_pointer = true;
+  // ELVPOPUP has no WM_LBUTTONDOWN or WM_COMMAND: Enter and Esc do nothing.
+  descriptor.escape_command = [](const DialogWindow&) {
+    return std::optional<std::uint16_t>{};
+  };
+  descriptor.unhandled_pointer = [](const DialogPointer& pointer, int px,
+                                    int py) {
+    return pointer_signal(pointer, px, py, false, true);
+  };
+  descriptor.mouse_move = [](const DialogPointer& pointer, int px, int py) {
+    return pointer_signal(pointer, px, py, false, true);
+  };
+  descriptor.paint_client = [](OriginalDrawContext& context,
+                               OriginalCanvasFont&, const DialogWindow& shown,
+                               const OriginalResources& pack) {
+    paint_original_elevator_popup(
+        context, pack, static_cast<std::int16_t>(
+                           static_cast<int>(shown.paint_state()) - 1));
+  };
+  return DialogWindow(std::move(descriptor), std::move(dialog), {},
+                     kOriginalElevatorControlPopupWidth,
+                     kOriginalElevatorControlPopupHeight, 0U);
 }
 
 }  // namespace simtower::sdl
