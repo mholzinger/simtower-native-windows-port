@@ -334,6 +334,13 @@ class Session::TowerFileHost final : public OriginalTowerFileHost {
   // The 8-character basename rule measured from the platform's directory
   // separator: '/' off Windows (where '\\' is an ordinary name character),
   // the original's backslash (and '/') on Windows.
+  [[nodiscard]] bool basename_rule_uses_file_name_only() const override {
+#ifdef _WIN32
+    return false;
+#else
+    return true;
+#endif
+  }
   [[nodiscard]] std::wstring_view path_separators() const override {
 #ifdef _WIN32
     return L"\\/";

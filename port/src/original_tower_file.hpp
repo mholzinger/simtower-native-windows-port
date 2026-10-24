@@ -58,6 +58,13 @@ class OriginalTowerFileHost {
   [[nodiscard]] virtual std::wstring_view path_separators() const {
     return L"\\";
   }
+  // true applies the basename rule to the file name alone. The original
+  // measures to the first dot in the whole path, so a dotted directory
+  // makes any name pass; non-Windows hosts check only the name (owner
+  // decision 2026-10-23). The Win32 host keeps the original rule.
+  [[nodiscard]] virtual bool basename_rule_uses_file_name_only() const {
+    return false;
+  }
   // Alert 1000 with STRL/1002 entry `strl_index`.
   virtual void file_error(std::uint16_t strl_index) = 0;
   // Stops every mixer channel (11c8:0135(1)) when audio exists, then shows

@@ -67,8 +67,10 @@ bool save_original_tower_as(OriginalTowerFileHost& host) {
       return false;
     }
     const auto normalized = original_tdt_normalized_path(*selected);
-    if (!original_tdt_basename_is_valid(normalized,
-                                        host.path_separators())) {
+    const auto measured = host.basename_rule_uses_file_name_only()
+                              ? normalized.filename()
+                              : normalized;
+    if (!original_tdt_basename_is_valid(measured, host.path_separators())) {
       host.invalid_filename();
       continue;
     }
