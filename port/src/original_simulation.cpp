@@ -357,6 +357,7 @@ void charge_original_maintenance(OriginalTdtDocument& document,
 
   document.header.balance =
       wrapping_subtract(document.header.balance, amount);
+  mark_original_balance_changed(document, amount);
   add_original_maintenance_for_type(document, facility_type, amount);
 }
 
@@ -532,6 +533,7 @@ void add_original_entertainment_income(
     return;
   }
   document.header.balance = wrapping_add(document.header.balance, amount);
+  mark_original_balance_changed(document, amount);
   add_original_income_for_type(document, facility_type, amount);
 }
 
@@ -1509,19 +1511,23 @@ OriginalRatingProgressResult step_original_rating_progress(
   ++document.header.rating;
   result.promoted = true;
 
+  result.dialog = apply_original_rating_promotion(document);
+  return result;
+}
+
+OriginalEventDialogRequest apply_original_rating_promotion(
+    OriginalTdtDocument& document) noexcept {
   // 1148:003d snapshots whether this rating's treasure condition was already
   // met, clears all VIP/transient prerequisite state, then shows the rating
   // modal. b92a/b92b/b92c/b92d intentionally survive.
+  auto& tail = document.post_elevator;
   tail.b922_flag = original_rating_treasure_condition(document) ? 1U : 0U;
   tail.b923 = 0U;
   tail.b928 = 0U;
   tail.b924 = -1;
   tail.b929 = 0U;
-  result.dialog = {
-      static_cast<std::uint16_t>(0x0bd4U + document.header.rating),
-      0,
-      0x2710};
-  return result;
+  return {static_cast<std::uint16_t>(0x0bd4U + document.header.rating), 0,
+          0x2710};
 }
 
 OriginalRatingConstructionResult complete_original_rating_construction(
@@ -1581,6 +1587,7 @@ OriginalRatingConstructionResult award_original_rating_treasure(
   if (result.treasure_value != 0) {
     document.header.balance = wrapping_add(
         document.header.balance, result.treasure_value);
+    mark_original_balance_changed(document, result.treasure_value);
     document.header.other_income = wrapping_add(
         document.header.other_income, result.treasure_value);
   }
@@ -1737,6 +1744,7 @@ void add_original_rent_income(OriginalTdtDocument& document,
     return;
   }
   document.header.balance = wrapping_add(document.header.balance, amount);
+  mark_original_balance_changed(document, amount);
   add_original_income_for_type(document, facility_type, amount);
 }
 
@@ -1750,6 +1758,7 @@ void remove_original_rent_income(OriginalTdtDocument& document,
     return;
   }
   document.header.balance = wrapping_subtract(document.header.balance, amount);
+  mark_original_balance_changed(document, amount);
   add_original_income_for_type(document, facility_type,
                                wrapping_subtract(0, amount));
 }
@@ -2487,24 +2496,14 @@ void merge_original_floor_type(OriginalTdtFloor& floor,
 
 void rebuild_original_floor_after_damage(OriginalTdtDocument& document,
                                          std::int16_t floor_number) {
-  // Exact persisted portion of 11f8:3a31: coalesce adjacent type-0 records,
-  // then type-24 records, and rebuild the live-key lookup. The native host
-  // performs the original conditional redraw after this model mutation.
+  // 11f8:35ac ends with 11f8:3a31 for the damaged floor.
   if (floor_number < 0 ||
       static_cast<std::size_t>(floor_number) >= document.floors.size()) {
     return;
   }
-  auto& floor = document.floors[static_cast<std::size_t>(floor_number)];
-  merge_original_floor_type(floor, 0, document.header.byte_swapped);
-  merge_original_floor_type(floor, 24, document.header.byte_swapped);
-  // 1228:0e30 overwrites only keys represented by live records.
-  for (std::size_t index = 0; index < floor.tenants.size(); ++index) {
-    const auto key = std::to_integer<std::uint8_t>(
-        floor.tenants[index].exact_bytes[12]);
-    if (key < floor.tenant_index.size()) {
-      floor.tenant_index[key] = static_cast<std::uint16_t>(index);
-    }
-  }
+  coalesce_original_floor_records(
+      document.floors[static_cast<std::size_t>(floor_number)],
+      document.header.byte_swapped);
 }
 
 std::optional<std::size_t> original_tenant_at_damage_x(
@@ -2717,6 +2716,20 @@ void append_original_rebuilt_floor(OriginalFacilityDamageResult& result,
 }
 
 }  // namespace
+
+void coalesce_original_floor_records(OriginalTdtFloor& floor,
+                                     bool byte_swapped) {
+  merge_original_floor_type(floor, 0, byte_swapped);
+  merge_original_floor_type(floor, 24, byte_swapped);
+  // 1228:0e30 overwrites only keys represented by live records.
+  for (std::size_t index = 0; index < floor.tenants.size(); ++index) {
+    const auto key = std::to_integer<std::uint8_t>(
+        floor.tenants[index].exact_bytes[12]);
+    if (key < floor.tenant_index.size()) {
+      floor.tenant_index[key] = static_cast<std::uint16_t>(index);
+    }
+  }
+}
 
 OriginalFacilityDamageResult apply_original_facility_damage(
     OriginalTdtDocument& document,
@@ -3152,6 +3165,7 @@ OriginalBombEventResolution resolve_original_bomb_event(
     result.direct_wave_resource = 10015;
     document.header.balance = wrapping_subtract(document.header.balance,
                                                 ransom);
+    mark_original_balance_changed(document, ransom);
     // 1178:07e8 records non-construction spending in DS:b3d2. Construction
     // purchases instead use 1178:0703 and DS:b3d6.
     document.header.other_income = wrapping_subtract(
@@ -3518,6 +3532,7 @@ OriginalFireCrewResolution resolve_original_fire_crew_offer(
       std::bit_cast<std::int16_t>(part.words_52_to_ac[36]));
   if (cost != 0) {
     document.header.balance = wrapping_subtract(document.header.balance, cost);
+    mark_original_balance_changed(document, cost);
     document.header.other_income = wrapping_subtract(
         document.header.other_income, cost);
   }

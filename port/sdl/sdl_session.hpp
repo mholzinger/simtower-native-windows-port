@@ -247,6 +247,7 @@ class Session : private OriginalIdlePassHost {
   void idle_palette_changed() override;
   void rating_promoted_before_dialog(std::uint16_t rating) override;
   void rating_promoted_after_dialog(std::uint16_t rating) override;
+  void cathedral_rating_promoted() override;
   bool render_full_frame(bool renderer_surface_dirty) override;
   void palette_recolor_rebuild() override;
   void present_main_direct() override { present_main(); }
