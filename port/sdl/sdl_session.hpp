@@ -356,6 +356,7 @@ class Session : private OriginalIdlePassHost {
   void bomb_ransom_paid() override { paint_info(); }
   void preview_only_pass() override;
   void restore_preview() override;
+  void cathedral_rating_promoted() override;
   bool render_full_frame(bool renderer_surface_dirty) override;
   void commit_full_frame_preview() override;
   void palette_recolor_rebuild() override;

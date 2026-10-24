@@ -917,6 +917,15 @@ void Session::restore_preview() {
   if (restore.clear_previous_rectangle) world_input_.preview_rect.reset();
 }
 
+void Session::cathedral_rating_promoted() {
+  // 1140:00a8 after its modal; 1140:010d(1) as in the ordinary promotion.
+  const auto rating = document_->header.rating;
+  log_request(RequestKind::rating_promoted, {rating});
+  tally("rating promoted");
+  log_line("rating promoted to " + std::to_string(rating));
+  rating_promoted_after_dialog(rating);
+}
+
 bool Session::render_full_frame(bool renderer_surface_dirty) {
   // 1090:0580 renderer and the 1090:05ee outline.
   current_preview_rect_ = original_world_input_preview_rect(
@@ -1329,7 +1338,7 @@ SessionDigest Session::state_digest() const {
     process.boolean(document_->security_event_accelerated);
     process.unsigned_integer(document_->hotel_checkout_count);
     process.boolean(document_->hotel_checkout_effect_cadence);
-    process.boolean(document_->hotel_checkout_effect_active);
+    process.boolean(document_->balance_changed_effect_active);
     process.bytes(document_->medical_route_index);
     digest.process = process.value();
   }
