@@ -147,6 +147,14 @@ struct OriginalEventDialogRequest {
 // A present notification value of zero is significant: 1148:007e explicitly
 // clears STRL/1010 before an allowed promotion. An absent value means that the
 // prerequisite path left the current Info message untouched.
+// Headless part of 1148:003d, shared by the ordinary promotion (1140:002d)
+// and the Cathedral's rating-six promotion (1140:00a8): snapshot whether the
+// new rating's treasure condition already holds, clear the VIP/transient
+// prerequisite state, and return the rating modal (DIALOG 0xbd4 + rating).
+// Call after the rating has been raised.
+[[nodiscard]] OriginalEventDialogRequest apply_original_rating_promotion(
+    OriginalTdtDocument& document) noexcept;
+
 struct OriginalRatingProgressResult {
   std::uint16_t desired_rating{1U};
   bool promoted{};
