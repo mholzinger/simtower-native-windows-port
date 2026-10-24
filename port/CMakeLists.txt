@@ -17,6 +17,7 @@ add_library(simtower_port_core STATIC
   src/original_command_palette.cpp
   src/original_construction.cpp
   src/original_dialog.cpp
+  src/original_dialog_controllers.cpp
   src/original_dialog_model.cpp
   src/original_dialog_paint.cpp
   src/original_dib.cpp
@@ -162,6 +163,7 @@ target_link_libraries(simtower_test_support PUBLIC simtower_port_core)
 # (sdl/sdl_dialog*.hpp). No SDL in it, so it is built on every platform:
 # simtower_sdl and the dialog tests (native and under Wine) link it.
 add_library(simtower_sdl_runtime STATIC sdl/sdl_dialog.cpp
+                                        sdl/sdl_dialog_widgets.cpp
                                         sdl/sdl_dialog_descriptors.cpp)
 target_include_directories(simtower_sdl_runtime PUBLIC
                            ${CMAKE_CURRENT_SOURCE_DIR}/sdl)
@@ -388,6 +390,28 @@ if(BUILD_TESTING)
   set_tests_properties(simtower_sdl_dialog_tests PROPERTIES
                        SKIP_RETURN_CODE 77)
 
+  # The shared Find / Rename / New Movie / Finance controllers against
+  # frozen copies of the Win32 transactions (also run under Wine). The
+  # staged tower needs the pack: skipped (exit 77) without it.
+  add_executable(simtower_dialog_controller_tests
+                 tests/dialog_controller_tests.cpp)
+  target_link_libraries(simtower_dialog_controller_tests PRIVATE
+                        simtower_test_support)
+  add_test(
+    NAME simtower_dialog_controller_tests
+    COMMAND simtower_dialog_controller_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_dialog_controller_tests PROPERTIES
+                       SKIP_RETURN_CODE 77)
+
+  # The SDL dialog manager's controls (edit, list box, combo box, scroll
+  # bar), the arrow-key groups and the WM_PAINT event: synthetic, no assets.
+  add_executable(simtower_sdl_widget_tests tests/sdl_widget_tests.cpp)
+  target_link_libraries(simtower_sdl_widget_tests PRIVATE
+                        simtower_sdl_runtime)
+  add_test(NAME simtower_sdl_widget_tests COMMAND simtower_sdl_widget_tests)
+
   add_executable(simtower_elevator_control_tests tests/elevator_control_tests.cpp)
   target_link_libraries(simtower_elevator_control_tests PRIVATE simtower_port_core)
   add_test(
@@ -506,7 +530,10 @@ if(BUILD_TESTING)
                    dialog_bomb_short_timer dialog_default dialog_mismatch
                    dialog_unbound dialog_click_static dialog_none_open
                    alert_cancel_1001 alert_no_1001 alert_answer_3
-                   about_dialog dialog_frames)
+                   alert_answer_3_invalid
+                   about_dialog dialog_frames dialog_names_list
+                   dialog_tenant_focus dialog_finance dialog_movie
+                   dialog_type_not_edit)
       add_test(
         NAME simtower_sdl_${script}
         COMMAND ${CMAKE_COMMAND}
@@ -587,6 +614,8 @@ if(BUILD_TESTING)
       simtower_dialog_model_tests
       simtower_dialog_paint_tests
       simtower_sdl_dialog_tests
+      simtower_sdl_widget_tests
+      simtower_dialog_controller_tests
       simtower_elevator_control_tests
       simtower_audio_tests
       simtower_idle_pass_tests

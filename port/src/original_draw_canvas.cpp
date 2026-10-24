@@ -15,10 +15,6 @@ OriginalRect intersect(const OriginalRect& a, const OriginalRect& b) noexcept {
           std::min(a.right, b.right), std::min(a.bottom, b.bottom)};
 }
 
-bool contains(const OriginalRect& rect, int x, int y) noexcept {
-  return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
-}
-
 // DrawTextA without DT_NOPREFIX: "&&" draws one '&' and a lone '&' is
 // removed. GDI also underlines the character after a lone '&'.
 // TEMP: no underline yet; none of the Info status strings contain '&'
@@ -124,7 +120,7 @@ OriginalCanvasDrawContext::OriginalCanvasDrawContext(
 
 void OriginalCanvasDrawContext::plot(int x, int y, OriginalRgb rgb,
                                      const OriginalRect& clip) {
-  if (!contains(clip, x, y)) return;
+  if (!original_rect_contains(clip, x, y)) return;
   raster_.pixels[static_cast<std::size_t>(y + origin_y_) *
                      static_cast<std::size_t>(raster_.width) +
                  static_cast<std::size_t>(x + origin_x_)] = rgb;

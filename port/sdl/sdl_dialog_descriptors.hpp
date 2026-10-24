@@ -32,16 +32,34 @@
 //   chrome, BITMAP/257 and the TEXT/128 credits scrolled by timer 9; any
 //   key the dialog manager passes on, and a button release, close it.
 //
+// - Find Person / Tenant (DIALOG/DTMP 510 / 520, FINDDIALOGFILTER): the
+//   BITMAP/510 client (no generic chrome), OK, Remove, Find and the list
+//   box placed by the DTMP; the list on the white WM_CTLCOLORLISTBOX brush,
+//   everything in the template's 10-point font (13 pixels).
+// - Rename Person / Tenant (DIALOG/DTMP 730 / 732): the 1068:0567 chrome,
+//   the edit on the 0xCC WM_CTLCOLOREDIT brush, the centered static.
+//   TEMP: Person Rename's SetCapture(dialog) is not reproduced; see
+//   make_rename_dialog in the .cpp for what is known and still open.
+// - New Movie (DIALOG/DTMP 731): WS_CAPTION "New Movie" with a TEMP Win3.1
+//   frame (one-pixel border, navy caption), the chrome, three buttons.
+// - Finance (DIALOG/DTMP 500, COUNTDLOGMAIN): BITMAP/500 with BITMAP/501
+//   over the pressed button and the twelve values
+//   (paint_original_finance); no controls, key-ups and clicks reach the
+//   procedure. The painter reads the procedure's pressed state through
+//   DialogWindow::paint_state (Session sets it to the controller's).
+//
 // Deferred (they keep their logged or auto-answered SDL behavior for a
 // later step): facility and person information, transport information
-// (elevator/escalator magnifier), Finance, Find person/tenant and its
-// results, Rename, the movie theater dialog, the elevator popup, the Command
-// selector's own window chrome, the startup (New/Load) dialog, the splash,
-// and Elevator Control. Each becomes another descriptor.
+// (elevator/escalator magnifier), the elevator popup, the Command selector's
+// own window chrome, the startup (New/Load) dialog, the splash, and
+// Elevator Control. Each becomes another descriptor.
 
 #include "sdl_dialog.hpp"
 
+#include "original_dialog_controllers.hpp"
 #include "original_dialog_model.hpp"
+#include "original_finance.hpp"
+#include "original_find.hpp"
 #include "original_resources.hpp"
 
 #include <string>
@@ -50,7 +68,7 @@
 namespace simtower::sdl {
 
 // run_original_event_dialog's dialog from its prepared model.
-[[nodiscard]] ModalDialog make_event_dialog(const OriginalResources& resources,
+[[nodiscard]] DialogWindow make_event_dialog(const OriginalResources& resources,
                                             OriginalEventDialogModel model,
                                             std::string label);
 
@@ -77,9 +95,30 @@ struct MessageBoxLayout {
     const OriginalMessageBoxRequest& request);
 
 // One MessageBox (TEMP layout, see the file comment).
-[[nodiscard]] ModalDialog make_message_box(OriginalMessageBoxRequest request,
+[[nodiscard]] DialogWindow make_message_box(OriginalMessageBoxRequest request,
                                            std::string label);
 
-[[nodiscard]] ModalDialog make_about_dialog(OriginalAboutDialogModel model);
+[[nodiscard]] DialogWindow make_about_dialog(OriginalAboutDialogModel model);
+
+// TEMP Win3.1 WS_CAPTION frame: a one-pixel border and an 18-pixel navy
+// caption (with its one-pixel bottom line) above the client.
+inline constexpr int kCaptionFrameBorder = 1;
+inline constexpr int kCaptionFrameHeight = 18;
+
+// The template + DTMP dialogs (configure_original_dtmp_window sizes the
+// window, render_original_dtmp places and shows the children). The
+// procedure's WM_INITDIALOG (the controllers' initialize) runs on the
+// result, then focus_first_tab_stop.
+[[nodiscard]] DialogWindow make_find_dialog(const OriginalResources& resources,
+                                           OriginalFindMode mode);
+[[nodiscard]] DialogWindow make_rename_dialog(
+    const OriginalResources& resources,
+    bool person);
+[[nodiscard]] DialogWindow make_movie_dialog(
+    const OriginalResources& resources);
+// paint_state() != 0 draws the OK surface pressed (BITMAP/501).
+[[nodiscard]] DialogWindow make_finance_dialog(
+    const OriginalResources& resources,
+    OriginalFinanceView view);
 
 }  // namespace simtower::sdl

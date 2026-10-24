@@ -379,9 +379,22 @@ void check_info_canvas(const simtower::OriginalResources& resources) {
               static_cast<unsigned long long>(hash));
   // Depends on BITMAP/320..327, the bundled font, and the canvas rules.
   // Update deliberately (and look at the image) when one of those changes.
-  assert(hash == 0xaadb862c54ae0f66ULL);
+  assert(hash == 0x758b18a75848d323ULL);
 
   const auto base = backend.backing();
+  {
+    // The 11-pixel bowl fix in the canvas font's dropout pass changed this
+    // frame in exactly one pixel: the bowl corner of 'P' in "Parking"
+    // (12-pixel status line), which it closes. Putting the backing pixel
+    // back reproduces the frame from before the fix.
+    auto before = image;
+    const std::size_t corner = static_cast<std::size_t>(39) * kInfoWidth + 176;
+    assert(before[corner] != base[corner]);
+    before[corner] = base[corner];
+    std::printf("info canvas before bowl fix fnv1a %016llx\n",
+                static_cast<unsigned long long>(fnv1a(before)));
+    assert(fnv1a(before) == 0xaadb862c54ae0f66ULL);
+  }
   auto& font = simtower::OriginalCanvasFont::bundled();
   // The date text is not clipped: descenders (the 'Q' tail) reach below the
   // field fill, as GDI's do.

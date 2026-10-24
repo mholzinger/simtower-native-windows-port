@@ -17,7 +17,9 @@
 //   like Windows 3.1 (which had no font smoothing). A dropout pass then
 //   turns on a pixel of 88..127 coverage where a thin stroke would
 //   otherwise vanish (the 't' and 'f' crossbars and the tops of 'm' and
-//   'n' at 12 pixels, commas at 13); see original_canvas_font.cpp. stb has
+//   'n' at 12 pixels, commas at 13, and bowls such as 'o' and 'a' at 11
+//   whose stroke shifts a column between rows); see
+//   original_canvas_font.cpp. stb has
 //   no hinter, so stems can still be uneven at 12-14 pixels; this is the
 //   accepted trade-off.
 
@@ -29,6 +31,7 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -87,6 +90,13 @@ class OriginalCanvasFont {
 // Windows-1252 to Unicode (the ANSI code page of an English Windows).
 [[nodiscard]] std::uint32_t original_cp1252_to_unicode(
     unsigned char ansi) noexcept;
+
+// UTF-8 text (typed text, e.g. SDL_EVENT_TEXT_INPUT) as the Windows-1252
+// bytes WM_CHAR would carry: the reverse of original_cp1252_to_unicode for
+// 0x20..0xFF except 0x7F. Code points the code page lacks (and controls)
+// are dropped, as are invalid or truncated sequences, which never read past
+// the end of the text.
+[[nodiscard]] std::string original_utf8_to_cp1252(std::string_view utf8);
 
 // The bundled TTF bytes (generated from the vendored file at build time).
 [[nodiscard]] std::span<const std::byte> original_canvas_bundled_font_data();

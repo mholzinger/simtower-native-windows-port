@@ -48,7 +48,8 @@
 //   expect-saved PATH      PATH holds exactly the game-save serialization of
 //                          the live tower (what a Save just wrote)
 //   expect-dialog event ID | alert ID | about | box replace |
-//                 box invalid-filename
+//                 box invalid-filename | finance | find person |
+//                 find tenant | rename person | rename tenant | movie
 //                          the dialog that is opening now (see Dialogs);
 //                          exit 3 if another one opens, or none is open
 //   dialog-click ID        press and release the center of push button ID
@@ -59,9 +60,23 @@
 //                          alert 1001 shows 6, 7, 2), or 0 for About (no
 //                          controls: its center). Exit 2 if ID is not a
 //                          visible, enabled push button
-//   dialog-key KEY         a key press in that dialog: enter, esc, tab,
-//                          shift-tab, space, arrow, other, or a letter a-z
-//                          (a button mnemonic, e.g. y / n on a MessageBox)
+//   dialog-key KEY         a key stroke (press, then release) in that
+//                          dialog: enter, esc, tab, shift-tab, space, left,
+//                          right, up, down, home, end, pgup, pgdn,
+//                          backspace, delete, f4, alt (Alt or F10 alone),
+//                          other, a letter a-z (a button mnemonic, e.g.
+//                          y / n on a MessageBox; also typed as WM_CHAR),
+//                          or shift-left / shift-right / shift-home /
+//                          shift-end (an edit extends its selection)
+//   dialog-type TEXT       types TEXT (the rest of the line, as WM_CHAR
+//                          characters) into the focused control; exit 2
+//                          unless it is an edit
+//   dialog-list ID INDEX [double]
+//                          press and release on row INDEX of list box ID
+//                          (twice for "double": LBN_DBLCLK); exit 2 unless
+//                          that row is visible
+//   dialog-at X Y [right]  press and release the left (or right) button at
+//                          client point X,Y of that dialog
 //   dialog-wait MS         MS milliseconds pass on the dialog clock; its
 //                          due timers fire (event dialogs: one-shot at
 //                          37856 ms; About: every interval)
@@ -71,6 +86,12 @@
 //                          FILE, or to the --headless-window file (which
 //                          the run then does not overwrite at its end); exit
 //                          2 with neither
+//   open-dialog rename-person PERSON | rename-tenant FLOOR TENANT |
+//               movie RECORD
+//                          TEST SHORTCUT, not original input: opens the
+//                          Rename or New Movie dialog that Person / Facility
+//                          Information would open (those windows are not
+//                          ported yet), with the launcher's result handling
 //
 // pick-file, expect-title and expect-saved take the rest of the line, but
 // '#' still starts a comment there, so PATH and TEXT cannot contain '#'.
@@ -117,16 +138,8 @@
 
 namespace simtower::sdl {
 
-// A script error (exit 2) or a failed expectation (exit 3).
-class ScriptFailure : public std::runtime_error {
- public:
-  ScriptFailure(int exit_code, const std::string& message)
-      : std::runtime_error(message), exit_code_(exit_code) {}
-  [[nodiscard]] int exit_code() const { return exit_code_; }
-
- private:
-  int exit_code_;
-};
+// ScriptFailure (a script error, exit 2, or a failed expectation, exit 3)
+// is declared in sdl_session.hpp.
 
 enum class ScriptOp : std::uint8_t {
   pass,
@@ -155,9 +168,13 @@ enum class ScriptOp : std::uint8_t {
   expect_dialog,
   dialog_click,
   dialog_key,
+  dialog_type,
+  dialog_list,
+  dialog_at,
   dialog_wait,
   dialog_timer,
   dialog_hold,
+  open_dialog,
 };
 
 struct ScriptCommand {
@@ -173,6 +190,7 @@ struct ScriptCommand {
   std::string text{};
   DialogKey dialog_key{DialogKey::other};
   char character{};  // dialog-key LETTER
+  bool shift{};      // dialog-key shift-KEY
   std::vector<int> numbers{};  // menu-show BAR [ITEM [SUB]]
 };
 
@@ -211,10 +229,12 @@ class ScriptPlayer final : public InputSource {
   // True when the next line is "expect-dialog" naming this dialog (it is
   // consumed); throws ScriptFailure for another dialog or a bare
   // "dialog-*" line.
-  bool drives_dialog(const ModalDialog& dialog) override;
+  bool drives_dialog(const DialogWindow& dialog) override;
   // The following "dialog-*" lines, one input at a time.
   std::optional<DialogInput> next_dialog_input(
       std::optional<std::uint32_t> wait_ms) override;
+  // Input left for a dialog that closed is dropped.
+  void dialog_closed() override { pending_dialog_.clear(); }
 
  private:
   // Executes one non-pass command. Mouse commands go to the session (or,
