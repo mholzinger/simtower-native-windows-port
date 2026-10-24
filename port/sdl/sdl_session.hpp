@@ -153,7 +153,9 @@ class Session {
   void consume_person_family_dispatch(
       const OriginalPersonFamilyDispatchResult& dispatch);
   void consume_cathedral_ceremony(
-      std::int16_t floor, std::int16_t x, std::int32_t wave_resource);
+      std::int16_t floor, std::int16_t x,
+      const OriginalEventDialogRequest& rating_dialog,
+      std::int32_t wave_resource);
   void run_full_frame(bool world_changed);
 
   // The pack bytes must outlive resources_: find() returns spans into them.

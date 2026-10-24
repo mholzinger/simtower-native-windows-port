@@ -468,10 +468,22 @@ bool Session::run_fire_offer_boundary() {
   return true;
 }
 
-void Session::consume_cathedral_ceremony(std::int16_t floor,
-                                         std::int16_t x,
-                                         std::int32_t wave_resource) {
+void Session::consume_cathedral_ceremony(
+    std::int16_t floor, std::int16_t x,
+    const OriginalEventDialogRequest& rating_dialog,
+    std::int32_t wave_resource) {
   focus_event_coordinate(floor, x);
+  // 1040:0322: 1140:00a8 runs before 11c8:0135/0167. Its headless
+  // 1148:003d half already ran; present the rating-six modal, then
+  // 1140:010d(1) resets DS:783c to edit mode two.
+  if (rating_dialog.valid()) {
+    log_line("rating promoted to " + std::to_string(document_->header.rating));
+    (void)event_dialog(rating_dialog, kAcknowledgeChoice, "cathedral rating");
+    if (original_rating_command_refresh_plan(1U, false, false)
+            .force_command_mode_two) {
+      command_mode_ = 2U;
+    }
+  }
   if (wave_resource != 0) sound(wave_resource, "cathedral");
 }
 
@@ -508,6 +520,7 @@ void Session::consume_person_family_dispatch(
     const auto& ceremony = *dispatch.cathedral_arrival;
     consume_cathedral_ceremony(ceremony.effect_floor,
                                static_cast<std::int16_t>(ceremony.effect_x),
+                               ceremony.rating_dialog,
                                ceremony.wave_resource);
   }
 }
@@ -812,6 +825,7 @@ void Session::run_full_frame(bool world_changed) {
       const auto& ceremony = *people.cathedral_ceremony;
       consume_cathedral_ceremony(ceremony.effect_floor,
                                  static_cast<std::int16_t>(ceremony.effect_x),
+                                 ceremony.rating_dialog,
                                  ceremony.wave_resource);
     }
     world_changed = people.changed != 0U || world_changed;
