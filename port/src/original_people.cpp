@@ -2454,7 +2454,7 @@ void checkout_original_hotel_room(
       document, rent_income, static_cast<std::uint8_t>(owner.type),
       std::to_integer<std::uint8_t>(owner.exact_bytes[16]));
 
-  document.hotel_checkout_effect_active = true;
+  document.balance_changed_effect_active = true;
   document.hotel_checkout_count = static_cast<std::uint16_t>(
       document.hotel_checkout_count + 1U);
   if (document.hotel_checkout_count < 20U) {
@@ -3165,11 +3165,11 @@ OriginalOfficeMedicalLeaveStatus leave_original_office_medical_service(
 OriginalHotelCheckoutPresentation
 consume_original_hotel_checkout_presentation(
     OriginalTdtDocument& document) noexcept {
-  if (!document.hotel_checkout_effect_active) return {};
+  if (!document.balance_changed_effect_active) return {};
   OriginalHotelCheckoutPresentation result{
       true, document.hotel_checkout_effect_cadence};
   document.hotel_checkout_effect_cadence = true;
-  document.hotel_checkout_effect_active = false;
+  document.balance_changed_effect_active = false;
   return result;
 }
 

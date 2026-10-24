@@ -3342,7 +3342,7 @@ int main() {
     assert(tower->post_elevator.finance.total_population ==
            initial_population - 1);
     assert(tower->hotel_checkout_count == 1U &&
-           tower->hotel_checkout_effect_active &&
+           tower->balance_changed_effect_active &&
            !tower->hotel_checkout_effect_cadence);
     // Direct 1118:0143 latch/audio coverage: repaint always follows a raised
     // DS:779e, WAVE/10013 is selected only when DS:02aa is nonzero, and the
@@ -3351,17 +3351,17 @@ int main() {
         simtower::consume_original_hotel_checkout_presentation(*tower);
     assert(checkout_presentation.repaint_balance &&
            !checkout_presentation.play_cash_sound);
-    assert(!tower->hotel_checkout_effect_active &&
+    assert(!tower->balance_changed_effect_active &&
            tower->hotel_checkout_effect_cadence);
     assert(!simtower::consume_original_hotel_checkout_presentation(*tower)
                 .repaint_balance);
-    tower->hotel_checkout_effect_active = true;
+    tower->balance_changed_effect_active = true;
     tower->hotel_checkout_effect_cadence = true;
     checkout_presentation =
         simtower::consume_original_hotel_checkout_presentation(*tower);
     assert(checkout_presentation.repaint_balance &&
            checkout_presentation.play_cash_sound);
-    assert(!tower->hotel_checkout_effect_active &&
+    assert(!tower->balance_changed_effect_active &&
            tower->hotel_checkout_effect_cadence);
 
     // Direct 1178:0df9 coverage: inactive-room arrival selects the day-phase

@@ -357,6 +357,7 @@ void charge_original_maintenance(OriginalTdtDocument& document,
 
   document.header.balance =
       wrapping_subtract(document.header.balance, amount);
+  mark_original_balance_changed(document, amount);
   add_original_maintenance_for_type(document, facility_type, amount);
 }
 
@@ -532,6 +533,7 @@ void add_original_entertainment_income(
     return;
   }
   document.header.balance = wrapping_add(document.header.balance, amount);
+  mark_original_balance_changed(document, amount);
   add_original_income_for_type(document, facility_type, amount);
 }
 
@@ -1581,6 +1583,7 @@ OriginalRatingConstructionResult award_original_rating_treasure(
   if (result.treasure_value != 0) {
     document.header.balance = wrapping_add(
         document.header.balance, result.treasure_value);
+    mark_original_balance_changed(document, result.treasure_value);
     document.header.other_income = wrapping_add(
         document.header.other_income, result.treasure_value);
   }
@@ -1737,6 +1740,7 @@ void add_original_rent_income(OriginalTdtDocument& document,
     return;
   }
   document.header.balance = wrapping_add(document.header.balance, amount);
+  mark_original_balance_changed(document, amount);
   add_original_income_for_type(document, facility_type, amount);
 }
 
@@ -1750,6 +1754,7 @@ void remove_original_rent_income(OriginalTdtDocument& document,
     return;
   }
   document.header.balance = wrapping_subtract(document.header.balance, amount);
+  mark_original_balance_changed(document, amount);
   add_original_income_for_type(document, facility_type,
                                wrapping_subtract(0, amount));
 }
@@ -3152,6 +3157,7 @@ OriginalBombEventResolution resolve_original_bomb_event(
     result.direct_wave_resource = 10015;
     document.header.balance = wrapping_subtract(document.header.balance,
                                                 ransom);
+    mark_original_balance_changed(document, ransom);
     // 1178:07e8 records non-construction spending in DS:b3d2. Construction
     // purchases instead use 1178:0703 and DS:b3d6.
     document.header.other_income = wrapping_subtract(
@@ -3518,6 +3524,7 @@ OriginalFireCrewResolution resolve_original_fire_crew_offer(
       std::bit_cast<std::int16_t>(part.words_52_to_ac[36]));
   if (cost != 0) {
     document.header.balance = wrapping_subtract(document.header.balance, cost);
+    mark_original_balance_changed(document, cost);
     document.header.other_income = wrapping_subtract(
         document.header.other_income, cost);
   }
