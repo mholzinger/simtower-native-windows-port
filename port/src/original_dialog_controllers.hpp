@@ -9,11 +9,11 @@
 // the SDL dialog runtime over DialogWindow, and the Win32 procedures in
 // native_main.cpp over an HWND adapter (find_dialog_proc's WM_INITDIALOG
 // list and WM_COMMAND, finance_dialog_proc's WM_KEYUP / WM_LBUTTON* and
-// painter, the rename procedures' WM_INITDIALOG). The rename WM_COMMAND and
-// New Movie procedures keep their own switches and share the pure helpers
-// (original_rename_save, original_movie_choice_enabled). The frozen Win32
-// copies in dialog_controller_tests.cpp prove the behaviour is unchanged.
-// No windows.h here.
+// painter, the rename procedures' WM_INITDIALOG and WM_COMMAND, the New
+// Movie procedure's WM_INITDIALOG and WM_COMMAND). Each Win32 procedure
+// keeps only its own close tail (DTMP release, brush, capture, EndDialog).
+// The frozen Win32 copies in dialog_controller_tests.cpp prove the
+// behaviour is unchanged. No windows.h here.
 
 #include "original_dialog_model.hpp"
 #include "original_draw_context.hpp"
@@ -166,6 +166,11 @@ class OriginalRenameController {
   // non-empty name, the Rename gate (original_rename_ok_enabled).
   void initialize(OriginalDialogOps& ops,
                   const OriginalTdtDocument& document) const;
+  // The end of WM_INITDIALOG: original_rename_dialog_focus_plan(initialize)'s
+  // SetFocus (none: edit 4 is focused by the WM_PAINT tail) and its return
+  // value (TRUE: the dialog manager focuses the first tab stop), as Find's
+  // initial_focus.
+  [[nodiscard]] bool initial_focus(OriginalDialogOps& ops) const;
   // WM_PAINT's tail enables and focuses edit 4 (no selection change);
   // WM_COMMAND through original_rename_dialog_command_plan (notification
   // codes ignored): 4 re-runs the gate, 1 saves (empty text stays open),

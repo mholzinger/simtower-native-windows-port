@@ -71,7 +71,7 @@ void paint_event_client(const OriginalEventDialogModel& model,
 void paint_box_frame(const OriginalMessageBoxRequest& request,
                      const MessageBoxLayout& layout,
                      OriginalDrawContext& context, OriginalCanvasFont& font,
-                     const DialogWindow& dialog) {
+                     const DialogWindow& dialog, bool active) {
   const auto outer = dialog.outer();
   const OriginalRect all{0, 0, outer.width, outer.height};
   context.fill_rect(all, kButtonFace);
@@ -79,13 +79,15 @@ void paint_box_frame(const OriginalMessageBoxRequest& request,
   draw_dialog_outline(context, original_deflate_rect(all, kBoxFrame - 1),
                       kBlack);
   const auto caption = layout.caption_rect;
-  context.fill_rect(caption, style::kCaption);
+  context.fill_rect(caption,
+                    active ? style::kCaption : style::kInactiveCaption);
   context.fill_rect(
       {caption.left, caption.bottom - 1, caption.right, caption.bottom},
       kBlack);
   OriginalSavedDrawState saved(context);
   context.set_bk_transparent();
-  context.set_text_color(style::kCaptionText);
+  context.set_text_color(active ? style::kCaptionText
+                                : style::kInactiveCaptionText);
   OriginalSelectedFont selected(context, kMessageBoxFontPixels);
   const int extent = font.extent(kMessageBoxFontPixels, request.caption);
   const int height = dialog_line_height(font, kMessageBoxFontPixels);
@@ -186,18 +188,19 @@ void paint_about_client(const OriginalAboutDialogModel& model,
 // coordinates: border, navy caption with its bottom line, centered title.
 void paint_caption_frame(const std::string& caption,
                          OriginalDrawContext& context, OriginalCanvasFont& font,
-                         const DialogWindow& dialog) {
+                         const DialogWindow& dialog, bool active) {
   const auto outer = dialog.outer();
   const OriginalRect all{0, 0, outer.width, outer.height};
   draw_dialog_outline(context, all, kBlack);
   const OriginalRect bar{kCaptionFrameBorder, kCaptionFrameBorder,
                          outer.width - kCaptionFrameBorder,
                          kCaptionFrameBorder + kCaptionFrameHeight};
-  context.fill_rect(bar, style::kCaption);
+  context.fill_rect(bar, active ? style::kCaption : style::kInactiveCaption);
   context.fill_rect({bar.left, bar.bottom - 1, bar.right, bar.bottom}, kBlack);
   OriginalSavedDrawState saved(context);
   context.set_bk_transparent();
-  context.set_text_color(style::kCaptionText);
+  context.set_text_color(active ? style::kCaptionText
+                                : style::kInactiveCaptionText);
   OriginalSelectedFont selected(context, kMessageBoxFontPixels);
   const int extent = font.extent(kMessageBoxFontPixels, caption);
   const int height = dialog_line_height(font, kMessageBoxFontPixels);
@@ -282,8 +285,9 @@ DialogWindow make_dtmp_dialog(const OriginalResources& resources,
     descriptor.paint_frame = [caption](OriginalDrawContext& context,
                                        OriginalCanvasFont& font,
                                        const DialogWindow& shown,
-                                       const OriginalResources&) {
-      paint_caption_frame(caption, context, font, shown);
+                                       const OriginalResources&,
+                                       bool active) {
+      paint_caption_frame(caption, context, font, shown, active);
     };
   }
   const auto shared = std::make_shared<const OriginalDtmp>(std::move(dtmp));
@@ -420,25 +424,11 @@ DialogWindow make_event_dialog(const OriginalResources& resources,
   // base units and every control's text.
   const int font_pixels =
       original_dialog_font_pixels(model.dialog.font_point_size);
-  auto& font = OriginalCanvasFont::bundled();
-  const auto units = dialog_base_units(font, font_pixels);
   // configure_original_dtmp_window: the DTMP (or its bitmap) sizes the
   // window; the template has no frame or caption (0x92000042), so that is
   // the client. A DTMP without a size keeps the template's.
-  int client_width = 0;
-  int client_height = 0;
-  if (const auto size = original_dtmp_window_size(model.dtmp, resources);
-      size.width != 0) {
-    client_width = size.width;
-    client_height = size.height;
-  } else {
-    const auto rect = map_dialog_rect(units, 0, 0, model.dialog.width,
-                                      model.dialog.height);
-    client_width = rect.right;
-    client_height = rect.bottom;
-  }
-  auto controls = dialog_template_controls(model.dialog, units);
-  apply_dtmp_child_placement(controls, model.dtmp);
+  auto parts =
+      dtmp_dialog_parts(resources, model.dialog, model.dtmp, font_pixels);
 
   DialogDescriptor descriptor{};
   descriptor.label = std::move(label);
@@ -458,8 +448,8 @@ DialogWindow make_event_dialog(const OriginalResources& resources,
     paint_event_client(*shared, context, dialog, resources);
   };
   return DialogWindow(std::move(descriptor), shared->dialog,
-                     std::move(controls), client_width, client_height,
-                     shared->initial_focus);
+                     std::move(parts.controls), parts.client_width,
+                     parts.client_height, shared->initial_focus);
 }
 
 MessageBoxLayout layout_message_box(const OriginalMessageBoxRequest& request) {
@@ -567,8 +557,10 @@ DialogWindow make_message_box(OriginalMessageBoxRequest request,
                                OriginalDrawContext& context,
                                OriginalCanvasFont& font,
                                const DialogWindow& dialog,
-                               const OriginalResources& /*resources*/) {
-    paint_box_frame(*shared_request, *shared_layout, context, font, dialog);
+                               const OriginalResources& /*resources*/,
+                               bool active) {
+    paint_box_frame(*shared_request, *shared_layout, context, font, dialog,
+                    active);
   };
   descriptor.paint_client = [shared_layout](
                                 OriginalDrawContext& context,
@@ -686,8 +678,8 @@ DialogWindow make_elevator_control_dialog(const OriginalResources& resources,
                                OriginalDrawContext& context,
                                OriginalCanvasFont& frame_font,
                                const DialogWindow& shown,
-                               const OriginalResources&) {
-    paint_caption_frame(caption, context, frame_font, shown);
+                               const OriginalResources&, bool active) {
+    paint_caption_frame(caption, context, frame_font, shown, active);
   };
   descriptor.paint_client = std::move(client);
   // 1098:091e: WHITE_BRUSH for CTLCOLOR_SCROLLBAR; NULL_BRUSH (nothing
@@ -708,8 +700,9 @@ DialogWindow make_elevator_control_dialog(const OriginalResources& resources,
                      kOriginalElevatorControlClientHeight, 0U);
 }
 
-DialogWindow make_elevator_popup_dialog(const OriginalResources& resources,
-                                       int x, int y) {
+DialogWindow make_elevator_popup_dialog(
+    const OriginalResources& resources, int x, int y,
+    std::function<std::int16_t()> hover_mode) {
   auto dialog = parse_original_dialog(
       resources.find("DIALOG", kOriginalElevatorPopupDialogId));
   DialogDescriptor descriptor{};
@@ -733,12 +726,15 @@ DialogWindow make_elevator_popup_dialog(const OriginalResources& resources,
   descriptor.mouse_move = [](const DialogPointer& pointer, int px, int py) {
     return pointer_signal(pointer, px, py, false, true);
   };
-  descriptor.paint_client = [](OriginalDrawContext& context,
-                               OriginalCanvasFont&, const DialogWindow& shown,
-                               const OriginalResources& pack) {
-    paint_original_elevator_popup(
-        context, pack, static_cast<std::int16_t>(
-                           static_cast<int>(shown.paint_state()) - 1));
+  // The procedure's hover band (-1: none) through hover_mode, as the
+  // panel's painter reads its controller.
+  descriptor.paint_client = [hover_mode = std::move(hover_mode)](
+                                OriginalDrawContext& context,
+                                OriginalCanvasFont&, const DialogWindow&,
+                                const OriginalResources& pack) {
+    paint_original_elevator_popup(context, pack,
+                                  hover_mode ? hover_mode()
+                                             : std::int16_t{-1});
   };
   return DialogWindow(std::move(descriptor), std::move(dialog), {},
                      kOriginalElevatorControlPopupWidth,

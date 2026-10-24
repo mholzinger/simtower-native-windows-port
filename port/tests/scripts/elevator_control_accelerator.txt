@@ -1,0 +1,15 @@
+# F1 while Elevator Control is open: 1258:00fd's TranslateAccelerator
+# (Elevator Control, TOWER_MENU's table) matches before IsDialogMessage, so
+# the WM_COMMAND 40021 goes to ELVDLOGMAIN (no WM_COMMAND handler) and is
+# dropped: no help request, the panel stays open, and the key never
+# reaches its dialog manager. The window path takes the same route.
+# args: --scenario busy --passes 3
+# expect-stderr: accelerator 40021 1
+# reject-stderr: help contents
+# held: ec_accelerator.bmp
+pass 2
+open-elevator-control 0
+key f1
+expect-panel elevator-control 0
+hold ec_accelerator.bmp
+pass 3

@@ -7,6 +7,7 @@
 // under Wine).
 
 #include "sdl_dialog.hpp"
+#include "sdl_focus_rect.hpp"
 #include "sdl_style.hpp"
 
 #include "original_canvas_font.hpp"
@@ -18,7 +19,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -774,9 +777,36 @@ void group_tests() {
   assert(dialog.key_up(DialogKey::enter).signal == std::nullopt);
 }
 
+// The one DrawFocusRect pattern (sdl_focus_rect.hpp) the widgets and the
+// panels share: every other perimeter pixel, each visited once (an XOR
+// must not undo itself on a one-pixel-wide or one-pixel-high rectangle).
+void focus_rect_tests() {
+  const auto visit = [](int left, int top, int right, int bottom) {
+    std::vector<std::pair<int, int>> order{};
+    simtower::sdl::for_each_focus_rect_pixel(
+        left, top, right, bottom,
+        [&](int x, int y) { order.emplace_back(x, y); });
+    const std::set<std::pair<int, int>> unique(order.begin(), order.end());
+    assert(unique.size() == order.size());
+    return unique;
+  };
+  using Pixels = std::set<std::pair<int, int>>;
+  // 4x3 at (0,0): the even (x + y) perimeter pixels.
+  assert(visit(0, 0, 4, 3) ==
+         (Pixels{{0, 0}, {2, 0}, {0, 2}, {2, 2}, {3, 1}}));
+  // Shifted by one: the other phase.
+  assert(visit(1, 0, 5, 3) ==
+         (Pixels{{2, 0}, {4, 0}, {2, 2}, {4, 2}, {1, 1}}));
+  assert(visit(0, 0, 5, 1) == (Pixels{{0, 0}, {2, 0}, {4, 0}}));
+  assert(visit(3, 0, 4, 4) == (Pixels{{3, 1}, {3, 3}}));
+  assert(visit(0, 0, 0, 5).empty());
+  assert(visit(0, 0, 5, 0).empty());
+}
+
 }  // namespace
 
 int main() {
+  focus_rect_tests();
   edit_tests();
   list_tests();
   combo_tests();

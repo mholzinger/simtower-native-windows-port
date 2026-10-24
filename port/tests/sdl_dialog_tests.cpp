@@ -18,6 +18,8 @@
 #include "original_dialog_model.hpp"
 #include "original_dialog_paint.hpp"
 #include "original_dtmp_runtime.hpp"
+#include "original_elevator_control.hpp"
+#include "original_elevator_control_controller.hpp"
 #include "original_resources.hpp"
 
 #include <algorithm>
@@ -47,9 +49,12 @@ using simtower::sdl::DialogStep;
 using simtower::sdl::DialogWindow;
 using Kind = OriginalDialogSignal::Kind;
 
-// frame_hash_tests pins (see there).
-constexpr std::uint64_t kPinned3012 = 0x6baea778f558ae73ULL;
-constexpr std::uint64_t kPinned3020 = 0xe27c24d172a2a2adULL;
+// frame_hash_tests pins (see there). 3012 and 3020 changed with the canvas
+// font's row rule (the 11-pixel '0' top): two pixels per '0' in the text,
+// columns 2 of glyph rows 0 and 1 (was 0x6baea778f558ae73 and
+// 0xe27c24d172a2a2ad).
+constexpr std::uint64_t kPinned3012 = 0xca1ec18fd642e1d3ULL;
+constexpr std::uint64_t kPinned3020 = 0x9a991328b2cd5c55ULL;
 constexpr std::uint64_t kPinned3030 = 0x215459d150bf6b00ULL;
 constexpr std::uint64_t kPinned1001 = 0x1f88ddef77c7ef35ULL;
 constexpr std::uint64_t kPinnedAbout = 0x9d3405fefe1d2751ULL;
@@ -971,6 +976,48 @@ void dtmp_dialog_tests(const simtower::OriginalResources& resources) {
   assert(ok);
 }
 
+// ELVPOPUP's painter reads the procedure's hover band through the
+// accessor the host passes (no paint_state encoding): no hover until a
+// move selects a band, then the band's BITMAP/406 highlight, the same
+// frame as a popup whose accessor answers that band.
+void elevator_popup_tests(const simtower::OriginalResources& resources) {
+  simtower::OriginalElevatorPopupController controller(0U);
+  auto popup = simtower::sdl::make_elevator_popup_dialog(
+      resources, 100, 100, [&controller]() { return controller.hover_mode(); });
+  auto unread = simtower::sdl::make_elevator_popup_dialog(resources, 100,
+                                                          100, {});
+  popup.place(1019, 628);
+  unread.place(1019, 628);
+  assert(popup.label() == "elevator popup");
+  const auto idle = dialog_hash(popup, resources);
+  assert(idle == dialog_hash(unread, resources));
+  std::optional<int> band_y{};
+  std::int16_t band = -1;
+  for (int y = 0; y < simtower::kOriginalElevatorControlPopupHeight; ++y) {
+    const auto selected = simtower::original_elevator_control_popup_selection(
+        40, y, simtower::kOriginalElevatorControlPopupWidth,
+        simtower::kOriginalElevatorControlPopupHeight);
+    if (selected) {
+      band_y = y;
+      band = static_cast<std::int16_t>(*selected);
+      break;
+    }
+  }
+  assert(band_y);
+  const auto move = popup.pointer({DialogPointer::Kind::move,
+                                   popup.client_x() + 40,
+                                   popup.client_y() + *band_y});
+  assert(move.signal && move.signal->kind == Kind::mouse_move);
+  (void)controller.signal(*move.signal, popup);
+  assert(controller.hover_mode() == band);
+  const auto hovered = dialog_hash(popup, resources);
+  assert(hovered != idle);
+  auto fixed = simtower::sdl::make_elevator_popup_dialog(
+      resources, 100, 100, [band]() { return band; });
+  fixed.place(1019, 628);
+  assert(dialog_hash(fixed, resources) == hovered);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -987,6 +1034,7 @@ int main(int argc, char** argv) {
   about_tests(resources);
   frame_hash_tests(resources);
   dtmp_dialog_tests(resources);
+  elevator_popup_tests(resources);
   std::printf("sdl dialog tests passed\n");
   return 0;
 }

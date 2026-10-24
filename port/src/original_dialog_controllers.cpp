@@ -185,6 +185,15 @@ void OriginalRenameController::initialize(
                       ops.item_text(kOriginalRenameEditId).size()));
 }
 
+bool OriginalRenameController::initial_focus(OriginalDialogOps& ops) const {
+  // 1100:3a69-3b8f / 3df4-3f06. The plan never selects the text (no
+  // EM_SETSEL op is needed).
+  const auto focus = original_rename_dialog_focus_plan(
+      OriginalRenameDialogFocusPhase::initialize);
+  if (focus.focus_edit) ops.focus_item(kOriginalRenameEditId);
+  return focus.handled_result;
+}
+
 OriginalDialogOutcome OriginalRenameController::signal(
     const OriginalDialogSignal& signal, OriginalDialogOps& ops,
     OriginalRenameDialogHost& host) {

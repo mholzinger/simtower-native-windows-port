@@ -1,6 +1,7 @@
 #include "sdl_panels.hpp"
 
 #include "sdl_dialog.hpp"
+#include "sdl_focus_rect.hpp"
 #include "sdl_menu.hpp"
 #include "sdl_style.hpp"
 
@@ -66,26 +67,18 @@ class Canvas {
     }
   }
 
-  // TEMP: DrawFocusRect as an XOR of every other perimeter pixel, until the
-  // Win16 dotted-pen pattern is verified.
+  // DrawFocusRect (sdl_focus_rect.hpp, TEMP pattern) as an XOR of the
+  // raster, clipped to clip_to and the window.
   void focus_rect(const PanelRect& rect, const PanelRect& clip_to) {
-    const auto toggle = [&](int px, int py) {
-      if (!clip_to.contains(px, py) || px < 0 || py < 0 ||
-          px >= raster_.width || py >= raster_.height ||
-          ((px + py) & 1) != 0) {
-        return;
-      }
-      raster_.pixels[offset(px, py)] ^= 0x00FFFFFFU;
-    };
-    if (rect.width <= 0 || rect.height <= 0) return;
-    for (int px = rect.x; px < rect.x + rect.width; ++px) {
-      toggle(px, rect.y);
-      if (rect.height > 1) toggle(px, rect.y + rect.height - 1);
-    }
-    for (int py = rect.y + 1; py < rect.y + rect.height - 1; ++py) {
-      toggle(rect.x, py);
-      if (rect.width > 1) toggle(rect.x + rect.width - 1, py);
-    }
+    for_each_focus_rect_pixel(
+        rect.x, rect.y, rect.x + rect.width, rect.y + rect.height,
+        [&](int px, int py) {
+          if (!clip_to.contains(px, py) || px < 0 || py < 0 ||
+              px >= raster_.width || py >= raster_.height) {
+            return;
+          }
+          raster_.pixels[offset(px, py)] ^= 0x00FFFFFFU;
+        });
   }
 
   [[nodiscard]] OriginalWorldRaster take() { return std::move(raster_); }
@@ -135,9 +128,20 @@ OriginalWorldRaster compose_window(const Session& session) {
     canvas.fill(layout.main_outer, kNonclientRgb);
     canvas.outline(layout.main_outer, kBorderRgb);
     // The caption and TOWER_MENU's bar, with the open title highlighted.
+    // Only the active window has the active caption: Main's goes inactive
+    // while a palette or Elevator Control is active, or a modal (a
+    // DialogBoxParam, including the 1050:0533 selector at 1050:0588) is
+    // up. The same rule for the dialogs and Elevator Control (below): only
+    // the top open dialog, or Elevator Control while it is the active panel
+    // with no dialog or selector up, has the active caption. TEMP: SDL
+    // window focus does not enter it (an inactive SDL window still draws
+    // one active caption).
+    const bool main_active = session.active_panel() == Panel::main &&
+                             session.dialogs().empty() &&
+                             session.active_selector() == nullptr;
     draw_main_caption_and_menu_bar(canvas.raster(), session.menu(), layout,
                                    session.menu_view(),
-                                   session.window_title());
+                                   session.window_title(), main_active);
     canvas.blit(session.main_raster(), main.x, main.y, main);
   };
   const auto* palette = session.palette_runtime().initialized
@@ -213,7 +217,10 @@ OriginalWorldRaster compose_window(const Session& session) {
   // Elevator Control: TOPMOST above the palettes (1098:08c9; TEMP, owner
   // decision D2: also while the window is inactive), below the modals.
   if (const auto* control = session.elevator_control()) {
-    draw_dialog(canvas.raster(), *control, resources);
+    const bool control_active =
+        session.active_panel() == Panel::elevator_control &&
+        session.dialogs().empty() && session.active_selector() == nullptr;
+    draw_dialog(canvas.raster(), *control, resources, control_active);
   }
   if (const auto* selector = session.active_selector()) {
     // 1050:0978 at the 1050:05d6 placement; the window bottom stands in for
@@ -227,8 +234,12 @@ OriginalWorldRaster compose_window(const Session& session) {
                 rect.x, rect.y, rect);
   }
   // Open dialogs, bottom to top (sdl_dialog.hpp), above the panels.
-  for (const auto* dialog : session.dialogs()) {
-    draw_dialog(canvas.raster(), *dialog, resources);
+  // Only the top one is the active window (the event dialog under its
+  // alert is not).
+  const auto dialogs = session.dialogs();
+  for (const auto* dialog : dialogs) {
+    draw_dialog(canvas.raster(), *dialog, resources,
+                dialog == dialogs.back());
   }
   // An open drop-down (and cascade) is above every window, as USER's
   // popup menu windows are.

@@ -5,6 +5,7 @@
 // yet): see sdl_dialog.hpp.
 
 #include "sdl_dialog.hpp"
+#include "sdl_focus_rect.hpp"
 #include "sdl_style.hpp"
 
 #include "original_dialog_paint.hpp"
@@ -21,19 +22,14 @@ constexpr OriginalRgb kWhite = style::kWhite;
 constexpr OriginalRgb kButtonFace = style::kButtonFace;
 constexpr OriginalRgb kButtonShadow = style::kButtonShadow;
 
+// DrawFocusRect (sdl_focus_rect.hpp) in rgb, the XOR of the known
+// background.
 void dotted_rect(OriginalDrawContext& context, const OriginalRect& focus,
                  OriginalRgb rgb) {
-  const auto dot = [&](int px, int py) {
-    if (((px + py) & 1) == 0) context.fill_rect({px, py, px + 1, py + 1}, rgb);
-  };
-  for (int px = focus.left; px < focus.right; ++px) {
-    dot(px, focus.top);
-    dot(px, focus.bottom - 1);
-  }
-  for (int py = focus.top + 1; py < focus.bottom - 1; ++py) {
-    dot(focus.left, py);
-    dot(focus.right - 1, py);
-  }
+  for_each_focus_rect_pixel(
+      focus.left, focus.top, focus.right, focus.bottom, [&](int px, int py) {
+        context.fill_rect({px, py, px + 1, py + 1}, rgb);
+      });
 }
 
 // One line of text in a colour, clipped.

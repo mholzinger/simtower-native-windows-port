@@ -2852,32 +2852,134 @@ void size_original_dialog_client(HWND dialog,
                SWP_NOACTIVATE | SWP_NOZORDER);
 }
 
-// The Win32 side of the shared ELVDLOGMAIN controller: its dialog ops over
-// the HWND (InvalidateRect / UpdateWindow / the scroll bar's EnableWindow,
-// SetScrollRange without redraw at WM_INITDIALOG, SetScrollPos with
-// redraw) and its host over the native globals, each the USER call the
-// procedure made inline before it shared the controller.
-class Win32ElevatorControlOps final : public simtower::OriginalDialogOps {
+// GetAsyncKeyState of the physical primary button, as 1058:0517-053f and
+// 1098:0c68-0c90 sample it. The Win16 code probes the swap setting with a
+// SwapMouseButton(0) / SwapMouseButton(prev) pair, which briefly changes
+// the user's global preference; SM_SWAPBUTTON gives the same answer
+// without that side effect.
+bool original_primary_button_down_win32() {
+  const bool buttons_swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
+  const int primary_button = static_cast<int>(
+      simtower::original_command_primary_button_virtual_key(buttons_swapped));
+  return GetAsyncKeyState(primary_button) < 0;
+}
+
+BOOL original_set_dialog_item_text(HWND dialog,
+                                   int item,
+                                   const wchar_t* text) {
+  constexpr auto contract = simtower::original_dialog_item_text_contract();
+  return contract.set_forwards_text
+             ? SetDlgItemTextW(dialog, item, text)
+             : FALSE;
+}
+
+std::wstring original_get_dialog_item_text(HWND dialog, int item) {
+  constexpr auto contract = simtower::original_dialog_item_text_contract();
+  std::array<wchar_t, contract.get_buffer_characters> text{};
+  const UINT length = GetDlgItemTextW(
+      dialog, item, text.data(), static_cast<int>(text.size()));
+  return std::wstring(text.data(), static_cast<std::size_t>(length));
+}
+
+// The shared dialog controllers' OriginalDialogOps over a Win32 dialog: the
+// same USER calls the procedures made inline before they shared the
+// controllers (original_dialog_controllers.hpp and the ELVDLOGMAIN
+// controller). Text crosses the CP1252 boundary as the procedures convert
+// it. The list ops send LB_* to a LISTBOX child and the CB_* equivalents
+// to a COMBOBOX child (chosen by the child's window class), as the
+// OriginalDialogOps contract says. SetScrollRange redraws by default; the
+// Elevator Control's WM_INITDIALOG builds it with ScrollRangeRedraw::no for
+// the original's SetScrollRange(..., FALSE) at 1098:07c5-085a.
+class Win32DialogOps final : public simtower::OriginalDialogOps {
  public:
-  explicit Win32ElevatorControlOps(HWND dialog) : dialog_(dialog) {}
+  enum class ScrollRangeRedraw : bool { no = false, yes = true };
+
+  explicit Win32DialogOps(
+      HWND dialog, ScrollRangeRedraw scroll_range_redraw =
+                       ScrollRangeRedraw::yes)
+      : dialog_(dialog), scroll_range_redraw_(scroll_range_redraw) {}
+
   void show_item(std::uint16_t id, bool shown) override {
     ShowWindow(GetDlgItem(dialog_, id), shown ? SW_SHOW : SW_HIDE);
   }
   void invalidate() override { InvalidateRect(dialog_, nullptr, FALSE); }
+  void invalidate_rect(const simtower::OriginalRect& rect) override {
+    const RECT native{rect.left, rect.top, rect.right, rect.bottom};
+    InvalidateRect(dialog_, &native, FALSE);
+  }
   void update_window() override { UpdateWindow(dialog_); }
-  void resize(int, int) override {}
+  void resize(int client_width, int client_height) override {
+    RECT outer{0, 0, client_width, client_height};
+    AdjustWindowRectEx(
+        &outer, static_cast<DWORD>(GetWindowLongPtrW(dialog_, GWL_STYLE)),
+        FALSE, static_cast<DWORD>(GetWindowLongPtrW(dialog_, GWL_EXSTYLE)));
+    SetWindowPos(dialog_, nullptr, 0, 0, outer.right - outer.left,
+                 outer.bottom - outer.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  }
   void enable_item(std::uint16_t id, bool enabled) override {
     EnableWindow(GetDlgItem(dialog_, id), enabled);
   }
+  void focus_item(std::uint16_t id) override {
+    SetFocus(GetDlgItem(dialog_, id));
+  }
+  void set_item_text(std::uint16_t id, std::string_view cp1252) override {
+    const auto wide = original_cp1252_to_wide(cp1252);
+    original_set_dialog_item_text(dialog_, id, wide.c_str());
+  }
+  [[nodiscard]] std::string item_text(std::uint16_t id) const override {
+    return original_wide_to_cp1252(original_get_dialog_item_text(dialog_, id));
+  }
+  void list_reset(std::uint16_t id) override {
+    SendDlgItemMessageW(dialog_, id,
+                        is_combo_box(id) ? CB_RESETCONTENT : LB_RESETCONTENT,
+                        0U, 0);
+  }
+  void list_add(std::uint16_t id, std::string_view cp1252) override {
+    const auto text = original_cp1252_to_wide(cp1252);
+    SendDlgItemMessageW(dialog_, id,
+                        is_combo_box(id) ? CB_ADDSTRING : LB_ADDSTRING, 0U,
+                        reinterpret_cast<LPARAM>(text.c_str()));
+  }
+  void list_delete(std::uint16_t id, int index) override {
+    SendDlgItemMessageW(dialog_, id,
+                        is_combo_box(id) ? CB_DELETESTRING : LB_DELETESTRING,
+                        static_cast<WPARAM>(index), 0);
+  }
+  [[nodiscard]] int list_selection(std::uint16_t id) const override {
+    const bool combo = is_combo_box(id);
+    const auto selected = SendDlgItemMessageW(
+        dialog_, id, combo ? CB_GETCURSEL : LB_GETCURSEL, 0U, 0);
+    return selected == (combo ? CB_ERR : LB_ERR) ? -1
+                                                 : static_cast<int>(selected);
+  }
+  void list_set_selection(std::uint16_t id, int index) override {
+    SendDlgItemMessageW(dialog_, id,
+                        is_combo_box(id) ? CB_SETCURSEL : LB_SETCURSEL,
+                        static_cast<WPARAM>(index), 0);
+  }
   void set_scroll_range(std::uint16_t id, int min, int max) override {
-    SetScrollRange(GetDlgItem(dialog_, id), SB_CTL, min, max, FALSE);
+    SetScrollRange(GetDlgItem(dialog_, id), SB_CTL, min, max,
+                   scroll_range_redraw_ == ScrollRangeRedraw::yes);
   }
   void set_scroll_pos(std::uint16_t id, int position) override {
     SetScrollPos(GetDlgItem(dialog_, id), SB_CTL, position, TRUE);
   }
 
  private:
+  // The child's window class decides LB_* vs CB_*; a missing child or any
+  // other class keeps LB_*, the message set the adapter always sent.
+  [[nodiscard]] bool is_combo_box(std::uint16_t id) const {
+    std::array<wchar_t, 16> name{};
+    const HWND child = GetDlgItem(dialog_, id);
+    return child != nullptr &&
+           GetClassNameW(child, name.data(),
+                         static_cast<int>(name.size())) > 0 &&
+           lstrcmpiW(name.data(), L"ComboBox") == 0;
+  }
+
   HWND dialog_{};
+  ScrollRangeRedraw scroll_range_redraw_{ScrollRangeRedraw::yes};
 };
 
 int run_original_elevator_popup(HWND owner,
@@ -2886,6 +2988,9 @@ int run_original_elevator_popup(HWND owner,
                                 std::size_t phase_item,
                                 std::uint8_t mode);
 
+// The Win32 host of the shared ELVDLOGMAIN controller over the native
+// globals, each the USER call the procedure made inline before it shared
+// the controller. Its dialog ops are Win32DialogOps (above).
 class Win32ElevatorControlHost final
     : public simtower::OriginalElevatorControlHost {
  public:
@@ -2968,6 +3073,17 @@ class Win32ElevatorControlHost final
   void activate_main() override {
     if (g_main_window) SetActiveWindow(g_main_window);
   }
+  // 1098:0c68-0c90: the phase press opens ELVPOPUP only while the
+  // primary button is still down.
+  bool primary_button_down() override {
+    return original_primary_button_down_win32();
+  }
+  // 11e0:0e84 and 1208:05e6 (owner decision D3), as Win32WorldInputHost
+  // runs them.
+  void audio_pump() override { original_runtime_audio_pump(); }
+  void sample_auxiliary_pointer_tick() override {
+    g_original_last_auxiliary_pointer_tick = original_runtime_coarse_tick();
+  }
   void destroy() override { DestroyWindow(dialog_); }
 
  private:
@@ -2975,8 +3091,10 @@ class Win32ElevatorControlHost final
 };
 
 struct OriginalElevatorPopupContext {
+  // The WM_PAINT and commit-tail pumps (D3) run the owner's
+  // Win32ElevatorControlHost::audio_pump.
   explicit OriginalElevatorPopupContext(std::uint8_t mode)
-      : controller(mode) {}
+      : controller(mode, [] { original_runtime_audio_pump(); }) {}
   // ELVPOPUP's hover and original mode, shared with the SDL host.
   simtower::OriginalElevatorPopupController controller;
   std::size_t phase_item{};
@@ -3025,9 +3143,22 @@ INT_PTR CALLBACK elevator_popup_dialog_proc(HWND dialog, UINT message,
     case WM_PAINT: {
       PAINTSTRUCT paint{};
       HDC dc = BeginPaint(dialog, &paint);
+      if (context) {
+        // 1208:09cf at 1098:24ef after BeginPaint: its pump (D3).
+        Win32DialogOps ops(dialog);
+        (void)context->controller.signal(
+            simtower::OriginalDialogSignal{
+                simtower::OriginalDialogSignal::Kind::paint},
+            ops);
+      }
       if (dc && context) {
         // The shared ELVPOPUP painter (elevator_control_painter_parity_tests
-        // proves it paints what the direct GDI copy did).
+        // proves it paints what the direct GDI copy did when GDI succeeds).
+        // Known failure-path change: OriginalGdiDrawContext allocates a
+        // CreateSolidBrush per fill and per frame edge, and a CreatePen per
+        // pen, and throws when one fails; the catch below then ends the
+        // paint with the rest undrawn. The GDI copy used stock brushes,
+        // which cannot fail, and skipped only a failed CreatePen.
         try {
           simtower::OriginalGdiDrawContext draw(
               dc, simtower::kOriginalDialogGdiFailureText);
@@ -3055,12 +3186,13 @@ INT_PTR CALLBACK elevator_popup_dialog_proc(HWND dialog, UINT message,
       signal.y = static_cast<std::int16_t>(HIWORD(lparam));
       std::optional<int> result{};
       if (context) {
-        Win32ElevatorControlOps ops(dialog);
+        Win32DialogOps ops(dialog);
         result = context->controller.signal(signal, ops).result;
       } else if (message == WM_RBUTTONUP) {
         result = 0;
       }
       if (result) {
+        // The controller ran the commit tail's 25f8 pump (D3) first.
         ClipCursor(nullptr);
         ReleaseCapture();
         EndDialog(dialog, *result);
@@ -3114,10 +3246,27 @@ INT_PTR CALLBACK elevator_control_dialog_proc(HWND dialog, UINT message,
         simtower::kOriginalElevatorControlClientHeight,
         current.left, current.top);
     position_original_dialog(dialog, context->requested_left);
+    // The original's order (D2): scroll bar 7's range, position and enable
+    // (1098:07c5-085a) come before the DTMP walk (1070:0231 at 089c). That
+    // walk is what render_original_dtmp ports: it moves and shows the
+    // template's children, scroll bar 7 among them, in both (1070:0488-
+    // 04cf GetDlgItem, IsWindow, MoveWindow, ShowWindow), and creates none.
+    // SetScrollRange(..., FALSE) here, as at 1098:07c5-085a.
+    Win32DialogOps ops(dialog, Win32DialogOps::ScrollRangeRedraw::no);
+    context->controller.initialize_scroll_bar(ops);
+    // 1098:0838: UpdateWindow(scroll bar), which OriginalDialogOps has no
+    // call for (only on the range branch; the 0857 branch has none).
+    if (simtower::original_elevator_control_has_scrollbar(
+            context->controller.state())) {
+      if (HWND bar = GetDlgItem(
+              dialog, simtower::kOriginalElevatorControlScrollBarId)) {
+        UpdateWindow(bar);
+      }
+    }
     simtower::render_original_dtmp(
         dialog, nullptr, context->controller.dtmp(), g_resources);
-    Win32ElevatorControlOps ops(dialog);
-    context->controller.initialize_scroll_bar(ops);
+    // 1098:12e9 after the walk (08c2): its four pumps (D3).
+    context->controller.finish_initialization(host);
     if (g_tower_document) {
       const auto title = original_cp1252_to_wide(
           simtower::original_elevator_control_title(
@@ -3135,7 +3284,7 @@ INT_PTR CALLBACK elevator_control_dialog_proc(HWND dialog, UINT message,
   auto* context = reinterpret_cast<OriginalElevatorControlDialogContext*>(
       GetWindowLongPtrW(dialog, DWLP_USER));
   const auto run = [&](simtower::OriginalDialogSignal signal) {
-    Win32ElevatorControlOps ops(dialog);
+    Win32DialogOps ops(dialog);
     Win32ElevatorControlHost host(dialog);
     context->controller.signal(signal, ops, host);
   };
@@ -3147,14 +3296,24 @@ INT_PTR CALLBACK elevator_control_dialog_proc(HWND dialog, UINT message,
   };
   switch (message) {
     case WM_PAINT: {
+      // Owner decision D3: the pump at 1098:0939 before BeginPaint, then
+      // 0975 (1208:09cf's pump at 09db) and 097b after the palette is
+      // selected and realized.
+      original_runtime_audio_pump();
       PAINTSTRUCT paint{};
       HDC dc = BeginPaint(dialog, &paint);
+      original_runtime_audio_pump();
+      original_runtime_audio_pump();
       if (dc && context) {
         // The shared DIALOG/400 client painter, also the SDL panel's
         // (elevator_control_painter_parity_tests proves it paints what the
-        // direct GDI copy did). The GDI copy skipped a failed CreatePen;
-        // a failure here ends the paint instead of leaving WM_PAINT by an
-        // exception.
+        // direct GDI copy did when GDI succeeds). Known failure-path
+        // change: OriginalGdiDrawContext allocates a CreateSolidBrush per
+        // fill and per frame edge, and a CreatePen per pen, and throws when
+        // one fails; the catch below then ends the paint with the rest
+        // undrawn instead of leaving WM_PAINT by an exception. The GDI copy
+        // filled and framed with stock brushes, which cannot fail, and
+        // skipped only a failed CreatePen.
         try {
           simtower::OriginalGdiDrawContext draw(
               dc, simtower::kOriginalDialogGdiFailureText);
@@ -3422,14 +3581,6 @@ void paint_original_person_dialog(HWND dialog,
       context.information.stress, false, false);
 }
 
-void enable_original_person_rename_button(HWND dialog) {
-  // Exact 1100:43ed edit-item-4 nonempty gate for the dialog's OK button.
-  EnableWindow(GetDlgItem(dialog, 1),
-               simtower::original_rename_ok_enabled(
-                   static_cast<std::size_t>(
-                       GetWindowTextLengthW(GetDlgItem(dialog, 4)))));
-}
-
 void paint_original_rename_dialog(HWND dialog,
                                   HDC dc,
                                   const simtower::OriginalDtmp& dtmp,
@@ -3452,95 +3603,6 @@ void paint_original_rename_dialog(HWND dialog,
   SetTextAlign(dc, previous_alignment);
 }
 
-BOOL original_set_dialog_item_text(HWND dialog,
-                                   int item,
-                                   const wchar_t* text) {
-  constexpr auto contract = simtower::original_dialog_item_text_contract();
-  return contract.set_forwards_text
-             ? SetDlgItemTextW(dialog, item, text)
-             : FALSE;
-}
-
-std::wstring original_get_dialog_item_text(HWND dialog, int item) {
-  constexpr auto contract = simtower::original_dialog_item_text_contract();
-  std::array<wchar_t, contract.get_buffer_characters> text{};
-  const UINT length = GetDlgItemTextW(
-      dialog, item, text.data(), static_cast<int>(text.size()));
-  return std::wstring(text.data(), static_cast<std::size_t>(length));
-}
-
-// The shared dialog controllers' OriginalDialogOps over a Win32 dialog: the
-// same USER calls the procedures made inline before they shared the
-// controllers (original_dialog_controllers.hpp). Text crosses the CP1252
-// boundary as the procedures convert it; list ops address a LISTBOX (the
-// only list the shared procedures use).
-class Win32DialogOps final : public simtower::OriginalDialogOps {
- public:
-  explicit Win32DialogOps(HWND dialog) : dialog_(dialog) {}
-
-  void show_item(std::uint16_t id, bool shown) override {
-    ShowWindow(GetDlgItem(dialog_, id), shown ? SW_SHOW : SW_HIDE);
-  }
-  void invalidate() override { InvalidateRect(dialog_, nullptr, FALSE); }
-  void invalidate_rect(const simtower::OriginalRect& rect) override {
-    const RECT native{rect.left, rect.top, rect.right, rect.bottom};
-    InvalidateRect(dialog_, &native, FALSE);
-  }
-  void update_window() override { UpdateWindow(dialog_); }
-  void resize(int client_width, int client_height) override {
-    RECT outer{0, 0, client_width, client_height};
-    AdjustWindowRectEx(
-        &outer, static_cast<DWORD>(GetWindowLongPtrW(dialog_, GWL_STYLE)),
-        FALSE, static_cast<DWORD>(GetWindowLongPtrW(dialog_, GWL_EXSTYLE)));
-    SetWindowPos(dialog_, nullptr, 0, 0, outer.right - outer.left,
-                 outer.bottom - outer.top,
-                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-  }
-  void enable_item(std::uint16_t id, bool enabled) override {
-    EnableWindow(GetDlgItem(dialog_, id), enabled);
-  }
-  void focus_item(std::uint16_t id) override {
-    SetFocus(GetDlgItem(dialog_, id));
-  }
-  void set_item_text(std::uint16_t id, std::string_view cp1252) override {
-    const auto wide = original_cp1252_to_wide(cp1252);
-    original_set_dialog_item_text(dialog_, id, wide.c_str());
-  }
-  [[nodiscard]] std::string item_text(std::uint16_t id) const override {
-    return original_wide_to_cp1252(original_get_dialog_item_text(dialog_, id));
-  }
-  void list_reset(std::uint16_t id) override {
-    SendDlgItemMessageW(dialog_, id, LB_RESETCONTENT, 0U, 0);
-  }
-  void list_add(std::uint16_t id, std::string_view cp1252) override {
-    const auto text = original_cp1252_to_wide(cp1252);
-    SendDlgItemMessageW(dialog_, id, LB_ADDSTRING, 0U,
-                        reinterpret_cast<LPARAM>(text.c_str()));
-  }
-  void list_delete(std::uint16_t id, int index) override {
-    SendDlgItemMessageW(dialog_, id, LB_DELETESTRING,
-                        static_cast<WPARAM>(index), 0);
-  }
-  [[nodiscard]] int list_selection(std::uint16_t id) const override {
-    const auto selected =
-        SendDlgItemMessageW(dialog_, id, LB_GETCURSEL, 0U, 0);
-    return selected == LB_ERR ? -1 : static_cast<int>(selected);
-  }
-  void list_set_selection(std::uint16_t id, int index) override {
-    SendDlgItemMessageW(dialog_, id, LB_SETCURSEL,
-                        static_cast<WPARAM>(index), 0);
-  }
-  void set_scroll_range(std::uint16_t id, int min, int max) override {
-    SetScrollRange(GetDlgItem(dialog_, id), SB_CTL, min, max, TRUE);
-  }
-  void set_scroll_pos(std::uint16_t id, int position) override {
-    SetScrollPos(GetDlgItem(dialog_, id), SB_CTL, position, TRUE);
-  }
-
- private:
-  HWND dialog_{};
-};
-
 // The rename procedures' WM_INITDIALOG transaction (the saved name into
 // edit 4, Delete and Rename gated) through the shared controller.
 void initialize_original_rename_dialog(
@@ -3548,6 +3610,47 @@ void initialize_original_rename_dialog(
   Win32DialogOps ops(dialog);
   simtower::OriginalRenameController(target).initialize(ops,
                                                         *g_tower_document);
+}
+
+// NAMEPEPLEDIALOGFILTER / NAMETENANTDIALOGFILTER's world outside their
+// controls for the shared controller: the tower and ALRT/1000 owned by the
+// dialog with STRL/1005[index] (11e0:0c9e at 1100:3cc8).
+class Win32RenameDialogHost final
+    : public simtower::OriginalRenameDialogHost {
+ public:
+  explicit Win32RenameDialogHost(HWND dialog) : dialog_(dialog) {}
+  simtower::OriginalTdtDocument* document() override {
+    return g_tower_document ? &*g_tower_document : nullptr;
+  }
+  void alert_strl(std::uint16_t strl_index) override {
+    const auto text = simtower::original_strl_entry(
+        g_resources.find("STRL", 1005), strl_index);
+    (void)simtower::show_original_alert(dialog_, g_resources, 1000,
+                                        {text, {}, {}, {}});
+  }
+
+ private:
+  HWND dialog_{};
+};
+
+// The rename procedures' WM_COMMAND (1100:3c82-3d2d / 3ff9-40a7) through
+// the shared controller: 4 re-runs the 1100:43ed gate (GetDlgItemText of
+// edit 4, EnableWindow(OK, text != "")), 1 saves, 2 cancels, 3 deletes
+// (original_rename_remove). Returns the EndDialog result when the command
+// closes; the caller runs its own close tail. `changed` accumulates.
+std::optional<int> signal_original_rename_dialog(
+    HWND dialog, const simtower::OriginalRenameTarget& target,
+    WPARAM wparam, bool& changed) {
+  Win32DialogOps ops(dialog);
+  Win32RenameDialogHost host(dialog);
+  simtower::OriginalRenameController controller(target);
+  const auto outcome = controller.signal(
+      {simtower::OriginalDialogSignal::Kind::command,
+       static_cast<std::uint16_t>(LOWORD(wparam)),
+       static_cast<std::uint16_t>(HIWORD(wparam))},
+      ops, host);
+  changed = changed || controller.changed();
+  return outcome.result;
 }
 
 // Native message boundary for NAMEPEPLEDIALOGFILTER at 1100:3a39.
@@ -3627,10 +3730,12 @@ INT_PTR CALLBACK person_rename_dialog_proc(HWND dialog, UINT message,
       return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
     case WM_COMMAND: {
       if (!context) break;
-      using CommandAction = simtower::OriginalRenameDialogCommandAction;
       const auto command = simtower::original_rename_dialog_command_plan(
           static_cast<std::uint16_t>(LOWORD(wparam)));
-      const auto close_dialog = [&]() {
+      const auto result = signal_original_rename_dialog(
+          dialog, {true, context->person_index, 0, 0U}, wparam,
+          context->changed);
+      if (result) {
         // NAMEPEPLEDIALOGFILTER 1100:3ce8-3d0f shares this exact tail across
         // Save, Cancel, and Remove.
         // 1070:051f releases the HWND-owned DTMP before the brush/capture and
@@ -3642,50 +3747,9 @@ INT_PTR CALLBACK person_rename_dialog_proc(HWND dialog, UINT message,
         }
         g_original_active_modal_window = nullptr;
         if (GetCapture() == dialog) ReleaseCapture();
-        EndDialog(dialog, command.close_result);
-      };
-      switch (command.action) {
-        case CommandAction::refresh_edit_gate:
-          enable_original_person_rename_button(dialog);
-          return TRUE;
-        case CommandAction::save:
-          if (!g_tower_document) return command.consume ? TRUE : FALSE;
-          {
-            const auto wide = original_get_dialog_item_text(dialog, 4);
-            if (wide.empty()) return TRUE;
-            const auto name = original_wide_to_cp1252(wide);
-            // The shared Save branch (original_rename_save): too long
-            // alerts STRL/1005[4] and stays open; a full table alerts
-            // STRL/1005[6] and closes.
-            const auto result = simtower::original_rename_save(
-                *g_tower_document, {true, context->person_index, 0, 0U},
-                name);
-            if (result.alert_strl_index) {
-              const auto text = simtower::original_strl_entry(
-                  g_resources.find("STRL", 1005), *result.alert_strl_index);
-              (void)simtower::show_original_alert(
-                  dialog, g_resources, 1000, {text, {}, {}, {}});
-            }
-            if (!result.close) return TRUE;
-            context->changed = context->changed || result.changed;
-          }
-          close_dialog();
-          return TRUE;
-        case CommandAction::cancel:
-          close_dialog();
-          return TRUE;
-        case CommandAction::remove:
-          if (g_tower_document) {
-            const auto result = simtower::remove_original_person_name(
-                *g_tower_document, context->person_index);
-            context->changed = context->changed || result.changed;
-          }
-          close_dialog();
-          return TRUE;
-        case CommandAction::none:
-          return command.consume ? TRUE : FALSE;
+        EndDialog(dialog, *result);
       }
-      break;
+      return command.consume ? TRUE : FALSE;
     }
   }
   return FALSE;
@@ -4016,12 +4080,6 @@ void paint_original_facility_dialog(
   SetTextAlign(dc, old_align);
 }
 
-void enable_original_tenant_rename_button(HWND dialog) {
-  // NAMETENANTDIALOGFILTER shares 1100:43ed's edit-item-4 OK-button gate.
-  EnableWindow(GetDlgItem(dialog, 1),
-               GetWindowTextLengthW(GetDlgItem(dialog, 4)) != 0);
-}
-
 // Native message boundary for NAMETENANTDIALOGFILTER at 1100:3dc4.
 INT_PTR CALLBACK tenant_rename_dialog_proc(HWND dialog, UINT message,
                                            WPARAM wparam, LPARAM lparam) {
@@ -4095,58 +4153,19 @@ INT_PTR CALLBACK tenant_rename_dialog_proc(HWND dialog, UINT message,
       return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
     case WM_COMMAND: {
       if (!context) break;
-      using CommandAction = simtower::OriginalRenameDialogCommandAction;
       const auto command = simtower::original_rename_dialog_command_plan(
           static_cast<std::uint16_t>(LOWORD(wparam)));
-      const auto close_dialog = [&]() {
+      const auto result = signal_original_rename_dialog(
+          dialog, {false, 0U, context->floor, context->tenant_index}, wparam,
+          context->changed);
+      if (result) {
         // NAMETENANTDIALOGFILTER 1100:4069-4082 shares EndDialog(1) across
         // Save, Cancel, and Remove and clears the active modal slot first.
         context->dtmp = {};
         g_original_active_modal_window = nullptr;
-        EndDialog(dialog, command.close_result);
-      };
-      switch (command.action) {
-        case CommandAction::refresh_edit_gate:
-          enable_original_tenant_rename_button(dialog);
-          return TRUE;
-        case CommandAction::save:
-          if (!g_tower_document) return command.consume ? TRUE : FALSE;
-          {
-            const auto wide = original_get_dialog_item_text(dialog, 4);
-            if (wide.empty()) return TRUE;
-            const auto name = original_wide_to_cp1252(wide);
-            // The shared Save branch (original_rename_save): too long
-            // alerts STRL/1005[4] and stays open; a full table alerts
-            // STRL/1005[7] and closes.
-            const auto result = simtower::original_rename_save(
-                *g_tower_document,
-                {false, 0U, context->floor, context->tenant_index}, name);
-            if (result.alert_strl_index) {
-              const auto text = simtower::original_strl_entry(
-                  g_resources.find("STRL", 1005), *result.alert_strl_index);
-              (void)simtower::show_original_alert(
-                  dialog, g_resources, 1000, {text, {}, {}, {}});
-            }
-            if (!result.close) return TRUE;
-            context->changed = context->changed || result.changed;
-          }
-          close_dialog();
-          return TRUE;
-        case CommandAction::cancel:
-          close_dialog();
-          return TRUE;
-        case CommandAction::remove:
-          if (g_tower_document) {
-            const auto result = simtower::remove_original_tenant_name(
-                *g_tower_document, context->floor, context->tenant_index);
-            context->changed = context->changed || result.changed;
-          }
-          close_dialog();
-          return TRUE;
-        case CommandAction::none:
-          return command.consume ? TRUE : FALSE;
+        EndDialog(dialog, *result);
       }
-      break;
+      return command.consume ? TRUE : FALSE;
     }
   }
   return FALSE;
@@ -4172,15 +4191,6 @@ bool run_original_tenant_rename_dialog(std::int16_t floor,
       reinterpret_cast<LPARAM>(&context));
   release_native_dialog_brush(context.control_background);
   return context.changed;
-}
-
-void enable_original_movie_choice_buttons(HWND dialog) {
-  if (!g_tower_document) return;
-  // PART words 34 / 35 against the balance (original_movie_choice_enabled).
-  const auto enabled =
-      simtower::original_movie_choice_enabled(*g_tower_document, g_part);
-  EnableWindow(GetDlgItem(dialog, 1), enabled.new_release);
-  EnableWindow(GetDlgItem(dialog, 3), enabled.classic);
 }
 
 void paint_original_movie_choice_dialog(
@@ -4223,7 +4233,13 @@ INT_PTR CALLBACK movie_choice_dialog_proc(HWND dialog, UINT message,
       SetClassLongPtrW(dialog, GCLP_HCURSOR, 0);
     }
     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
-    enable_original_movie_choice_buttons(dialog);
+    if (g_tower_document) {
+      // PART words 34 / 35 against the balance through the shared
+      // controller (EnableWindow of 1, then 3).
+      Win32DialogOps ops(dialog);
+      simtower::OriginalMovieChoiceController(context->linked_record_index)
+          .initialize(ops, *g_tower_document, g_part);
+    }
     context->control_font = make_original_dialog_font(style.font_pixels);
     COLORREF background = RGB(style.static_red, style.static_green,
                               style.static_blue);
@@ -4280,36 +4296,25 @@ INT_PTR CALLBACK movie_choice_dialog_proc(HWND dialog, UINT message,
       return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
     case WM_COMMAND:
       if (context) {
-        using CommandAction =
-            simtower::OriginalMovieChoiceDialogCommandAction;
+        // 1100:431a-43c7 through the shared controller: 2 is EndDialog(0);
+        // 1 and 3 choose the movie and always close with 1 (affordability
+        // is enforced by the disabled buttons). Each close releases the
+        // DTMP first (1070:051f).
+        const auto id = static_cast<std::uint16_t>(LOWORD(wparam));
         const auto command =
-            simtower::original_movie_choice_dialog_command_plan(
-                static_cast<std::uint16_t>(LOWORD(wparam)));
-        switch (command.action) {
-          case CommandAction::cancel:
-            context->dtmp = {};
-            EndDialog(dialog, 0);
-            return TRUE;
-          case CommandAction::new_release:
-          case CommandAction::classic:
-            if (g_tower_document) {
-              const auto choice =
-                  command.action == CommandAction::new_release
-                      ? simtower::OriginalMovieChoice::new_release
-                      : simtower::OriginalMovieChoice::classic;
-              const auto result = simtower::choose_original_movie(
-                  *g_tower_document, g_part,
-                  context->linked_record_index, choice);
-              context->changed = context->changed || result.changed;
-            }
-            // 1100:43b4-43c2 always closes recognized New/Classic commands
-            // with result one; affordability is enforced by disabled buttons.
-            context->dtmp = {};
-            EndDialog(dialog, 1);
-            return TRUE;
-          case CommandAction::none:
-            return command.consume ? TRUE : FALSE;
+            simtower::original_movie_choice_dialog_command_plan(id);
+        simtower::OriginalMovieChoiceController controller(
+            context->linked_record_index);
+        const auto outcome = controller.signal(
+            {simtower::OriginalDialogSignal::Kind::command, id,
+             static_cast<std::uint16_t>(HIWORD(wparam))},
+            g_tower_document ? &*g_tower_document : nullptr, g_part);
+        context->changed = context->changed || controller.changed();
+        if (outcome.result) {
+          context->dtmp = {};
+          EndDialog(dialog, *outcome.result);
         }
+        return command.consume ? TRUE : FALSE;
       }
       break;
   }
@@ -4674,16 +4679,13 @@ void paint_original_finance_dialog(
   const UINT old_alignment = SetTextAlign(dc, TA_UPDATECP);
   HFONT font14 = make_original_dialog_font(14);
   HFONT font12 = make_original_dialog_font(12);
-  HGDIOBJ old_font = nullptr;
-  bool font_selected = false;
+  const HGDIOBJ old_font = GetCurrentObject(dc, OBJ_FONT);
+  // A missing font (original_cached_font is null once its slots are full)
+  // keeps the font already selected, so 6-7 use the DC's font and the
+  // 12-px ops font12 only if it exists, as before the shared op list.
   const auto select_font = [&](int pixels) {
     HFONT font = pixels == 14 ? font14 : font12;
-    if (!font) return;
-    HGDIOBJ previous = SelectObject(dc, font);
-    if (!font_selected) {
-      old_font = previous;
-      font_selected = true;
-    }
+    if (font) SelectObject(dc, font);
   };
   const auto measure = [&](int pixels, std::string_view text) {
     select_font(pixels);
@@ -4695,6 +4697,11 @@ void paint_original_finance_dialog(
   };
   const auto text_ops = simtower::original_finance_text_ops(
       context.view, context.dtmp, measure);
+  // The measure pass left the last op's font selected. Reset the DC to the
+  // state the first op was measured in (font14, else the DC's font), so
+  // every op draws in the font it was measured in; the ops run 14 px then
+  // 12 px, so select_font switches to font12 at the first 12-px op.
+  SelectObject(dc, font14 ? static_cast<HGDIOBJ>(font14) : old_font);
   for (const auto& op : text_ops) {
     select_font(op.font_pixels);
     SetTextAlign(dc, op.right_baseline
@@ -4705,7 +4712,7 @@ void paint_original_finance_dialog(
     TextOutW(dc, 0, 0, wide.data(), static_cast<int>(wide.size()));
   }
 
-  if (font_selected) SelectObject(dc, old_font);
+  SelectObject(dc, old_font);
   SetTextAlign(dc, old_alignment);
   SetBkMode(dc, old_background);
 }
@@ -4807,6 +4814,11 @@ void run_original_finance_dialog() {
       simtower::parse_original_dtmp(
           g_resources.find("DTMP", launcher.dialog_resource_id)),
       simtower::derive_original_finance_view(*g_tower_document)};
+  // Accepted change: the button rectangle is read here, before the dialog
+  // exists, so a DTMP/500 without rectangles throws from this call instead
+  // of from inside finance_dialog_proc (WM_PAINT / WM_LBUTTON*) as before.
+  // Only a malformed or missing pack differs, and failing before entering
+  // a Win32 callback is the safer of the two.
   const auto& button = original_finance_rectangle(
       context, simtower::kOriginalFinanceButtonRectangle);
   context.controller = simtower::OriginalFinanceController(
@@ -6322,15 +6334,9 @@ class Win32WorldInputHost final : public simtower::OriginalWorldInputHost {
   void reset_find_marker() override {
     simtower::reset_original_find_marker(g_find_marker);
   }
+  // 1058:0517-053f samples the physical primary button.
   bool primary_button_down() override {
-    // 1058:0517-053f samples the physical primary button. Query the
-    // equivalent native setting without temporarily changing the user's
-    // global SwapMouseButton preference as the Win16 implementation did.
-    const bool buttons_swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
-    const int primary_button = static_cast<int>(
-        simtower::original_command_primary_button_virtual_key(
-            buttons_swapped));
-    return GetAsyncKeyState(primary_button) < 0;
+    return original_primary_button_down_win32();
   }
 
   void set_capture(simtower::OriginalInputSurface surface) override {

@@ -7,7 +7,9 @@
 // helpers, and elevator_popup_dialog_proc's pointer messages). Every USER
 // or host call of the frozen copy is one recorded token, the same token the
 // recording ops and host write for the controller's call, so the two event
-// logs, the documents and the control state must be identical.
+// logs, the documents and the control state must be identical. Where an
+// owner decision changed Win32 to the original's behaviour (D1, D2, D3),
+// the frozen branch follows the original and says what changed and why.
 //
 // Then the simulation oracle: the busy and full staged towers through the
 // shared idle pass (run_original_idle_pass) with one reference idle host,
@@ -19,6 +21,17 @@
 // invariants of the coupling must hold: an open with no edits leaves the
 // digests of a run that never opened it; Simulate freezes the tower;
 // Resume restores the shafts and keeps the schedule edits.
+//
+// Stated limit: the oracle drives only the test hosts here (OracleIdleHost
+// for the idle pass, RecordingHost for the controller). It never runs
+// Session::ElevatorControlHost or the SDL session's idle hooks
+// (request_main_pass, the person-family dispatch loop, the transfer-visual
+// clear, the elevator_tracking idle hold), so it proves controller ==
+// frozen Win32, not SDL session == Win32. The SDL side is covered by the
+// script pair elevator_control_noop.txt / elevator_control_noop_reference.txt
+// (same-tower-as): opening and closing with no edits leaves the digests of
+// a run that never opened the panel. There is no cross-host digest
+// sequence for a run with edits.
 //
 // Runs natively and under Wine; needs the pack (exit 77 without it).
 
@@ -51,6 +64,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -114,8 +128,8 @@ struct World {
   // presentation step); null records only.
   std::function<void()> rebuild{};
   Log log{};
-  // GetAsyncKeyState(primary button) for a phase press (the frozen copy
-  // never asks: the Win32 port always found it down).
+  // GetAsyncKeyState(primary button) for a phase press (1098:0c89), asked
+  // by the controller's host and by the frozen copy's 0cf2 branch.
   bool primary_down{true};
 
   int next_alert() {
@@ -222,6 +236,8 @@ class RecordingHost final : public OriginalElevatorControlHost {
   }
   void activate_main() override { w_.log.push_back("activate main"); }
   bool primary_button_down() override { return w_.primary_down; }
+  void audio_pump() override { w_.log.push_back("pump"); }
+  void sample_auxiliary_pointer_tick() override { w_.log.push_back("tick"); }
   void destroy() override {
     w_.log.push_back("destroy");
     w_.destroyed = true;
@@ -269,23 +285,37 @@ int frozen_hit_item(const Frozen& context, int x, int y) {
 
 void frozen_refresh_scrollbar(World& w, const Frozen& context) {
   // HWND scrollbar = GetDlgItem(dialog, 7) exists in DIALOG/400.
+  // Changed for D2 (2026-10-24): was EnableWindow(enabled), then
+  // SetScrollRange and SetScrollPos; original SetScrollRange (0806),
+  // SetScrollPos (0826), EnableWindow(TRUE) (0830), or EnableWindow(FALSE)
+  // alone (0857), at 1098:07c5-085a.
   const bool enabled = original_elevator_control_has_scrollbar(context.state);
-  w.log.push_back("enable 7 " + std::to_string(enabled));
   if (enabled) {
     w.log.push_back("range 7 " + std::to_string(context.state.scroll_min) +
                     " " + std::to_string(context.state.scroll_max));
     w.log.push_back("pos 7 " + std::to_string(context.state.scroll_position));
   }
+  w.log.push_back("enable 7 " + std::to_string(enabled));
 }
 
 void frozen_initialize(World& w, const Frozen& context) {
-  // WM_INITDIALOG: EnableWindow(main/map/info/command, FALSE), placement,
-  // render_original_dtmp, the scroll bar refresh.
+  // WM_INITDIALOG: EnableWindow(FALSE) on the four windows, placement,
+  // the scroll bar refresh, render_original_dtmp.
+  // Changed for D2 (2026-10-24): was Main, Map, Info, Command; original
+  // Main, Info, Command, Map at 1098:0691-06b8.
+  // D3 (2026-10-24): the audio pumps the Win32 port left out, at the
+  // original's positions: 0686 before the disables, 06cb and 06ec after
+  // them, and 1098:12e9's four (12f8, 1311 via 1208:09cf, 1378, 13b8)
+  // after the DTMP walk.
+  w.log.push_back("pump");
   w.log.push_back("window main 0");
-  w.log.push_back("window map 0");
   w.log.push_back("window info 0");
   w.log.push_back("window command 0");
+  w.log.push_back("window map 0");
+  w.log.push_back("pump");
+  w.log.push_back("pump");
   frozen_refresh_scrollbar(w, context);
+  for (int pump = 0; pump < 4; ++pump) w.log.push_back("pump");
 }
 
 void frozen_mark_changed(World& w, bool world_changed) {
@@ -330,6 +360,9 @@ int frozen_alert(World& w, int id, std::uint16_t strl, std::uint16_t index) {
 }
 
 void frozen_grid_action(World& w, Frozen& context, int x, int y) {
+  // D3 (2026-10-24): 1208:09cf's pump on entry (1098:201d), before the
+  // hit test; the Win32 port had none.
+  w.log.push_back("pump");
   const auto hit =
       original_elevator_control_grid_hit(w.document, context.state, x, y);
   if (!hit.hit()) return;
@@ -414,12 +447,16 @@ void frozen_toggle_simulation(World& w, Frozen& context) {
 }
 
 void frozen_close(World& w, Frozen& context) {
+  // D3 (2026-10-24): the pumps at 1098:0ece (before the resume) and 0f2a
+  // (after DS:31a0 = 0, before the enables); the Win32 port had none.
   const auto plan = original_elevator_control_close_plan();
+  w.log.push_back("pump");
   if (plan.resume_isolation) frozen_resume(w, context);
   if (plan.clear_published_window_before_destroy) {
     w.log.push_back("unpublish");
     w.published = false;
   }
+  w.log.push_back("pump");
   for (const auto window : plan.enable_order) {
     w.log.push_back("window " + window_name(window) + " 1");
   }
@@ -433,6 +470,9 @@ void frozen_procedure(World& w, Frozen& context,
                       const OriginalDialogSignal& signal) {
   switch (signal.kind) {
     case Kind::scroll: {
+      // D3 (2026-10-24): every WM_VSCROLL realizes the palette first
+      // (1208:09cf at 1098:10d7, its pump), whatever the code.
+      w.log.push_back("pump");
       std::optional<OriginalElevatorControlScrollCommand> command;
       using C = OriginalElevatorControlScrollCommand;
       switch (signal.notify_code) {
@@ -461,7 +501,14 @@ void frozen_procedure(World& w, Frozen& context,
       return;
     case Kind::button_down: {
       const int item = frozen_hit_item(context, signal.x, signal.y);
+      // Changed for D2 (2026-10-24): was pressed_item = -1 and an
+      // invalidate + update for a press on no item; original returns FALSE
+      // with DS:31b4 kept and no repaint at 1098:0a48-0a4e.
+      if (item < 1) return;
       context.pressed_item = item;
+      // D3 (2026-10-24): 1208:05e6 into DS:31b0/31b2 at 1098:0a57, after
+      // a hit and before the item dispatch; the Win32 port had none.
+      w.log.push_back("tick");
       bool changed = false;
       if (item == 8) {
         changed = original_elevator_control_adjust_waiting(
@@ -475,6 +522,23 @@ void frozen_procedure(World& w, Frozen& context,
       } else if (item == 11) {
         changed = original_elevator_control_adjust_departure(
             w.document, context.state, -1);
+      }
+      // D3 (2026-10-24): items 8..11 realize the palette after a write
+      // (1208:09cf at 0bb7 / 0c5f); at a limit they return first.
+      if (item >= 8 && item <= 11) {
+        if (changed) w.log.push_back("pump");
+      } else if (item >= 23 && item <= 28 && !w.primary_down) {
+        // Added for owner decision D1 (not in the pre-share Win32 copy,
+        // which always opened ELVPOPUP): 1098:0c90 jumps to 0cf2 when the
+        // primary button is already up. The phase is selected with no
+        // popup and no schedule write. Win32 no longer always opens the
+        // popup. Cleanup (2026-10-24): no mark_changed tail either (was
+        // changed = true, g_tower_dirty): 0cf2-0d5f stores no dirty flag,
+        // only DS:b3a7, the pump and the repaints.
+        (void)original_elevator_control_select_phase(
+            context.state, static_cast<std::uint8_t>(item - 23));
+        // D3 (2026-10-24): 1208:09cf's pump at 0d0e.
+        w.log.push_back("pump");
       } else if (item >= 23 && item <= 28) {
         const auto mode =
             frozen_run_popup(w, context, static_cast<std::size_t>(item));
@@ -494,11 +558,21 @@ void frozen_procedure(World& w, Frozen& context,
       return;
     }
     case Kind::button_up: {
-      const int item = frozen_hit_item(context, signal.x, signal.y);
+      // Changed for D2 (2026-10-24): was pressed_item = -1 and an
+      // invalidate + update on every release; original at 1098:0d65-0ec9:
+      // DS:31b4 outside 1..28 returns at once (0d6a / 0d75); a latched
+      // Close / Simulate is repainted to its normal look (0dea-0ea1); a
+      // release on no item keeps DS:31b4 (0ea6-0eac); another item resets
+      // it (0eb8 -> 10ba).
       const int pressed = context.pressed_item;
+      if (pressed < 1 || pressed > 28) return;
+      const int item = frozen_hit_item(context, signal.x, signal.y);
+      if (pressed == 1 || pressed == 2) {
+        w.log.push_back("invalidate");
+        w.log.push_back("update");
+      }
+      if (item < 1) return;
       context.pressed_item = -1;
-      w.log.push_back("invalidate");
-      w.log.push_back("update");
       if (item != pressed) return;
       if (item == 1) {
         frozen_close(w, context);
@@ -511,6 +585,8 @@ void frozen_procedure(World& w, Frozen& context,
       if (item == 5 &&
           original_elevator_control_toggle_show(
               w.document, context.state.elevator_index)) {
+        // D3 (2026-10-24): 1208:09cf's pump at 0fbf after the toggle.
+        w.log.push_back("pump");
         frozen_mark_changed(w, true);
         return;
       }
@@ -521,6 +597,9 @@ void frozen_procedure(World& w, Frozen& context,
       if ((item == 12 || item == 13) &&
           original_elevator_control_select_bank(
               context.state, static_cast<std::uint8_t>(item - 12))) {
+        // D3 (2026-10-24): 1208:09cf's pump at 1026 (the bank already
+        // shown returns at 100e first).
+        w.log.push_back("pump");
         w.log.push_back("invalidate");
         w.log.push_back("update");
         return;
@@ -709,7 +788,8 @@ void count_coverage(const Log& log) {
     for (const char* prefix :
          {"alert 1000 1004/1", "alert 1000 1004/2", "alert 1005", "popup",
           "dispatches", "sound 6002", "rebuild", "clear transfer", "pos 7",
-          "range 7", "enable 7 1", "enable 7 0", "dirty", "destroy"}) {
+          "range 7", "enable 7 1", "enable 7 0", "dirty", "destroy", "pump",
+          "tick"}) {
       if (token.rfind(prefix, 0) == 0) ++g_coverage[prefix];
     }
   }
@@ -718,7 +798,8 @@ void count_coverage(const Log& log) {
 void parity_case(const OriginalResources& resources,
                  const OriginalStartupData& startup,
                  const OriginalTdtDocument& base, std::size_t elevator_index,
-                 std::uint8_t calendar, std::int8_t phase) {
+                 std::uint8_t calendar, std::int8_t phase,
+                 bool primary_down = true) {
   auto dtmp = parse_original_dtmp(resources.find("DTMP", 400));
   const auto state = make_original_elevator_control_state(
       base, elevator_index, calendar, phase);
@@ -730,6 +811,7 @@ void parity_case(const OriginalResources& resources,
     world->startup = &startup;
     world->alert_answers = {1, 2, 1};
     world->popup_answers = {-1, 0, 1, 2, 7};
+    world->primary_down = primary_down;
   }
   Frozen frozen{dtmp, state};
   OriginalElevatorControlController controller(dtmp, state);
@@ -739,6 +821,7 @@ void parity_case(const OriginalResources& resources,
   frozen_initialize(frozen_world, frozen);
   controller.disable_windows(host);
   controller.initialize_scroll_bar(ops);
+  controller.finish_initialization(host);
   assert(frozen_world.log == shared_world.log);
 
   for (const auto& signal : signal_script(dtmp)) {
@@ -1024,6 +1107,7 @@ OracleRun run_oracle(const OriginalResources& resources,
         RecordingHost elevator_host(world);
         controller->disable_windows(elevator_host);
         controller->initialize_scroll_bar(ops);
+        controller->finish_initialization(elevator_host);
       }
       if (driver == Driver::open_close) {
         click_item(1U);
@@ -1150,8 +1234,8 @@ void presentation_tests(const OriginalTdtDocument& base) {
          view->saved_elevator == &*state.saved_elevator_record);
 }
 
-// 1098:0cf2: a phase press whose button is already up selects the phase,
-// marks the document and repaints, with no ELVPOPUP and no schedule write.
+// 1098:0cf2: a phase press whose button is already up selects the phase
+// and repaints, with no ELVPOPUP, no schedule write and no dirty flag.
 void released_phase_press_tests(const OriginalResources& resources,
                                 const OriginalStartupData& startup,
                                 const OriginalTdtDocument& base) {
@@ -1171,15 +1255,210 @@ void released_phase_press_tests(const OriginalResources& resources,
   assert(controller.pressed_item() == 25);
   assert(controller.state().day_phase == 2U);
   assert(serialize_original_tdt(world.document) == before);
-  assert((world.log == Log{"dirty", "invalidate", "update"}));
+  // No dirty flag: 0cf2-0d5f stores only DS:b3a7, pumps and repaints.
+  assert((world.log == Log{"tick", "pump", "invalidate", "update"}));
+  assert(!world.dirty);
   controller.signal(pointer(Kind::button_up, x, y), ops, host);
   // Still down: the popup runs and its answer is written.
   world.primary_down = true;
   world.log.clear();
   const auto [x2, y2] = center(dtmp.rectangles[25]);
   (void)controller.signal(pointer(Kind::button_down, x2, y2), ops, host);
-  assert(!world.log.empty() && world.log.front().rfind("popup 26", 0) == 0);
+  assert(world.log.size() >= 2U && world.log[0] == "tick" &&
+         world.log[1].rfind("popup 26", 0) == 0);
   assert(controller.state().day_phase == 3U);
+}
+
+OriginalWorldRaster paint_control(
+    const OriginalResources& resources,
+    const OriginalElevatorControlController& controller,
+    const OriginalTdtDocument* shown) {
+  OriginalWorldRaster raster{};
+  raster.width = kOriginalElevatorControlClientWidth;
+  raster.height = kOriginalElevatorControlClientHeight;
+  raster.pixels.assign(static_cast<std::size_t>(raster.width) * raster.height,
+                       0x123456U);
+  OriginalCanvasDrawContext context(raster, OriginalCanvasFont::bundled(), 0,
+                                    0, {0, 0, raster.width, raster.height});
+  paint_original_elevator_control(context, resources, controller, shown);
+  return raster;
+}
+
+// Owner decision D2: presses and releases on no item as the original
+// handles them (1098:0a48-0a4e, 0d65-0ec9), with the stale DS:31b4 latch
+// they leave and the pressed look kept apart from it.
+void no_item_tests(const OriginalResources& resources,
+                   const OriginalStartupData& startup,
+                   const OriginalTdtDocument& base) {
+  const auto index = first_standard_shaft(base);
+  const auto dtmp = parse_original_dtmp(resources.find("DTMP", 400));
+  const auto state = make_original_elevator_control_state(base, index, 0U, 0);
+  World world{base};
+  world.startup = &startup;
+  OriginalElevatorControlController controller(dtmp, state);
+  RecordingOps ops(world.log);
+  RecordingHost host(world);
+  const auto send = [&](Kind kind, int x, int y) {
+    controller.signal(pointer(kind, x, y), ops, host);
+  };
+  assert(controller.hit_item(1, 1) == -1);
+
+  // A press on no item: no call at all, DS:31b4 left as it was (0a4e).
+  send(Kind::button_down, 1, 1);
+  assert(world.log.empty() && controller.pressed_item() == -1);
+  // A release with nothing latched returns at once (0d6a).
+  send(Kind::button_up, 1, 1);
+  assert(world.log.empty() && controller.pressed_item() == -1);
+
+  // Press 5, release on none, press on none, release on 5: the stale
+  // latch still matches, so SHOW toggles (0ebb -> 1277 -> 0f88).
+  const auto [x5, y5] = center(dtmp.rectangles[4]);
+  const auto show_before = world.document.elevators[index].word_3c;
+  send(Kind::button_down, x5, y5);
+  assert(controller.pressed_item() == 5 && controller.pressed_visual() == -1);
+  world.log.clear();
+  send(Kind::button_up, 1, 1);
+  assert(world.log.empty() && controller.pressed_item() == 5);
+  send(Kind::button_down, 1, 1);
+  assert(world.log.empty() && controller.pressed_item() == 5);
+  send(Kind::button_up, x5, y5);
+  assert(controller.pressed_item() == -1);
+  assert(world.document.elevators[index].word_3c != show_before);
+  assert((world.log == Log{"pump", "dirty", "invalidate", "inv main",
+                           "inv info", "inv map"}));
+
+  // Press 1 (Close), release on none: the normal look is restored
+  // (0dfa-0ea1), DS:31b4 stays 1, nothing closes, and Close is no longer
+  // drawn pressed.
+  const auto [x1, y1] = center(dtmp.rectangles[0]);
+  const OriginalElevatorControlController unpressed(dtmp, state);
+  send(Kind::button_down, x1, y1);
+  assert(controller.pressed_item() == 1 && controller.pressed_visual() == 1);
+  assert(paint_control(resources, controller, &world.document).pixels !=
+         paint_control(resources, unpressed, &world.document).pixels);
+  world.log.clear();
+  send(Kind::button_up, 1, 1);
+  assert((world.log == Log{"invalidate", "update"}));
+  assert(controller.pressed_item() == 1 && controller.pressed_visual() == -1);
+  assert(!controller.closed() && !world.destroyed);
+  assert(paint_control(resources, controller, &world.document).pixels ==
+         paint_control(resources, unpressed, &world.document).pixels);
+  // The port's mouse-move repaint follows the look, not the latch.
+  world.log.clear();
+  send(Kind::mouse_move, 2, 2);
+  assert(world.log.empty());
+  // A later release on another item: the look is restored again (the
+  // latch is still 1), then DS:31b4 resets with no Close (0eb8 -> 10ba).
+  const auto [x8, y8] = center(dtmp.rectangles[7]);
+  send(Kind::button_up, x8, y8);
+  assert((world.log == Log{"invalidate", "update"}));
+  assert(controller.pressed_item() == -1 && !controller.closed());
+}
+
+// Owner decision D3: the 11e0:0e84 pumps and the 1208:05e6 tick sample
+// reach the host at the original's positions (1098:0686-06ec and 12e9 for
+// WM_INITDIALOG, 0a57 for a press on an item, none for a press on no item,
+// 10d7 for any WM_VSCROLL, 0ece / 0f2a for the close), and ELVPOPUP's
+// (24ef on WM_PAINT, 25f8 on every end).
+void audio_route_tests(const OriginalResources& resources,
+                       const OriginalStartupData& startup,
+                       const OriginalTdtDocument& base) {
+  const auto index = first_standard_shaft(base);
+  const auto dtmp = parse_original_dtmp(resources.find("DTMP", 400));
+  const auto state = make_original_elevator_control_state(base, index, 0U, 0);
+  assert(state.valid);
+  World world{base};
+  world.startup = &startup;
+  // The waiting count of the shown bank and phase at its 100 limit.
+  world.document.elevators[index].schedule
+      [original_elevator_control_schedule_index(14U, state.schedule_bank,
+                                                state.day_phase)] =
+      std::byte{100};
+  OriginalElevatorControlController controller(dtmp, state);
+  RecordingOps ops(world.log);
+  RecordingHost host(world);
+  const auto take = [&] {
+    auto log = std::move(world.log);
+    world.log.clear();
+    return log;
+  };
+  const auto send = [&](Kind kind, std::size_t item) {
+    const auto [x, y] = item == 0U ? std::pair<int, int>{1, 1}
+                                   : center(dtmp.rectangles[item - 1U]);
+    controller.signal(pointer(kind, x, y), ops, host);
+    return take();
+  };
+
+  controller.disable_windows(host);
+  controller.initialize_scroll_bar(ops);
+  controller.finish_initialization(host);
+  Log init{"pump", "window main 0", "window info 0", "window command 0",
+           "window map 0", "pump", "pump"};
+  if (original_elevator_control_has_scrollbar(state)) {
+    init.push_back("range 7 " + std::to_string(state.scroll_min) + " " +
+                   std::to_string(state.scroll_max));
+    init.push_back("pos 7 " + std::to_string(state.scroll_position));
+    init.push_back("enable 7 1");
+  } else {
+    init.push_back("enable 7 0");
+  }
+  for (int pump = 0; pump < 4; ++pump) init.push_back("pump");
+  assert(take() == init);
+
+  // A press on an item samples the tick before its dispatch: item 3 has
+  // none, item 8 is at its limit (no write, no realize), item 9 writes and
+  // realizes the palette (0bb7).
+  assert((send(Kind::button_down, 3U) == Log{"tick", "invalidate", "update"}));
+  assert(send(Kind::button_up, 3U).empty());
+  assert((send(Kind::button_down, 8U) == Log{"tick", "invalidate", "update"}));
+  assert(send(Kind::button_up, 8U).empty());
+  assert((send(Kind::button_down, 9U) ==
+          Log{"tick", "pump", "dirty", "invalidate", "update"}));
+  assert(send(Kind::button_up, 9U).empty());
+  // A press on no item returns before the sample (0a4e).
+  assert(send(Kind::button_down, 0U).empty());
+  // Any WM_VSCROLL pumps first, even a code the procedure ignores.
+  controller.signal(scroll(8U, 0), ops, host);
+  assert((take() == Log{"pump"}));
+
+  // Close: the 0ece pump, DS:31a0 = 0, the 0f2a pump, then the enables.
+  assert((send(Kind::button_down, 1U) == Log{"tick", "invalidate", "update"}));
+  const auto plan = original_elevator_control_close_plan();
+  Log close{"invalidate", "update", "pump", "unpublish", "pump"};
+  for (const auto window : plan.enable_order) {
+    close.push_back("window " + window_name(window) + " 1");
+  }
+  if (plan.explicitly_activate_main) close.push_back("activate main");
+  close.push_back("destroy");
+  assert(send(Kind::button_up, 1U) == close);
+  assert(controller.closed());
+
+  // ELVPOPUP (1098:22f8): WM_PAINT's 1208:09cf at 24ef, and the commit
+  // tail's at 25f8 on every end (WM_LBUTTONUP, WM_RBUTTONUP, a move out of
+  // the client), before the host's ClipCursor / ReleaseCapture /
+  // EndDialog. A hover move only repaints.
+  for (int ending = 0; ending < 3; ++ending) {
+    Log popup_log;
+    RecordingOps popup_ops(popup_log);
+    OriginalElevatorPopupController popup(
+        1U, [&popup_log] { popup_log.push_back("pump"); });
+    const auto popup_send = [&](OriginalDialogSignal signal) {
+      const auto outcome = popup.signal(signal, popup_ops);
+      return std::pair{std::exchange(popup_log, {}), outcome.result};
+    };
+    OriginalDialogSignal paint{Kind::paint};
+    assert((popup_send(paint) == std::pair{Log{"pump"}, std::optional<int>{}}));
+    assert((popup_send(pointer(Kind::mouse_move, 40, 50)) ==
+            std::pair{Log{"invalidate", "update"}, std::optional<int>{}}));
+    assert((popup_send(paint) == std::pair{Log{"pump"}, std::optional<int>{}}));
+    const auto end = ending == 0   ? pointer(Kind::button_up, 40, 50)
+                     : ending == 1 ? pointer(Kind::right_button_up, 40, 50)
+                                   : pointer(Kind::mouse_move, 40, -5);
+    const auto [log, result] = popup_send(end);
+    assert((log == Log{"pump"}));
+    assert(result.has_value());
+    assert(ending == 0 ? *result == popup.hover_mode() : *result == 1);
+  }
 }
 
 void painter_tests(const OriginalResources& resources,
@@ -1237,7 +1516,12 @@ int main(int argc, char** argv) {
       for (const std::uint8_t calendar : {0U, 1U}) {
         for (const std::int8_t phase : {0, 3, 6}) {
           parity_case(resources, startup, document, index, calendar, phase);
-          ++cases;
+          // Win32's queue order (D1): the release can reach the queue
+          // before WM_LBUTTONDOWN is processed, so GetAsyncKeyState finds
+          // the button up and every phase press takes 1098:0cf2.
+          parity_case(resources, startup, document, index, calendar, phase,
+                      false);
+          cases += 2U;
         }
       }
     }
@@ -1246,6 +1530,8 @@ int main(int argc, char** argv) {
     presentation_tests(document);
     painter_tests(resources, document);
     released_phase_press_tests(resources, startup, document);
+    no_item_tests(resources, startup, document);
+    audio_route_tests(resources, startup, document);
   }
   for (const auto& [token, count] : g_coverage) {
     std::printf("  covered %-20s %zu\n", token.c_str(), count);
@@ -1253,7 +1539,7 @@ int main(int argc, char** argv) {
   for (const char* required :
        {"alert 1000 1004/1", "popup", "dispatches", "sound 6002", "rebuild",
         "clear transfer", "pos 7", "range 7", "enable 7 1", "enable 7 0",
-        "dirty", "destroy"}) {
+        "dirty", "destroy", "pump", "tick"}) {
     assert(g_coverage[required] != 0U);
   }
   oracle_tests(resources, startup);

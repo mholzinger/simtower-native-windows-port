@@ -55,12 +55,13 @@ struct MenuOpenLayout {
                                               const WindowLayout& layout,
                                               const MenuView& view);
 
-// Caption (TEMP navy title bar with the window title) and the menu strip.
+// Caption (TEMP title bar with the window title: navy while Main is the
+// active window, the Win3.1 inactive colours otherwise) and the menu strip.
 void draw_main_caption_and_menu_bar(OriginalWorldRaster& window,
                                     const OriginalMenuItems& menu,
                                     const WindowLayout& layout,
                                     const MenuView& view,
-                                    std::string_view title);
+                                    std::string_view title, bool active);
 // The open drop-down and cascade, over everything else.
 void draw_menu_popups(OriginalWorldRaster& window,
                       const OriginalMenuItems& menu,

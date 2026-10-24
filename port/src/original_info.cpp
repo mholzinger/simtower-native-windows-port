@@ -282,7 +282,16 @@ void draw_info_status(OriginalDrawContext& dc, const std::string& text) {
   // 1118:02ee-02fb establishes the DrawText current position explicitly.
   // With TA_UPDATECP/TA_BASELINE this is observable: omitting it can leave the
   // status string at the current position inherited from the balance painter.
-  dc.move_to(field.left + 2, field.bottom);
+  // MoveTo(left + 2, bottom) at 02fb, then 1208:0cf5(0, -1) at 0307
+  // (GetCurrentPosition, MoveTo(x + 0, y - 1)): the baseline is
+  // field.bottom - 1, row 43 (changed in the cleanup from field.bottom,
+  // which clipped every descender row).
+  dc.move_to(field.left + 2, field.bottom - 1);
+  // The rest of the descenders (the 'g' of "Office workers demand
+  // Parking") is clipped as in the original: DrawText at 1118:0341 gets
+  // flags 0x20 (DT_SINGLELINE, no DT_NOCLIP) and the field {41, 33, 303,
+  // 44} (1118:0c0f plus the OffsetRect(0, 8) at 028f), so nothing below
+  // row 43 is drawn.
   dc.draw_text_single_line(text, field);
 }
 

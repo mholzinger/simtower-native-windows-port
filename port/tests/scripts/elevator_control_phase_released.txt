@@ -1,0 +1,19 @@
+# Owner decision D1: a phase press whose release is already queued (a fast
+# click: GetAsyncKeyState finds the primary button up, 1098:0c90 jge 0cf2)
+# selects its phase (DS:b3a7 = item - 23) with no ELVPOPUP and no schedule
+# write; the queued release then reaches ELVDLOGMAIN on the same item. The
+# tower stays that of a run that never opened Elevator Control.
+# args: --scenario busy --passes 600
+# same-tower-as: elevator_control_noop_reference.txt
+# reject-stderr: elevator popup
+pass 300
+open-elevator-control 1
+expect-phase 0
+panel-click 64 53
+expect-phase 1
+panel-click 136 53
+expect-phase 4
+pass 450
+panel-at 148 413
+expect-panel none
+pass 600

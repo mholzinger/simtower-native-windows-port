@@ -8,8 +8,10 @@
 // run them: elevator_control_dialog_proc / elevator_popup_dialog_proc in
 // native_main.cpp over their HWNDs, and the SDL session over its fixed
 // in-window panel. The decisions are the Win32 port's as they were before
-// the procedures shared them (elevator_control_controller_tests.cpp keeps
-// frozen copies of those branches and compares them with the controller);
+// the procedures shared them, except where owner decisions D1 / D2 / D3
+// moved both hosts to the original's behaviour (elevator_control_controller_
+// tests.cpp keeps frozen copies of those branches, each change noted, and
+// compares them with the controller);
 // the shared rules they call (schedule edits, scrolling, isolation, grid
 // hit tests) stay in original_elevator_control.hpp.
 //
@@ -33,6 +35,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <utility>
@@ -93,13 +96,38 @@ class OriginalElevatorControlHost {
   virtual void unpublish() = 0;
   // SetActiveWindow(Main) (the close plan never asks for it).
   virtual void activate_main() {}
-  // 1098:0c68-0c8e: SwapMouseButton probe, then GetAsyncKeyState of the
-  // primary button. A phase press opens ELVPOPUP only while it is still
-  // physically down. The default (always down) is the Win32 port's
-  // behavior before the procedures shared the controller; Win32 keeps it
-  // (a known gap to the original, left for the owner), SDL follows the
-  // original. Both hosts see the button down on a routed press today.
-  virtual bool primary_button_down() { return true; }
+  // 1098:0c68-0c90: SwapMouseButton(0) then SwapMouseButton(prev) probe
+  // the swap setting, then GetAsyncKeyState(prev ? VK_RBUTTON :
+  // VK_LBUTTON); a result >= 0 (button up) jumps to 0cf2. A phase press
+  // opens ELVPOPUP only while the primary button is still physically down.
+  // Each host answers from its real button state (owner decision D1).
+  virtual bool primary_button_down() = 0;
+  // 11e0:0e84: the 48-ms WaveMix pump (OriginalAudioRuntime::pump), which
+  // ELVDLOGMAIN calls directly and through 1208:09cf's palette realize
+  // (its pump at 09db). Owner decision D3: both hosts run it from their
+  // audio runtime. The WM_PAINT pumps (0939, 0975 via 09cf, 097b) stay in
+  // each host's paint path. ELVPOPUP's (WM_PAINT 1208:09cf at 24ef, the
+  // commit tail's at 25f8) run through OriginalElevatorPopupController,
+  // which the hosts give this pump.
+  // TEMP (D3 scope, owner sign-off pending): pumps the original runs on
+  // this path that neither host routes, all inside shared runtimes:
+  // - the DTMP runtime: 1070:0005 at 0193 (called from 1098:06c3) and the
+  //   1070:0231 walk at 0350, 035d, 0420, 042d (from 089c), so
+  //   the port's WM_INITDIALOG runs 7 of the original's 12 (more on a
+  //   font-bank miss);
+  // - the 1208:0ba7 font bank's pump at 0c2b on a cache miss (from
+  //   1098:088c and the painters 1098:1895, 27bd, 2893);
+  // - Simulate / Resume: 10f0:0000 (at 0081) and 10f0:009c (at 00fd) call
+  //   1080:05a1, whose 1208:09cf at 05df pumps, and 10f0:0092 calls
+  //   1080:0a1e, which pumps at 0a66, 0a8b, 0a9f, 0ab3 and 0afa. The
+  //   hosts' rebuild_main_without_sky / invalidate_command passes run
+  //   none of them (the Win32 main pass pumps only for simulation_frame,
+  //   the SDL one never).
+  virtual void audio_pump() = 0;
+  // 1208:05e6 into DS:31b0/31b2 (1098:0a57): the 11e0:0e84 pump, then
+  // GetTickCount >> 4 (original_runtime_coarse_tick), stored as the last
+  // auxiliary pointer tick. The world input's sample has the same name.
+  virtual void sample_auxiliary_pointer_tick() = 0;
   // DestroyWindow(dialog). The controller makes no further call after it.
   virtual void destroy() = 0;
 };
@@ -111,21 +139,28 @@ class OriginalElevatorControlController {
   OriginalElevatorControlController(OriginalDtmp dtmp,
                                     OriginalElevatorControlState state);
 
-  // WM_INITDIALOG's first step (nm 3491-3494): EnableWindow(FALSE) on
-  // Main, Map, Info and Command, in that order. This is the Win32 port's
-  // order, kept for parity; 1098:0691-06b8 disables Main (DS:3258), Info
-  // (325c), Command (325a), then Map (325e). Only the order of the
-  // WM_ENABLE / WM_CANCELMODE messages differs.
+  // WM_INITDIALOG's first step: the 0686 pump, EnableWindow(FALSE) on
+  // Main (DS:3258), Info (325c), Command (325a), then Map (325e), the order
+  // of 1098:0691-06b8 (owner decision D2; the close re-enables them in the
+  // reverse order, 0f2f-0f56), then the 06cb and 06ec pumps (D3; between
+  // them only the DTMP load, the class cursor and 1098:0068, none of which
+  // reaches the host).
   void disable_windows(OriginalElevatorControlHost& host) const;
-  // WM_INITDIALOG after render_original_dtmp shows scroll bar 7: enabled
-  // with range [scroll_min, scroll_max] (SetScrollRange without redraw)
-  // and the position when the shaft spans more than fourteen floors,
-  // otherwise disabled.
+  // WM_INITDIALOG's scroll bar 7 setup (1098:07c5-085a), before the DTMP
+  // walk (1070:0231 at 089c, render_original_dtmp) places and shows it.
+  // A shaft spanning more than fourteen floors: SetScrollRange(scroll_min,
+  // scroll_max, no redraw), SetScrollPos(scroll_position, redraw), then
+  // EnableWindow(TRUE). Otherwise only EnableWindow(FALSE).
   void initialize_scroll_bar(OriginalDialogOps& ops) const;
+  // WM_INITDIALOG's last step, after the DTMP walk: 1098:12e9's pumps
+  // (12f8, 1311 via 1208:09cf, 1378, 13b8; D3). Its repaints of DTMP
+  // 41/42, the bank, phase, SHOW and grid regions are paint-only (the
+  // whole client is painted on the first WM_PAINT).
+  void finish_initialization(OriginalElevatorControlHost& host) const;
 
   // One message: scroll (WM_VSCROLL: SB codes 0..5 move, the rest are
-  // ignored), mouse_move (the port's repaint while item 1 or 2 is pressed;
-  // the original only sets the arrow cursor),
+  // ignored), mouse_move (the port's repaint while Close or Simulate is
+  // drawn pressed; the original only sets the arrow cursor),
   // button_down / button_up at client (x, y). Every other kind is ignored
   // (ELVDLOGMAIN has no WM_COMMAND). A modeless dialog has no EndDialog
   // result: closed() reports whether a signal ran host.destroy(), after
@@ -142,8 +177,16 @@ class OriginalElevatorControlController {
   [[nodiscard]] const OriginalElevatorControlState& state() const {
     return state_;
   }
-  // DS:31b4: -1 while nothing is pressed.
+  // DS:31b4: the item of the last press on an item (1..28), -1 after a
+  // release on an item. A press or release on no item leaves it as it was
+  // (1098:0a4e, 0eac), so it can be stale.
   [[nodiscard]] int pressed_item() const { return pressed_item_; }
+  // The item (1 or 2) whose pressed look 1098:0a75 / 0ad8 drew into the
+  // backing, -1 once a release in the dialog has restored it (0dea-0ea1,
+  // whether or not the release hit an item). The painter draws from this,
+  // not from the DS:31b4 latch. One value: a second press on 1 or 2
+  // without a release in between keeps only the later look.
+  [[nodiscard]] int pressed_visual() const { return pressed_visual_; }
   [[nodiscard]] bool closed() const { return closed_; }
 
  private:
@@ -152,7 +195,7 @@ class OriginalElevatorControlController {
   void button_up(int x, int y, OriginalDialogOps& ops,
                  OriginalElevatorControlHost& host);
   void scroll(std::uint16_t code, std::int16_t position,
-              OriginalDialogOps& ops);
+              OriginalDialogOps& ops, OriginalElevatorControlHost& host);
   std::uint8_t run_popup(std::size_t phase_item,
                          OriginalElevatorControlHost& host) const;
   void grid_action(int x, int y, OriginalDialogOps& ops,
@@ -167,20 +210,27 @@ class OriginalElevatorControlController {
   OriginalDtmp dtmp_{};
   OriginalElevatorControlState state_{};
   int pressed_item_{-1};
+  int pressed_visual_{-1};
   bool closed_{};
 };
 
 // ELVPOPUP's context (DS:1fb2 hover, the mode it opened with).
 class OriginalElevatorPopupController {
  public:
-  explicit OriginalElevatorPopupController(std::uint8_t original_mode)
-      : original_mode_(original_mode) {}
+  // audio_pump is the owner's OriginalElevatorControlHost::audio_pump
+  // (11e0:0e84; empty: none).
+  explicit OriginalElevatorPopupController(
+      std::uint8_t original_mode, std::function<void()> audio_pump = {})
+      : original_mode_(original_mode), audio_pump_(std::move(audio_pump)) {}
 
-  // WM_MOUSEMOVE: a band under the point becomes the hover (repainted);
-  // a point outside the client ends the popup with the original mode.
-  // WM_LBUTTONUP ends it with the band under the point (outside: the
-  // original mode); WM_RBUTTONUP with the original mode. The result is the
-  // EndDialog value; the host releases its capture and cursor clip first.
+  // WM_PAINT (paint): 1208:09cf at 1098:24ef after BeginPaint pumps
+  // (09db; D3); the host paints. WM_MOUSEMOVE: a band under the point
+  // becomes the hover (repainted); a point outside the client ends the
+  // popup with the original mode. WM_LBUTTONUP ends it with the band under
+  // the point (outside: the original mode); WM_RBUTTONUP with the original
+  // mode. Every end runs the commit tail at 258b, whose 1208:09cf at 25f8
+  // pumps (D3) before the owner repaint; the result is the EndDialog
+  // value, and the host then releases its cursor clip and capture.
   [[nodiscard]] OriginalDialogOutcome signal(
       const OriginalDialogSignal& signal, OriginalDialogOps& ops);
 
@@ -190,6 +240,7 @@ class OriginalElevatorPopupController {
 
  private:
   std::uint8_t original_mode_{};
+  std::function<void()> audio_pump_{};
   std::int16_t hover_mode_{-1};
 };
 

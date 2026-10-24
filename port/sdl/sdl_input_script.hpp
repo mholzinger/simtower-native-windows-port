@@ -100,6 +100,12 @@
 //                          open Elevator Control (exit 2 when none); when
 //                          the press runs a modal (ELVPOPUP), the modal
 //                          took the release and none is sent
+//   panel-click X Y        a fast click there: the release is already
+//                          queued when the press is routed, so a
+//                          GetAsyncKeyState of the primary button
+//                          (1098:0c89) finds it up (a phase button then
+//                          selects its phase with no ELVPOPUP); the
+//                          release follows the press
 //   panel-down X Y | panel-move X Y | panel-up X Y
 //                          one press, move or release there (drags: the
 //                          scroll thumb, a pressed Close / Simulate)
@@ -111,6 +117,8 @@
 //   expect-served INDEX FLOOR yes|no
 //                          shaft INDEX serves FLOOR (raw floor number)
 //   expect-scroll POS      Elevator Control's scroll position
+//   expect-phase N         its selected day phase (DS:b3a7, 0..5: the
+//                          phase button DTMP 23 + N)
 //   expect-waiting N       its displayed waiting count (DTMP 41) for the
 //                          selected bank and phase
 //   expect-isolation on|off
@@ -215,9 +223,11 @@ enum class ScriptOp : std::uint8_t {
   panel_move,
   panel_up,
   panel_double_click,
+  panel_click,
   panel_key,
   expect_served,
   expect_scroll,
+  expect_phase,
   expect_waiting,
   expect_isolation,
   expect_idle_passes,
@@ -282,6 +292,11 @@ class ScriptPlayer final : public InputSource {
       std::optional<std::uint32_t> wait_ms) override;
   // Input left for a dialog that closed is dropped.
   void dialog_closed() override { pending_dialog_.clear(); }
+  // Up while a "panel-click" press is routed; nullopt otherwise.
+  std::optional<bool> primary_button_held() override {
+    if (release_queued_) return false;
+    return std::nullopt;
+  }
 
  private:
   // Executes one non-pass command. Mouse commands go to the session (or,
@@ -296,6 +311,8 @@ class ScriptPlayer final : public InputSource {
   DialogHoldWriter hold_dialog_;
   std::deque<InputEvent> pending_{};
   std::deque<DialogInput> pending_dialog_{};
+  // A "panel-click" press is being routed with its release queued.
+  bool release_queued_{};
 };
 
 }  // namespace simtower::sdl

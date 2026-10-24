@@ -34,6 +34,28 @@ constexpr std::uint16_t kFireCrewOfferChoice =
 constexpr std::uint16_t kAcknowledgeChoice =
     kOriginalEventDialogAcknowledgeDefault;
 
+// A window-coordinate mouse event for a dialog manager (modal, or Elevator
+// Control's modeless one). The dialog manager's own double-click test (on
+// the dialog clock) stands in for CS_DBLCLKS: a double click is a down.
+DialogPointer dialog_pointer(const InputEvent& event) {
+  DialogPointer pointer{DialogPointer::Kind::move, event.x, event.y,
+                        (event.keys & kOriginalKeyShift) != 0U};
+  switch (event.kind) {
+    case InputKind::move: break;
+    case InputKind::down:
+    case InputKind::double_click:
+      pointer.kind = DialogPointer::Kind::down;
+      break;
+    case InputKind::up: pointer.kind = DialogPointer::Kind::up; break;
+    case InputKind::right_down:
+      pointer.kind = DialogPointer::Kind::right_down;
+      break;
+    case InputKind::right_up: pointer.kind = DialogPointer::Kind::right_up;
+      break;
+  }
+  return pointer;
+}
+
 void log_line(const std::string& text) {
   std::fprintf(stderr, "simtower_sdl: %s\n", text.c_str());
 }
@@ -297,6 +319,15 @@ constexpr std::size_t disabled_slot(
   return 0U;
 }
 
+// ELVDLOGMAIN's WM_PAINT pumps (owner decision D3): 1098:0939, 0975
+// (1208:09cf's pump at 09db) and 097b. They run where the panel's
+// invalidation is consumed, once per WM_PAINT the Win32 host would get;
+// the compose itself is presentation only and runs on every present.
+static void run_elevator_control_paint_pumps(
+    OriginalElevatorControlHost& host) {
+  for (int pump = 0; pump < 3; ++pump) host.audio_pump();
+}
+
 // ELVDLOGMAIN's world (OriginalElevatorControlHost): the Win32 host's
 // globals become session state. The windows it disables, enables and
 // invalidates are the panels; the alerts and the ELVPOPUP run through the
@@ -327,13 +358,13 @@ class Session::ElevatorControlHost final : public OriginalElevatorControlHost {
         original_elevator_popup_origin(phase_rectangle, original_mode);
     std::optional<int> result{};
     if (panel && s_.input_source_) {
+      // Its WM_PAINT and commit-tail pumps (D3) run this host's.
+      OriginalElevatorPopupController controller(original_mode,
+                                                 [this] { audio_pump(); });
       auto popup = make_elevator_popup_dialog(
-          s_.resources_, panel->client_x() + x, panel->client_y() + y);
+          s_.resources_, panel->client_x() + x, panel->client_y() + y,
+          [&controller]() { return controller.hover_mode(); });
       if (s_.drives(popup)) {
-        OriginalElevatorPopupController controller(original_mode);
-        popup.set_paint_state([&controller]() {
-          return static_cast<std::uint32_t>(controller.hover_mode() + 1);
-        });
         result = s_.run_dialog_modal(
             popup, [&](const DialogSignal& signal, OriginalDialogOps& ops) {
               return controller.signal(signal, ops).result;
@@ -392,9 +423,28 @@ class Session::ElevatorControlHost final : public OriginalElevatorControlHost {
   void unpublish() override {}
   // TEMP (owner decision D7): DestroyWindow activates Main.
   void activate_main() override {}
-  // GetAsyncKeyState of the primary button: the tracked MK_LBUTTON (set
-  // before the press is routed, so a press always finds it down).
-  bool primary_button_down() override { return s_.left_button_down_; }
+  // 1098:0c89 GetAsyncKeyState of the primary button (D1): the input
+  // source's physical state now, when it has one (the window: SDL's mouse
+  // state after a pump, so a release still queued counts as up; the
+  // script player: up during a "panel-click" press). Otherwise the
+  // tracked MK_LBUTTON (set before the press is routed; run_dialog_modal
+  // clears it on the release that ends ELVPOPUP).
+  bool primary_button_down() override {
+    if (s_.input_source_) {
+      if (const auto held = s_.input_source_->primary_button_held()) {
+        return *held;
+      }
+    }
+    return s_.left_button_down_;
+  }
+  // 11e0:0e84 and 1208:05e6 (owner decision D3), as WorldInputHost runs
+  // them; last_auxiliary_tick_ is not in the digest.
+  void audio_pump() override {
+    if (s_.audio_) s_.audio_->pump(s_.clock_ms_());
+  }
+  void sample_auxiliary_pointer_tick() override {
+    s_.last_auxiliary_tick_ = s_.coarse_tick_now();
+  }
   void destroy() override { s_.elevator_destroy_pending_ = true; }
 
  private:
@@ -911,7 +961,13 @@ void Session::reset_command_state() {
 void Session::install_document(OriginalTdtDocument document) {
   // Unreachable through the UI while Elevator Control is open (Main and
   // its menu are disabled); a test shortcut that replaces the tower still
-  // must not leave the control on a stale shaft (owner decision D5).
+  // must not leave the control on a stale shaft. The close drops the
+  // controller without its close tail's Resume (10f0:009c), which cannot
+  // change state here: what the Resume writes is the replaced document's
+  // shaft bytes, DS:783e (reset_command_state sets build_mode_enabled via
+  // reset_original_world_input_state(.., false)) and the transfer visuals
+  // (reset_simulation_state clears them); close_elevator_panel re-enables
+  // the panels.
   if (elevator_) close_elevator_panel(-3);
   carry_original_process_random_state(document_ ? &*document_ : nullptr,
                                       document);
@@ -941,7 +997,8 @@ void Session::install_document(OriginalTdtDocument document) {
 
 void Session::install_empty_document() {
   // The New / Open path's first install: the same stale-shaft rule as
-  // install_document (a load that throws after it leaves no control).
+  // install_document (a load that throws after it leaves no control), with
+  // the same reason the skipped Resume changes nothing.
   if (elevator_) close_elevator_panel(-3);
   auto empty_document = make_original_new_tdt();
   carry_original_process_random_state(document_ ? &*document_ : nullptr,
@@ -1013,7 +1070,7 @@ bool Session::accelerator(std::uint16_t virtual_key) {
       // WM_COMMAND reaches ELVDLOGMAIN, which has no WM_COMMAND handler.
       log_request(RequestKind::menu, {entry.command, 0, 2});
       tally("accelerator " + std::to_string(entry.command));
-      return false;
+      return true;
     }
     const auto* item = find_original_menu_command(menu_, entry.command);
     const bool dispatched = !item || !item->grayed();
@@ -1022,7 +1079,7 @@ bool Session::accelerator(std::uint16_t virtual_key) {
     if (dispatched) {
       (void)dispatch_original_main_command(*command_host_, entry.command);
     }
-    return dispatched;
+    return true;
   }
   return false;
 }
@@ -1445,7 +1502,7 @@ bool Session::run_finance_dialog() {
   return true;
 }
 
-bool Session::open_rename_dialog_for_test(const OriginalRenameTarget& target) {
+bool Session::run_rename_dialog(const OriginalRenameTarget& target) {
   const std::uint16_t id = target.person ? 730U : 732U;
   ++host_requests_.dialogs;
   log_request(RequestKind::command_dialog, {id});
@@ -1457,8 +1514,10 @@ bool Session::open_rename_dialog_for_test(const OriginalRenameTarget& target) {
     auto modal = make_rename_dialog(resources_, target.person);
     if (drives(modal)) {
       driven = true;
+      // WM_INITDIALOG; its TRUE return lets the dialog manager focus the
+      // first tab stop until the WM_PAINT tail focuses edit 4.
       controller.initialize(modal, *document_);
-      modal.focus_first_tab_stop();
+      if (controller.initial_focus(modal)) modal.focus_first_tab_stop();
       RenameHost host(*this);
       (void)run_dialog_modal(
           modal, [&](const DialogSignal& signal, OriginalDialogOps& ops) {
@@ -1479,7 +1538,7 @@ bool Session::open_rename_dialog_for_test(const OriginalRenameTarget& target) {
   return controller.changed();
 }
 
-bool Session::open_movie_dialog_for_test(std::size_t linked_record_index) {
+bool Session::run_movie_dialog(std::size_t linked_record_index) {
   ++host_requests_.dialogs;
   log_request(RequestKind::command_dialog,
               {731, static_cast<std::int64_t>(linked_record_index)});
@@ -1535,6 +1594,10 @@ std::optional<int> Session::run_dialog_modal(DialogWindow& dialog,
           session.elevator_->window->cancel_scroll_tracking()) {
         session.window_repaint_ = true;
       }
+      // A caption press on a palette or on Elevator Control ends with it:
+      // the modal takes the release, so the next press there must not be
+      // swallowed as that press's end.
+      session.nonclient_press_ = false;
       session.dialogs_.push_back(&d);
       if (lock) ++session.modal_depth_;
       // UpdateWindow from the procedure (ops.update_window): present the
@@ -1617,24 +1680,15 @@ std::optional<int> Session::run_dialog_modal(DialogWindow& dialog,
     bool done = false;
     switch (input->kind) {
       case DialogInput::Kind::pointer: {
-        DialogPointer pointer{DialogPointer::Kind::move, input->pointer.x,
-                              input->pointer.y,
-                              (input->pointer.keys & kOriginalKeyShift) != 0U};
-        switch (input->pointer.kind) {
-          case InputKind::move: break;
-          // The dialog manager's own double-click test (on the dialog
-          // clock) stands in for CS_DBLCLKS: a double click is a down.
-          case InputKind::down:
-          case InputKind::double_click:
-            pointer.kind = DialogPointer::Kind::down;
-            break;
-          case InputKind::up: pointer.kind = DialogPointer::Kind::up; break;
-          case InputKind::right_down:
-            pointer.kind = DialogPointer::Kind::right_down;
-            break;
-          case InputKind::right_up:
-            pointer.kind = DialogPointer::Kind::right_up;
-            break;
+        const auto pointer = dialog_pointer(input->pointer);
+        // The tracked primary button follows the modal's own presses, as
+        // run_selector_modal does: a release that ends ELVPOPUP must not
+        // leave Elevator Control's GetAsyncKeyState answer (1098:0c89)
+        // stale.
+        if (pointer.kind == DialogPointer::Kind::down) {
+          left_button_down_ = true;
+        } else if (pointer.kind == DialogPointer::Kind::up) {
+          left_button_down_ = false;
         }
         done = deliver(dialog.pointer(pointer));
         break;
@@ -2546,7 +2600,8 @@ void Session::open_elevator_control(std::size_t elevator_index,
     window_repaint_ = true;
     if (input_source_) input_source_->modal_changed();
   });
-  // WM_INITDIALOG: Main, Map, Info, Command disabled. EnableWindow(FALSE)
+  // WM_INITDIALOG: Main, Info, Command, then Map disabled (1098:0691-06b8).
+  // EnableWindow(FALSE)
   // sends WM_CANCELMODE, whose DefWindowProc releases a held capture (the
   // Magnifier press that opened it) without telling the world input
   // [INFERRED 60%].
@@ -2556,13 +2611,20 @@ void Session::open_elevator_control(std::size_t elevator_index,
     log_request(RequestKind::capture, {-2});
   }
   nonclient_press_ = false;
-  // size_original_dialog_client, 11e0:0b52(dialog, 8), render_original_dtmp
-  // (in make_elevator_control_dialog), the scroll bar, the STRL/400 title,
-  // the arrow class cursor, SetFocus(dialog) and TRUE: the dialog manager
-  // focuses the first tab stop (scroll bar 7 when it is enabled).
+  // size_original_dialog_client, 11e0:0b52(dialog, 8), the scroll bar,
+  // render_original_dtmp, the STRL/400 title, the arrow class cursor,
+  // SetFocus(dialog) and TRUE: the dialog manager focuses the first tab
+  // stop (scroll bar 7 when it is enabled). The original sets the scroll
+  // bar up before the DTMP walk (1098:07c5-085a, then 1070:0231 at 089c);
+  // here the walk ran in make_elevator_control_dialog, which must build
+  // the widgets first. DialogWindow's enable, range and position do not
+  // depend on placement, so the state is the same.
   dialog.place(layout_.window_width, layout_.window_height);
   procedure->initialize_scroll_bar(dialog);
+  // 1098:12e9's pumps (D3), then the first WM_PAINT's.
+  procedure->finish_initialization(*elevator_host_);
   (void)dialog.take_invalidated();
+  run_elevator_control_paint_pumps(*elevator_host_);
   dialog.focus_first_tab_stop();
   cursor_id_ = 0U;
   active_panel_ = Panel::elevator_control;
@@ -2597,6 +2659,7 @@ void Session::elevator_control_step(const DialogStep& step) {
   if (step.signal) elevator_control_signal(*step.signal);
   if (step.then && elevator_) elevator_control_signal(*step.then);
   if (elevator_ && elevator_->window->take_invalidated()) {
+    run_elevator_control_paint_pumps(*elevator_host_);
     window_repaint_ = true;
   }
 }
@@ -2630,22 +2693,7 @@ void Session::elevator_control_pointer(const InputEvent& event) {
     }
   }
   if (down) active_panel_ = Panel::elevator_control;
-  DialogPointer pointer{DialogPointer::Kind::move, event.x, event.y,
-                        (event.keys & kOriginalKeyShift) != 0U};
-  switch (event.kind) {
-    case InputKind::move: break;
-    case InputKind::down:
-    case InputKind::double_click:
-      pointer.kind = DialogPointer::Kind::down;
-      break;
-    case InputKind::up: pointer.kind = DialogPointer::Kind::up; break;
-    case InputKind::right_down:
-      pointer.kind = DialogPointer::Kind::right_down;
-      break;
-    case InputKind::right_up: pointer.kind = DialogPointer::Kind::right_up;
-      break;
-  }
-  auto step = window.pointer(pointer);
+  auto step = window.pointer(dialog_pointer(event));
   if (event.kind == InputKind::double_click && step.signal &&
       step.signal->kind == DialogSignal::Kind::button_down) {
     // The dialog class #32770 has CS_DBLCLKS (style 0x808 under Wine): the

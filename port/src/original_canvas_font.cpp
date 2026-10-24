@@ -110,12 +110,58 @@ void apply_dropout_control(const std::vector<unsigned char>& coverage,
                    [&](std::size_t a, std::size_t b) {
                      return coverage[a] > coverage[b];
                    });
+  // A horizontal stroke that straddles two rows stays in the row where it
+  // is already kept: a candidate yields to the not yet visited candidate
+  // across the stroke when only that one is next to a pixel kept for a
+  // horizontal stroke in its own row, and that one then passes the
+  // across-stroke coverage test against the candidate that yielded. This
+  // keeps the top of the 11-pixel '0' on row 0 ("..##.." over ".#..#.")
+  // instead of a lone top pixel over a step down to row 1. Elsewhere (8 to
+  // 16 pixels, 0x21..0xFF) it changes only the 14-pixel 'a' bowl top and
+  // its accented forms, the 13-pixel registered sign and three 8-pixel
+  // glyphs.
+  // TEMP (look): two digit defects at 11 pixels stay.
+  // - '0' row 4 bulges left ("#....#" between ".#...#" rows): column 0 has
+  //   126 coverage and column 1 has 118, both under half, and the vertical
+  //   rule keeps the more covered one. Preferring the pixel that fills the
+  //   straight gap (column 1, on above and below) fixes it but changes 66
+  //   glyphs at 8 to 16 pixels, so it is not done here.
+  // - '6' row 0 has the same lone top pixel over ".##.#." as '0' had, but
+  //   from plain threshold coverage (150 at column 3, 142 at column 2 of
+  //   row 1), which no dropout rule touches.
+  // draw_canvas_tests pins both as known exceptions.
+  std::vector<bool> visited(coverage.size(), false);
+  std::vector<bool> yielded(coverage.size(), false);
+  const auto index = [&](int x, int y) {
+    return static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+           static_cast<std::size_t>(x);
+  };
+  const auto beside_row_stroke = [&](int x, int y) {
+    return state(x - 1, y) == kMaskHorizontal ||
+           state(x + 1, y) == kMaskHorizontal;
+  };
+  // The across-stroke test of the horizontal branch against (x, ny).
+  const auto beats_across_row = [&](int x, int y, int ny, bool ties_win) {
+    const int other = cov(x, ny);
+    if (other >= kDropoutThreshold && other < kCoverageThreshold) {
+      if (yielded[index(x, ny)]) return true;
+      if (!visited[index(x, ny)] && beside_row_stroke(x, ny) &&
+          !beside_row_stroke(x, y)) {
+        yielded[index(x, y)] = true;
+        return false;
+      }
+    }
+    return ties_win ? cov(x, y) >= other : cov(x, y) > other;
+  };
   for (const std::size_t i : candidates) {
     const int x = static_cast<int>(i % static_cast<std::size_t>(width));
     const int y = static_cast<int>(i / static_cast<std::size_t>(width));
     const int value = coverage[i];
-    if (!on(x, y - 1) && !on(x, y + 1) && value >= cov(x, y - 1) &&
-        value > cov(x, y + 1) && continues(x, y, 1, 0, kMaskHorizontal)) {
+    visited[i] = true;
+    if (!on(x, y - 1) && !on(x, y + 1) &&
+        beats_across_row(x, y, y - 1, true) &&
+        beats_across_row(x, y, y + 1, false) &&
+        continues(x, y, 1, 0, kMaskHorizontal)) {
       mask[i] = kMaskHorizontal;
     } else if (!on(x - 1, y) && !on(x + 1, y) && value >= cov(x - 1, y) &&
                value > cov(x + 1, y) &&
@@ -127,62 +173,6 @@ void apply_dropout_control(const std::vector<unsigned char>& coverage,
 }
 
 }  // namespace
-
-std::uint32_t original_cp1252_to_unicode(unsigned char ansi) noexcept {
-  // 0x80..0x9f differ from Latin-1; the five unassigned bytes map to the
-  // C1 controls as MultiByteToWideChar does.
-  static constexpr std::array<std::uint16_t, 32> kHigh{
-      0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
-      0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
-      0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
-      0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178};
-  if (ansi >= 0x80U && ansi < 0xa0U) return kHigh[ansi - 0x80U];
-  return ansi;
-}
-
-std::string original_utf8_to_cp1252(std::string_view utf8) {
-  std::string result;
-  std::size_t index = 0U;
-  while (index < utf8.size()) {
-    const auto lead = static_cast<unsigned char>(utf8[index]);
-    std::uint32_t code = 0U;
-    std::size_t length = 0U;
-    if (lead < 0x80U) {
-      code = lead;
-      length = 1U;
-    } else if ((lead & 0xE0U) == 0xC0U) {
-      code = lead & 0x1FU;
-      length = 2U;
-    } else if ((lead & 0xF0U) == 0xE0U) {
-      code = lead & 0x0FU;
-      length = 3U;
-    } else if ((lead & 0xF8U) == 0xF0U) {
-      code = lead & 0x07U;
-      length = 4U;
-    }
-    // The continuation bytes that are there (none past the end).
-    std::size_t taken = 1U;
-    while (taken < length && index + taken < utf8.size() &&
-           (static_cast<unsigned char>(utf8[index + taken]) & 0xC0U) ==
-               0x80U) {
-      code = (code << 6U) |
-             (static_cast<unsigned char>(utf8[index + taken]) & 0x3FU);
-      ++taken;
-    }
-    index += taken;
-    // A stray continuation byte, an invalid lead or a truncated sequence.
-    if (length == 0U || taken != length) continue;
-    for (unsigned byte = 0x20U; byte <= 0xFFU; ++byte) {
-      if (byte == 0x7FU) continue;
-      if (original_cp1252_to_unicode(static_cast<unsigned char>(byte)) ==
-          code) {
-        result.push_back(static_cast<char>(byte));
-        break;
-      }
-    }
-  }
-  return result;
-}
 
 OriginalCanvasFont::OriginalCanvasFont(std::span<const std::byte> ttf)
     : impl_(std::make_unique<Impl>()) {
