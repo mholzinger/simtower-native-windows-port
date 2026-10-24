@@ -1,6 +1,7 @@
 #pragma once
 
 #include "original_tdt.hpp"
+#include "original_simulation.hpp"
 #include "original_tables.hpp"
 
 #include <cstddef>
@@ -204,6 +205,9 @@ struct OriginalCathedralArrivalResult {
   std::uint16_t effect_x{};
   bool rating_changed{};
   bool repaint_requested{};
+  // 1140:00a8 -> 1148:003d's rating-six modal; the host presents it, then
+  // runs 1140:010d(1) and the 1118:0044 Info repaint, before the sound.
+  OriginalEventDialogRequest rating_dialog{};
   bool stop_both_audio_channels{};
   std::int32_t wave_resource{};
   std::uint16_t wave_repeat{};
