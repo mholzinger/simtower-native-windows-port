@@ -341,6 +341,7 @@ class Session : private OriginalIdlePassHost {
   void before_scheduler_step(bool sample_cursor) override;
   void preview_only_pass() override;
   void restore_preview() override;
+  void cathedral_rating_promoted() override;
   bool render_full_frame(bool renderer_surface_dirty) override;
   void commit_full_frame_preview() override;
   void palette_recolor_rebuild() override;

@@ -186,6 +186,10 @@ void configure_cathedral_arrival_tower(
     floor.tenant_index.fill(0U);
     simtower::OriginalTdtTenant tenant{};
     tenant.type = static_cast<std::int8_t>(40 - ordinal);
+    tenant.left = 120U;
+    tenant.right = 148U;
+    store_u16(tenant.exact_bytes, 0U, tenant.left, false);
+    store_u16(tenant.exact_bytes, 2U, tenant.right, false);
     tenant.exact_bytes[4] = static_cast<std::byte>(tenant.type);
     tenant.exact_bytes[12] = std::byte{0};
     tenant.preserved_07_to_0f[5] = std::byte{0};
@@ -3342,7 +3346,7 @@ int main() {
     assert(tower->post_elevator.finance.total_population ==
            initial_population - 1);
     assert(tower->hotel_checkout_count == 1U &&
-           tower->hotel_checkout_effect_active &&
+           tower->balance_changed_effect_active &&
            !tower->hotel_checkout_effect_cadence);
     // Direct 1118:0143 latch/audio coverage: repaint always follows a raised
     // DS:779e, WAVE/10013 is selected only when DS:02aa is nonzero, and the
@@ -3351,17 +3355,17 @@ int main() {
         simtower::consume_original_hotel_checkout_presentation(*tower);
     assert(checkout_presentation.repaint_balance &&
            !checkout_presentation.play_cash_sound);
-    assert(!tower->hotel_checkout_effect_active &&
+    assert(!tower->balance_changed_effect_active &&
            tower->hotel_checkout_effect_cadence);
     assert(!simtower::consume_original_hotel_checkout_presentation(*tower)
                 .repaint_balance);
-    tower->hotel_checkout_effect_active = true;
+    tower->balance_changed_effect_active = true;
     tower->hotel_checkout_effect_cadence = true;
     checkout_presentation =
         simtower::consume_original_hotel_checkout_presentation(*tower);
     assert(checkout_presentation.repaint_balance &&
            checkout_presentation.play_cash_sound);
-    assert(!tower->hotel_checkout_effect_active &&
+    assert(!tower->balance_changed_effect_active &&
            tower->hotel_checkout_effect_cadence);
 
     // Direct 1178:0df9 coverage: inactive-room arrival selects the day-phase
@@ -4114,7 +4118,16 @@ int main() {
     assert(arrival.status ==
            simtower::OriginalCathedralArrivalStatus::ceremony_started);
     assert(arrival.arrived_people == 40U);
-    assert(arrival.effect_floor == 111 && arrival.effect_x == 17U);
+    // 1040:030c reads the bottom part's left edge (record +0), not its
+    // variant word (record +6, set to 3 above).
+    assert(arrival.effect_floor == 111 && arrival.effect_x == 134U);
+    // 1040:0322 -> 1140:00a8 -> 1148:003d: the rating-six modal plus the
+    // VIP/transient reset.
+    assert(arrival.rating_dialog.dialog_id == 0x0bd4U + 6U);
+    assert(arrival.rating_dialog.wave_resource == 0x2710);
+    assert(tower.post_elevator.b924 == -1);
+    assert(tower.post_elevator.b923 == 0U && tower.post_elevator.b928 == 0U &&
+           tower.post_elevator.b929 == 0U);
     assert(arrival.rating_changed && arrival.repaint_requested &&
            arrival.stop_both_audio_channels);
     assert(arrival.wave_resource == 10008 && arrival.wave_repeat == 5U &&
