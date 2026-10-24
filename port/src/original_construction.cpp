@@ -173,6 +173,123 @@ OriginalFundsGate original_17fd_funds_gate(const OriginalTdtDocument& document,
   return {cost, std::nullopt};
 }
 
+// Exact 11f8:2e64 support check, called by 17fd after the funds gate. The
+// branch is chosen by floor, not facility type: floors above the ground
+// story need the floor below to cover the span, the ground story itself is
+// never checked, and basement floors need the next floor up plus the ground
+// Lobby, and a newly opened basement floor must also overlap its support.
+// Returns the 1118:0933 message code on failure.
+std::optional<std::uint16_t> original_2e64_support_failure(
+    const OriginalTdtDocument& document,
+    std::int16_t floor,
+    std::uint16_t left,
+    std::uint16_t right) {
+  const auto signed_left = std::bit_cast<std::int16_t>(left);
+  const auto signed_right = std::bit_cast<std::int16_t>(right);
+  const auto edge = [](std::uint16_t value) {
+    return std::bit_cast<std::int16_t>(value);
+  };
+  // 2e76-2e85: DS:71de >> 3 is the world width in cells.
+  if (signed_left < 0 ||
+      static_cast<int>(kOriginalWorldGridWidth) < signed_right) {
+    return 20U;
+  }
+  if (floor > 10) {
+    const auto& below = document.floors[static_cast<std::size_t>(floor - 1)];
+    if (below.tenants.empty()) return 3U;
+    if (edge(below.left_edge) > signed_left ||
+        edge(below.right_edge) < signed_right) {
+      return 6U;
+    }
+    return std::nullopt;
+  }
+  if (floor == 10) return std::nullopt;
+  // 2edb-2f43: b5fe is the next floor up and b622 the ground Lobby story,
+  // whose edges are read without a record-count test.
+  const auto& above = document.floors[static_cast<std::size_t>(floor + 1)];
+  if (above.tenants.empty()) return 4U;
+  const auto& lobby = document.floors[10];
+  if (edge(lobby.left_edge) > signed_left ||
+      edge(lobby.right_edge) < signed_right) {
+    return 2U;
+  }
+  if (!document.floors[static_cast<std::size_t>(floor)].tenants.empty()) {
+    return std::nullopt;
+  }
+  if (edge(above.left_edge) >= signed_right ||
+      edge(above.right_edge) <= signed_left) {
+    return 4U;
+  }
+  return std::nullopt;
+}
+
+// Exact 11f8:2f5a floor legality, called by 17fd after 2e64. Type 31's branch
+// clears a lone type-0 record on floor 0 when building on floor 2
+// (3031-3060), a persisted side effect that survives later failures.
+// Type 24 (Lobby, 10a0:1366) is validated by build_original_sky_lobby and
+// never reaches this helper.
+std::optional<std::uint16_t> original_2f5a_floor_failure(
+    OriginalTdtDocument& document,
+    std::uint16_t type,
+    std::int16_t floor) {
+  // 2f72-2f92: only types 1, 24, 42 and 43 may use the ground story.
+  if (type != 1U && type != 24U && type != 42U && type != 43U &&
+      floor == 10) {
+    return 12U;
+  }
+  // 2f95-2fa8: every non-Cathedral type has the floor-109 ceiling.
+  if ((type < 36U || type > 40U) && floor > 109) return 5U;
+  // 2fab-2fd8: the DS:b3e8 basement guard applies to every type; types
+  // 18/20/29 must also sit at or above b3e8 and above floor zero.
+  const auto deepest = static_cast<int>(static_cast<std::int16_t>(
+      load_original_header_word(document, 30U)));  // DS:b3e8
+  if (deepest - 1 > floor) return 14U;
+  if (type == 18U || type == 20U || type == 29U) {
+    if (floor < 1) return 20U;
+    if (floor < deepest) return 14U;
+  }
+  switch (type) {
+    case 3:
+    case 4:
+    case 5:
+    case 7:
+    case 9:
+      if (floor < 10) return 10U;
+      break;
+    case 11:
+    case 20:
+    case 44:
+      if (floor >= 10) return 11U;
+      break;
+    case 18:
+    case 29:
+      // 306b-307c: DS:b3e6 is the automatic Lobby height.
+      if (floor >= 10 &&
+          floor <= static_cast<int>(document.header.lobby_height) + 10) {
+        return 12U;
+      }
+      break;
+    case 31: {
+      if (floor >= 10) return 11U;
+      if (floor < 2) return 20U;
+      auto& two_below = document.floors[static_cast<std::size_t>(floor - 2)];
+      if (two_below.tenants.empty()) break;
+      if (floor == 2 && two_below.tenants.size() == 1U &&
+          two_below.tenants[0].type == 0) {
+        two_below.tenants.clear();
+        break;
+      }
+      return 15U;
+    }
+    case 36:
+      if (floor != 113) return 16U;
+      break;
+    default:
+      break;
+  }
+  return std::nullopt;
+}
+
 OriginalTdtTenant make_lobby_tenant(std::uint16_t left,
                                     std::uint16_t right,
                                     bool byte_swapped) {
@@ -2114,17 +2231,17 @@ OriginalConstructionResult build_original_immediate_parking_unit(
   if (type != 0x2cU && type != 11U) {
     return {OriginalConstructionStatus::invalid_floor, 0};
   }
-  if (floor < 0) {
-    return {OriginalConstructionStatus::invalid_floor, 0, 20U};
-  }
-  if (floor >= 10) {
+  // Native bounds guard for the floor table read by the 07d8 gates below.
+  // 17fd itself rejects a negative floor with message 20 (181b).
+  if (floor < 0 || static_cast<std::size_t>(floor) >= document.floors.size()) {
     return {OriginalConstructionStatus::invalid_floor, 0,
-            original_status_code(floor == 10, 12U, 11U)};
-  }
-  if (left > kOriginalWorldGridWidth - width) {
-    return {OriginalConstructionStatus::invalid_span, 0, 20U};
+            original_status_code(floor < 0, 20U, 5U)};
   }
 
+  // 11f8:07d8 gates each type before delegating: the Ramp's DS:b3ee column
+  // and first-floor rules (0aa0-0afc), Parking's 1198:0beb Ramp scan (0a72),
+  // then 240d's DS:b3fc capacity test. Floor and span legality belong to
+  // 17fd and follow the funds gate.
   if (type == 0x2cU) {
     const auto ramp_x = static_cast<std::int16_t>(
         load_original_header_word(document, 36U));  // DS:b3ee
@@ -2160,35 +2277,14 @@ OriginalConstructionResult build_original_immediate_parking_unit(
       construction_costs[type], construction_costs[0], true);
   if (funds.failure) return *funds.failure;
 
-  // Both immediate types take 11f8:2e64's basement support branch and
-  // 11f8:2f5a's basement-only legality branch.
-  const std::size_t b3e8_offset =
-      document.header.format_version >= 0x20U ? 30U : 28U;
-  if (document.header.exact_bytes.size() < b3e8_offset + 2U) {
-    return {OriginalConstructionStatus::invalid_floor, 0, 14U};
+  if (const auto code =
+          original_2e64_support_failure(document, floor, left, right)) {
+    return {OriginalConstructionStatus::invalid_span, 0, *code};
   }
-  const auto deepest_floor = static_cast<std::int16_t>(load_u16(
-      std::span<const std::byte>(document.header.exact_bytes), b3e8_offset,
-      document.header.byte_swapped));
-  if (static_cast<int>(deepest_floor) - 1 > floor) {
-    return {OriginalConstructionStatus::invalid_floor, 0, 14U};
+  if (const auto code = original_2f5a_floor_failure(document, type, floor)) {
+    return {OriginalConstructionStatus::invalid_floor, 0, *code};
   }
-
   const auto& old_floor = document.floors[static_cast<std::size_t>(floor)];
-  const auto& supporting =
-      document.floors[static_cast<std::size_t>(floor + 1)];
-  const auto& lobby = document.floors[10];
-  if (supporting.tenants.empty()) {
-    return {OriginalConstructionStatus::invalid_span, 0, 4U};
-  }
-  if (lobby.tenants.empty() || lobby.left_edge > left ||
-      lobby.right_edge < right) {
-    return {OriginalConstructionStatus::invalid_span, 0, 2U};
-  }
-  if (old_floor.tenants.empty() &&
-      (supporting.left_edge >= right || supporting.right_edge <= left)) {
-    return {OriginalConstructionStatus::invalid_span, 0, 4U};
-  }
 
   std::optional<std::uint8_t> key;
   if (type == 11U) {
@@ -4789,98 +4885,22 @@ OriginalConstructionResult build_original_deferred_facility(
     if (funds.failure) return *funds.failure;
   }
 
-  // Types 3/4/5/9 are above-ground only. Type 10 takes the common branch of
-  // 11f8:2f5a: floors 0..9 and 11..109 are legal, but ground floor 10 is not.
-  // The routine's first four-key table exempts only types 1, 24, 42, and 43
-  // from that ground-floor rejection; type 19 therefore does not receive a
-  // special ground-floor path even though it is the lower Movie half.
-  const bool commercial = type == 6U || type == 10U || type == 12U;
-  const bool cathedral_part = type >= 36U && type <= 40U;
-  const bool common_all_floors =
-      commercial || type == 13U || type == 14U || type == 15U ||
-      type == 17U || type == 18U || type == 19U || type == 29U ||
-      type == 30U || type == 31U || type == 32U || type == 33U ||
-      cathedral_part;
-  const bool recycling_half = type == 20U || type == 21U;
-  const bool reversed_support =
-      (common_all_floors || recycling_half) && floor >= 0 && floor < 10;
-  const std::int16_t maximum_floor = cathedral_part ? 119 : 109;
-  if ((common_all_floors &&
-        (floor < 0 || floor > maximum_floor ||
-         floor == 10)) ||
-      (recycling_half && (floor < 0 || floor >= 10)) ||
-      (!common_all_floors && !recycling_half &&
-       (floor < 11 || floor > 109))) {
-    const std::uint16_t code = floor < 0
-        ? 20U
-        : (floor == 10
-               ? 12U
-               : (floor > maximum_floor
-                      ? 5U
-                      : (recycling_half ? 11U : 10U)));
-    return {OriginalConstructionStatus::invalid_floor, 0, code};
-  }
-  if ((type == 18U || type == 29U) && floor >= 11 &&
-      floor <= static_cast<std::int16_t>(10U + document.header.lobby_height)) {
-    return {OriginalConstructionStatus::invalid_floor, 0, 12U};
-  }
+  // Native input validation; the original cycles appearances in range.
   if (variant >= variant_count) {
     return {OriginalConstructionStatus::invalid_span, 0};
   }
-  if (left > kOriginalWorldGridWidth - width) {
-    return {OriginalConstructionStatus::invalid_span, 0, 20U};
+  // Native bounds guard for the floor table; 2f5a's ceiling rejects first.
+  if (static_cast<std::size_t>(floor) >= document.floors.size()) {
+    return {OriginalConstructionStatus::invalid_floor, 0, 5U};
   }
-
+  if (const auto code =
+          original_2e64_support_failure(document, floor, left, right)) {
+    return {OriginalConstructionStatus::invalid_span, 0, *code};
+  }
+  if (const auto code = original_2f5a_floor_failure(document, type, floor)) {
+    return {OriginalConstructionStatus::invalid_floor, 0, *code};
+  }
   const auto& old_floor = document.floors[static_cast<std::size_t>(floor)];
-  if (reversed_support) {
-    // 11f8:2fab applies the persisted signed DS:b3e8 Metro-floor guard. It
-    // is at byte 30 in 0x20+ headers and byte 28 in earlier revisions.
-    const std::size_t b3e8_offset =
-        document.header.format_version >= 0x20U ? 30U : 28U;
-    if (document.header.exact_bytes.size() < b3e8_offset + 2U) {
-      return {OriginalConstructionStatus::invalid_floor, 0, 14U};
-    }
-    const auto b3e8 = static_cast<std::int16_t>(load_u16(
-        std::span<const std::byte>(document.header.exact_bytes), b3e8_offset,
-        document.header.byte_swapped));
-    if (static_cast<int>(b3e8) - 1 > floor) {
-      return {OriginalConstructionStatus::invalid_floor, 0, 14U};
-    }
-    // After the common b3e8-1 extension gate, 11f8:2fb5 applies a stricter
-    // boundary to the selected upper halves of Movie Theater, Recycling
-    // Center, and Party Hall. Unlike ordinary facilities, types 18/20/29 may
-    // not occupy the one new story immediately below b3e8; they must be at
-    // b3e8 or above. Their floor-zero rejection is the preceding 2fc9 branch.
-    if ((type == 18U || type == 20U || type == 29U) && floor < b3e8) {
-      return {OriginalConstructionStatus::invalid_floor, 0, 14U};
-    }
-
-    const auto& supporting =
-        document.floors[static_cast<std::size_t>(floor + 1)];
-    const auto& lobby = document.floors[10];
-    if (supporting.tenants.empty()) {
-      return {OriginalConstructionStatus::invalid_span, 0, 4U};
-    }
-    if (lobby.tenants.empty() || lobby.left_edge > left ||
-        lobby.right_edge < right) {
-      return {OriginalConstructionStatus::invalid_span, 0, 2U};
-    }
-    // 11f8:2f15 allows an already-open basement floor directly. Opening a
-    // new one additionally requires the new span to overlap its support.
-    if (old_floor.tenants.empty() &&
-        (supporting.left_edge >= right || supporting.right_edge <= left)) {
-      return {OriginalConstructionStatus::invalid_span, 0, 4U};
-    }
-  } else {
-    const auto& supporting =
-        document.floors[static_cast<std::size_t>(floor - 1)];
-    if (supporting.tenants.empty()) {
-      return {OriginalConstructionStatus::invalid_span, 0, 3U};
-    }
-    if (supporting.left_edge > left || supporting.right_edge < right) {
-      return {OriginalConstructionStatus::invalid_span, 0, 6U};
-    }
-  }
 
   const auto key = first_original_floor_key(old_floor);
   if (!key) {
@@ -5100,17 +5120,10 @@ OriginalConstructionResult build_original_movie_theater(
   if (load_original_header_word(document, 54U) == 0x10U) {
     return {OriginalConstructionStatus::tenant_limit, 0, 30U};
   }
-  if (floor < 0 || floor > 109 || floor == 10 ||
-      (floor >= 11 &&
-       floor <= static_cast<std::int16_t>(10U +
-                                          document.header.lobby_height))) {
-    return {OriginalConstructionStatus::invalid_floor, 0,
-            original_status_code(
-                floor < 0, 20U,
-                original_status_code(floor > 109, 5U, 12U))};
-  }
-  if (left > kOriginalWorldGridWidth - 24U) {
-    return {OriginalConstructionStatus::invalid_span, 0, 20U};
+  // 11f8:1fa5 starts with 2f5a for the selected type, then the funds check;
+  // span and support are checked per part afterwards (321e/17fd -> 2e64).
+  if (const auto code = original_2f5a_floor_failure(document, 18U, floor)) {
+    return {OriginalConstructionStatus::invalid_floor, 0, *code};
   }
 
   const auto added_cells = [&](std::int16_t target_floor) {
@@ -5125,9 +5138,6 @@ OriginalConstructionResult build_original_movie_theater(
                          std::max(old.right_edge, right) - old.right_edge);
   };
   const auto lower_floor = static_cast<std::int16_t>(floor - 1);
-  if (lower_floor < 0) {
-    return {OriginalConstructionStatus::invalid_floor, 0, 20U};
-  }
   const std::uint64_t cost64 =
       static_cast<std::uint64_t>(construction_costs[18]) +
       static_cast<std::uint64_t>(added_cells(floor) +
@@ -5182,44 +5192,14 @@ OriginalConstructionResult build_original_recycling_center(
     std::int16_t floor,
     std::uint16_t left,
     const OriginalYenTable& construction_costs) {
-  // Type 20 maps to 11f8:3007: the selected upper half must be below ground.
-  // Floor zero cannot hold a pair because the lower type-21 floor is floor-1.
-  if (floor < 1 || floor >= 10) {
-    return {OriginalConstructionStatus::invalid_floor, 0,
-            original_status_code(
-                floor < 1, 20U,
-                original_status_code(floor == 10, 12U, 11U))};
+  // 11f8:1fa5 starts with 2f5a for type 20 (3007: the selected upper half
+  // must be below ground; 2fc9: floor zero has no lower floor), then funds,
+  // then the 1088:02c8 alignment gate. Span and support follow per part.
+  if (const auto code = original_2f5a_floor_failure(document, 20U, floor)) {
+    return {OriginalConstructionStatus::invalid_floor, 0, *code};
   }
   constexpr std::uint16_t kWidth = 25U;
-  if (left > kOriginalWorldGridWidth - kWidth) {
-    return {OriginalConstructionStatus::invalid_span, 0, 20U};
-  }
   const auto right = static_cast<std::uint16_t>(left + kWidth);
-
-  // DS:75aa is zero in the executable's initialized data and has no direct
-  // writer. Once persisted DS:b3f4 is nonzero, 1088:02c8 scans floor-2
-  // through floor+1 and accepts only a positive type-20/21 record wholly
-  // contained by the proposed span. Equal 25-cell widths make this exact
-  // x-alignment with an already activated, vertically adjacent center.
-  if (load_original_header_word(document, 42U) != 0U) {
-    bool connected = false;
-    const int first_floor = std::max<int>(floor - 2, 0);
-    const int last_floor = std::min<int>(floor + 1, 119);
-    for (int candidate_floor = first_floor;
-         candidate_floor <= last_floor && !connected; ++candidate_floor) {
-      for (const auto& candidate :
-           document.floors[static_cast<std::size_t>(candidate_floor)].tenants) {
-        if (candidate.left >= left && candidate.right <= right &&
-            (candidate.type == 20 || candidate.type == 21)) {
-          connected = true;
-          break;
-        }
-      }
-    }
-    if (!connected) {
-      return {OriginalConstructionStatus::invalid_span, 0};
-    }
-  }
 
   const auto lower_floor = static_cast<std::int16_t>(floor - 1);
   const auto added_cells = [&](std::int16_t target_floor) {
@@ -5246,6 +5226,31 @@ OriginalConstructionResult build_original_recycling_center(
             static_cast<std::int32_t>(total_cost),
             original_funds_status_code(document.header.balance,
                                        construction_costs[20])};
+  }
+
+  // DS:75aa is zero in the executable's initialized data and has no direct
+  // writer. Once persisted DS:b3f4 is nonzero, 1088:02c8 scans floor-2
+  // through floor+1 and accepts only a positive type-20/21 record wholly
+  // contained by the proposed span. Equal 25-cell widths make this exact
+  // x-alignment with an already activated, vertically adjacent center.
+  if (load_original_header_word(document, 42U) != 0U) {
+    bool connected = false;
+    const int first_floor = std::max<int>(floor - 2, 0);
+    const int last_floor = std::min<int>(floor + 1, 119);
+    for (int candidate_floor = first_floor;
+         candidate_floor <= last_floor && !connected; ++candidate_floor) {
+      for (const auto& candidate :
+           document.floors[static_cast<std::size_t>(candidate_floor)].tenants) {
+        if (candidate.left >= left && candidate.right <= right &&
+            (candidate.type == 20 || candidate.type == 21)) {
+          connected = true;
+          break;
+        }
+      }
+    }
+    if (!connected) {
+      return {OriginalConstructionStatus::invalid_span, 0};
+    }
   }
 
   // For the basement branch at 11f8:2070, 11f8:1fa5 constructs the selected
@@ -5285,21 +5290,12 @@ OriginalConstructionResult build_original_party_hall(
 
   // Type 29 maps to the same 11f8:306b floor-class branch as type 18:
   // basements are legal, as are stories strictly above every Lobby story.
-  // Ground floor, floor zero (which has no lower half), and Lobby stories
-  // are rejected.
-  if (floor < 1 || floor > 109 || floor == 10 ||
-      (floor >= 11 &&
-       floor <= static_cast<std::int16_t>(10U +
-                                          document.header.lobby_height))) {
-    return {OriginalConstructionStatus::invalid_floor, 0,
-            original_status_code(
-                floor < 1, 20U,
-                original_status_code(floor > 109, 5U, 12U))};
+  // 11f8:1fa5 runs that 2f5a check first, then funds; span and support
+  // follow per part.
+  if (const auto code = original_2f5a_floor_failure(document, 29U, floor)) {
+    return {OriginalConstructionStatus::invalid_floor, 0, *code};
   }
   constexpr std::uint16_t kWidth = 24U;
-  if (left > kOriginalWorldGridWidth - kWidth) {
-    return {OriginalConstructionStatus::invalid_span, 0, 20U};
-  }
 
   const auto lower_floor = static_cast<std::int16_t>(floor - 1);
   const auto right = static_cast<std::uint16_t>(left + kWidth);
@@ -5606,34 +5602,22 @@ OriginalConstructionResult build_original_office(
     if (funds.failure) return *funds.failure;
   }
 
-  // 11f8:2f5a routes type 7 to the above-ground-only branch. Its common
-  // ground-floor rejection makes floor 10 illegal and the general ceiling
-  // rejects floors above 109.
-  if (floor < 11 || floor > 109) {
-    return {OriginalConstructionStatus::invalid_floor, 0,
-            original_status_code(
-                floor < 0, 20U,
-                original_status_code(
-                    floor < 10, 10U,
-                    original_status_code(floor == 10, 12U, 5U)))};
-  }
+  // Native input validation; the original cycles appearances in range.
   if (variant >= 6U) {
     return {OriginalConstructionStatus::invalid_span, 0};
   }
-  if (left > kOriginalWorldGridWidth - kWidth) {
-    return {OriginalConstructionStatus::invalid_span, 0, 20U};
+  // Native bounds guard for the floor table; 2f5a's ceiling rejects first.
+  if (static_cast<std::size_t>(floor) >= document.floors.size()) {
+    return {OriginalConstructionStatus::invalid_floor, 0, 5U};
   }
-
-  // For an above-ground facility 11f8:2e64 checks the immediately lower
-  // floor (the b5f6 pointer expression is b5fa[floor-1]), not the target
-  // floor. This is what allows the first Office to create a new story.
-  const auto& supporting =
-      document.floors[static_cast<std::size_t>(floor - 1)];
-  if (supporting.tenants.empty()) {
-    return {OriginalConstructionStatus::invalid_span, 0, 3U};
+  // 17fd then runs 2e64 support and 2f5a legality. 2f5a routes type 7 to the
+  // above-ground-only branch, so the ground story and basements fail there.
+  if (const auto code =
+          original_2e64_support_failure(document, floor, left, right)) {
+    return {OriginalConstructionStatus::invalid_span, 0, *code};
   }
-  if (supporting.left_edge > left || supporting.right_edge < right) {
-    return {OriginalConstructionStatus::invalid_span, 0, 6U};
+  if (const auto code = original_2f5a_floor_failure(document, 7U, floor)) {
+    return {OriginalConstructionStatus::invalid_floor, 0, *code};
   }
 
   const auto& old_floor = document.floors[static_cast<std::size_t>(floor)];
