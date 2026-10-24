@@ -1,0 +1,22 @@
+# A fast second press is WM_LBUTTONDBLCLK (the #32770 dialog class has
+# CS_DBLCLKS), which ELVDLOGMAIN's message table (1098:12c9) does not
+# list: a double click on Waiting + (DTMP 8, client 70,98) adds one, as on
+# Win32, and the release that follows does nothing. Scroll bar 7 takes
+# the second press like a first one: a double click on its up arrow
+# (143,200) on a 24-floor shaft of the full tower moves two lines.
+# args: --scenario busy --passes 310
+# expect-stderr: elevator control 0
+# expect-stderr: elevator control closed
+pass 300
+open-elevator-control 0
+expect-waiting 5
+panel-at 70 98
+expect-waiting 6
+panel-dblclick 70 98
+panel-up 70 98
+expect-waiting 6
+panel-at 70 98
+expect-waiting 7
+panel-at 148 413
+expect-panel none
+pass 310

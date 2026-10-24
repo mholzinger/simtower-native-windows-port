@@ -1,0 +1,16 @@
+# The original path to Elevator Control: a Map click brings the shaft's
+# bottom into Main, the Magnifier (Command cell at 182,228) is picked, and
+# a click on the shaft pit below floor 1 (outside bottom..top) selects the
+# elevator_control target, which opens the panel on that shaft.
+# args: --scenario busy --passes 60
+# expect-stderr: elevator control 0
+# reject-stderr: transport information
+pass 50
+click 70 290
+click-command 182 228
+expect-panel none
+click 440 440
+expect-panel elevator-control 0
+panel-at 148 413
+expect-panel none
+pass 60

@@ -76,6 +76,9 @@ enum class Panel : unsigned char {
   map,
   info,
   command,
+  // Elevator Control's fixed panel (drawn above the palettes; not in
+  // kPanelZOrder, the session routes it first while it is open).
+  elevator_control,
 };
 
 // Stacking order, bottom to top, shared by drawing (compose_window) and

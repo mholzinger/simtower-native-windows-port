@@ -42,12 +42,13 @@
 // clear) is laid out, painted and hit-tested as a vertical one; none of
 // the ported dialogs has one.
 //
-// TODO(Elevator Control 400, not ported yet): it needs what this runtime
-// does not have: a modeless dialog (CreateDialogIndirectParamW, nm 3708)
-// that runs beside the main loop instead of in run_dialog_modal, the
-// WM_MOUSEMOVE its procedure reads (pressed_item; unhandled_pointer
-// receives no moves) and a WM_CTLCOLORSCROLLBAR brush (it returns a white
-// one; scroll bars here always draw the TEMP button face).
+// Modeless use (Elevator Control 400, CreateDialogIndirectParamW): the
+// session keeps one DialogWindow beside the main loop and feeds it the
+// pointer events over it (or all of them while it holds the pointer
+// capture) and the keys while it is active; see Session::elevator_control.
+// WM_MOUSEMOVE reaches a procedure through DialogDescriptor::mouse_move,
+// SetCapture / ClipCursor through capture_pointer / clip_pointer, and the
+// WM_CTLCOLORSCROLLBAR brush through scroll_bar_background.
 //
 // TEMP (no Win3.1 reference yet, owner decision 2026-10-23): the Win3.1
 // look and metrics of these USER-drawn controls (bevels, edit text inset,
@@ -164,6 +165,14 @@ class DialogWindow;
 enum class DialogPlacement : std::uint8_t {
   screen_position,  // 11e0:0b52 original_dialog_screen_position
   centered,         // 11e0:0c10 original_dialog_center_position
+  // 11e0:0b52 with the descriptor's requested_left on the fixed
+  // kDesktopWidth x kDesktopHeight desktop the palettes use (a fixed panel
+  // that stays there while it fits; TEMP: a smaller window moves it up or
+  // left just enough to keep its bottom and right edges inside).
+  fixed_desktop,
+  // An explicit outer origin (descriptor.origin) in window coordinates
+  // (SetWindowPos of a popup, e.g. ELVPOPUP over its phase button).
+  at,
 };
 
 // SetTimer at WM_INITDIALOG / the first WM_PAINT; id 0 means none.
@@ -188,6 +197,11 @@ struct DialogDescriptor {
   // The script name ("expect-dialog"): event_dialog_label and friends.
   std::string label{};
   DialogPlacement placement{DialogPlacement::centered};
+  // 11e0:0b52's requested left (0: centered horizontally).
+  int requested_left{};
+  // DialogPlacement::at's outer origin.
+  int origin_x{};
+  int origin_y{};
   DialogTimerSpec timer{};
   // Whether the modal holds DS:24b8 (event dialogs and About; MessageBox
   // does not).
@@ -227,6 +241,21 @@ struct DialogDescriptor {
   std::function<std::optional<DialogSignal>(const DialogPointer& pointer,
                                             int client_x, int client_y)>
       unhandled_pointer{};
+  // WM_MOUSEMOVE reaching the dialog procedure: a move over the client and
+  // over no control that takes the mouse, or any move while capture_pointer
+  // holds the capture (no control drag running). Null: no moves.
+  std::function<std::optional<DialogSignal>(const DialogPointer& pointer,
+                                            int client_x, int client_y)>
+      mouse_move{};
+  // SetCapture(dialog) for its whole life (ELVPOPUP 1098:22f8): moves and
+  // releases anywhere reach mouse_move / unhandled_pointer.
+  bool capture_pointer{};
+  // ClipCursor to the client (TEMP emulation: incoming points are clamped
+  // to [0, w-1] x [0, h-1] of the client).
+  bool clip_pointer{};
+  // WM_CTLCOLORSCROLLBAR's brush behind an SB_CTL scroll bar's trough
+  // (null: the TEMP button face).
+  std::optional<OriginalRgb> scroll_bar_background{};
   // WM_CTLCOLOREDIT / WM_CTLCOLORLISTBOX brushes (null: the control's own
   // COLOR_WINDOW white).
   std::optional<OriginalRgb> edit_background{};
@@ -247,6 +276,8 @@ inline constexpr char kFindTenantDialogLabel[] = "find tenant";
 inline constexpr char kRenamePersonDialogLabel[] = "rename person";
 inline constexpr char kRenameTenantDialogLabel[] = "rename tenant";
 inline constexpr char kMovieDialogLabel[] = "movie";
+inline constexpr char kElevatorControlDialogLabel[] = "elevator control";
+inline constexpr char kElevatorPopupDialogLabel[] = "elevator popup";
 
 class DialogWindow final : public OriginalDialogOps {
  public:
@@ -297,6 +328,14 @@ class DialogWindow final : public OriginalDialogOps {
   [[nodiscard]] std::uint16_t focus() const { return focus_; }
   // The captured push button and whether it is drawn pressed.
   [[nodiscard]] std::uint16_t captured() const { return captured_; }
+  // Whether the dialog holds the mouse capture: a pressed button, a drag
+  // in an edit or list, a scroll bar click or thumb drag (USER tracks those
+  // with the capture), or capture_pointer. A host routes every pointer
+  // event to it then, wherever the pointer is.
+  [[nodiscard]] bool has_pointer_capture() const {
+    return captured_ != 0U || scroll_drag_.has_value() ||
+           drag_ != Drag::none || descriptor_.capture_pointer;
+  }
   [[nodiscard]] bool pressed() const { return pressed_; }
   // The push button drawn as the default (thick border): the Enter target
   // when it is a push button.
@@ -411,6 +450,21 @@ class DialogWindow final : public OriginalDialogOps {
     return scroll_drag_ && scroll_drag_->id == id
                ? std::optional<int>(scroll_drag_->position)
                : std::nullopt;
+  }
+  // Whether a scroll bar press is being tracked (thumb drag, or an arrow
+  // or page click until its release). USER runs its own message loop for
+  // that, so the application's idle loop does not run meanwhile.
+  [[nodiscard]] bool scroll_tracking_active() const {
+    return scroll_drag_.has_value();
+  }
+  // WM_CANCELMODE for a tracked scroll bar: ends the tracking with no
+  // further WM_VSCROLL (TEMP: USER's exact notifications on a cancelled
+  // track are not confirmed). Returns whether one was tracked.
+  bool cancel_scroll_tracking() {
+    if (!scroll_drag_) return false;
+    scroll_drag_.reset();
+    invalidated_ = true;
+    return true;
   }
 
  private:

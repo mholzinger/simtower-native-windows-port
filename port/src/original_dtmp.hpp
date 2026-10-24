@@ -34,4 +34,13 @@ struct OriginalDtmp {
 [[nodiscard]] OriginalDtmp parse_original_dtmp(
     std::span<const std::byte> resource);
 
+// PtInRect on a DTMP rectangle, where a 0xffff left or top marks an absent
+// rectangle that nothing hits.
+[[nodiscard]] constexpr bool original_dtmp_rect_contains(
+    const OriginalDtmpRect& rectangle, int x, int y) noexcept {
+  return rectangle.left != 0xffffU && rectangle.top != 0xffffU &&
+         x >= rectangle.left && x < rectangle.right && y >= rectangle.top &&
+         y < rectangle.bottom;
+}
+
 }  // namespace simtower

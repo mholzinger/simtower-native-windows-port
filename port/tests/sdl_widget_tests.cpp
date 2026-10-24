@@ -558,6 +558,18 @@ void scroll_bar_tests() {
   assert(dropped.then == scroll(7, simtower::kOriginalScrollEnd));
   assert(!dialog.scroll_tracking(7));
   assert(dialog.control(7)->scroll_pos == 50);
+  // WM_CANCELMODE (a modal opened mid-drag): the track ends, the capture
+  // is released and the later release and moves send nothing.
+  assert(!press(dialog, rect.left + 3, thumb_top + 2).signal);
+  assert(dialog.scroll_tracking_active() && dialog.has_pointer_capture());
+  assert(dialog.cancel_scroll_tracking());
+  assert(!dialog.scroll_tracking_active() && !dialog.has_pointer_capture());
+  assert(!dialog.cancel_scroll_tracking());
+  assert(!dialog.pointer({DialogPointer::Kind::move, rect.left + 3,
+                          rect.bottom - width + 2})
+              .signal);
+  assert(!release(dialog, rect.left + 3, rect.bottom).signal);
+  assert(dialog.control(7)->scroll_pos == 50);
   // Keys while focused.
   assert(dialog.focus() == 7U);
   assert(dialog.key(DialogKey::down).signal ==
@@ -573,6 +585,97 @@ void scroll_bar_tests() {
   const auto image = render(dialog);
   assert(at(image, rect.left, rect.top + 40) == 0U);
   assert(count(image, rect, simtower::sdl::style::kButtonFace) > 500);
+}
+
+// --- Modeless additions (Elevator Control) ------------------------------
+
+std::optional<OriginalDialogSignal> move_signal(const DialogPointer&, int x,
+                                                int y) {
+  OriginalDialogSignal signal{Kind::mouse_move};
+  signal.x = x;
+  signal.y = y;
+  return signal;
+}
+
+void modeless_tests() {
+  // WM_MOUSEMOVE reaches the procedure over the client and no control,
+  // never over the scroll bar or outside, and not while a control drags.
+  const OriginalRect rect{135, 195, 151, 391};
+  auto bar = make(7, DialogControlKind::scroll_bar,
+                  simtower::kOriginalScrollBarVertical, rect);
+  {
+    DialogDescriptor descriptor{};
+    descriptor.font_pixels = kPixels;
+    descriptor.mouse_move = move_signal;
+    descriptor.scroll_bar_background = 0xFFFFFFU;
+    DialogWindow dialog(descriptor, template_of({bar}), {bar}, 400, 420, 0U);
+    dialog.place(400, 420);
+    dialog.set_scroll_range(7, 1, 10);
+    dialog.set_scroll_pos(7, 10);
+    const auto moved =
+        dialog.pointer({DialogPointer::Kind::move, 20, 30}).signal;
+    assert(moved && moved->kind == Kind::mouse_move && moved->x == 20 &&
+           moved->y == 30);
+    assert(!dialog.pointer({DialogPointer::Kind::move, 140, 300}).signal);
+    assert(!dialog.pointer({DialogPointer::Kind::move, 500, 30}).signal);
+    assert(!dialog.has_pointer_capture());
+    // A scroll-bar click holds the capture until the release (USER's
+    // tracking), and moves then reach no procedure.
+    (void)press(dialog, rect.left + 3, rect.top + 3);
+    assert(dialog.has_pointer_capture());
+    assert(!dialog.pointer({DialogPointer::Kind::move, 20, 30}).signal);
+    (void)release(dialog, 700, 700);
+    assert(!dialog.has_pointer_capture());
+    // WM_CTLCOLORSCROLLBAR: the trough takes the dialog's brush.
+    const auto image = render(dialog);
+    assert(count(image, rect, 0xFFFFFFU) > 500);
+    assert(count(image, {rect.left + 1, rect.top + 20, rect.right - 1,
+                         rect.bottom - 40},
+                 simtower::sdl::style::kButtonFace) == 0);
+  }
+  {
+    // SetCapture + ClipCursor: every move reaches the procedure, clamped
+    // into the client.
+    DialogDescriptor descriptor{};
+    descriptor.font_pixels = kPixels;
+    descriptor.mouse_move = move_signal;
+    descriptor.capture_pointer = true;
+    descriptor.clip_pointer = true;
+    descriptor.placement = simtower::sdl::DialogPlacement::at;
+    descriptor.origin_x = 50;
+    descriptor.origin_y = 60;
+    DialogWindow popup(descriptor, {}, {}, 82, 67, 0U);
+    popup.place(1000, 1000);
+    assert(popup.client_x() == 50 && popup.client_y() == 60);
+    assert(popup.has_pointer_capture());
+    const auto far = popup.pointer({DialogPointer::Kind::move, 0, 900}).signal;
+    assert(far && far->x == 0 && far->y == 66);
+    const auto right =
+        popup.pointer({DialogPointer::Kind::move, 400, 70}).signal;
+    assert(right && right->x == 81 && right->y == 10);
+  }
+  {
+    // 11e0:0b52 with requested left 8 on the fixed 1024x768 desktop: the
+    // 202x448 Elevator Control outer rectangle lands at (8, 160) while it
+    // fits the window; a shorter window (TEMP) moves it up to keep the
+    // bottom edge inside, a window shorter than the panel too.
+    DialogDescriptor descriptor{};
+    descriptor.placement = simtower::sdl::DialogPlacement::fixed_desktop;
+    descriptor.requested_left = 8;
+    descriptor.frame = {1, 19, 1, 1};
+    DialogWindow panel(descriptor, {}, {}, 200, 428, 0U);
+    for (const auto& [w, h] : {std::pair{1019, 628}, std::pair{1024, 608}}) {
+      panel.place(w, h);
+      assert(panel.outer() == (simtower::sdl::PanelRect{8, 160, 202, 448}));
+      assert(panel.client_x() == 9 && panel.client_y() == 179);
+    }
+    panel.place(640, 480);
+    assert(panel.outer() == (simtower::sdl::PanelRect{8, 32, 202, 448}));
+    panel.place(400, 300);
+    assert(panel.outer() == (simtower::sdl::PanelRect{8, -148, 202, 448}));
+    panel.place(200, 300);
+    assert(panel.outer() == (simtower::sdl::PanelRect{-2, -148, 202, 448}));
+  }
 }
 
 // --- Dialog manager -----------------------------------------------------
@@ -679,6 +782,7 @@ int main() {
   combo_tests();
   scroll_bar_tests();
   group_tests();
+  modeless_tests();
   std::printf("sdl widget tests passed\n");
   return 0;
 }

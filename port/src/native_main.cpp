@@ -11,6 +11,7 @@
 #include "original_dtmp.hpp"
 #include "original_dtmp_runtime_win32.hpp"
 #include "original_elevator_control.hpp"
+#include "original_elevator_control_controller.hpp"
 #include "original_finance.hpp"
 #include "original_find.hpp"
 #include "original_font_win32.hpp"
@@ -340,12 +341,16 @@ struct OriginalMainBackingSurface {
 OriginalMainBackingSurface g_original_main_backing{};
 
 struct OriginalElevatorControlDialogContext {
-  simtower::OriginalDtmp dtmp{};
-  simtower::OriginalElevatorControlState state{};
+  OriginalElevatorControlDialogContext(simtower::OriginalDtmp dtmp,
+                                       simtower::OriginalElevatorControlState
+                                           state)
+      : controller(std::move(dtmp), std::move(state)) {}
+  // ELVDLOGMAIN's DTMP, DS:b3a6..b3ae state and DS:31b4 pressed item,
+  // shared with the SDL host (original_elevator_control_controller.hpp).
+  simtower::OriginalElevatorControlController controller;
   std::int16_t initial_pointer_x{};
   std::int16_t initial_pointer_y{};
   std::int16_t requested_left{8};
-  int pressed_item{-1};  // DS:31b4, FFFF while no control is pressed.
 };
 
 std::unique_ptr<OriginalElevatorControlDialogContext>
@@ -886,7 +891,7 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
   bool fast_mode_enabled() override { return g_fast_mode_enabled; }
   bool elevator_isolation_active() override {
     return g_elevator_control_context &&
-           g_elevator_control_context->state.isolation_active;
+           g_elevator_control_context->controller.state().isolation_active;
   }
   bool ambient_sound_enabled() override {
     return g_audio && g_audio->sound_enabled();
@@ -987,7 +992,7 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
     // their inputs (see original_preview_only_pass_plan).
     const bool isolation_active =
         g_elevator_control_context &&
-        g_elevator_control_context->state.isolation_active;
+        g_elevator_control_context->controller.state().isolation_active;
     const auto plan = simtower::original_preview_only_pass_plan(
         g_world_input, isolation_active, previous_preview_rect_,
         current_original_main_preview_rect());
@@ -1040,7 +1045,7 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
   void restore_preview() override {
     const bool elevator_isolation_active =
         g_elevator_control_context &&
-        g_elevator_control_context->state.isolation_active;
+        g_elevator_control_context->controller.state().isolation_active;
     const auto preview_restore =
         simtower::original_construction_preview_restore_plan(
             g_world_input.preview_scratch, elevator_isolation_active,
@@ -2832,29 +2837,6 @@ HFONT make_original_dialog_font(int pixel_height) {
       static_cast<std::int16_t>(pixel_height));
 }
 
-const simtower::OriginalDtmpRect* original_elevator_control_rectangle(
-    const OriginalElevatorControlDialogContext& context,
-    std::size_t one_based_index) {
-  if (one_based_index == 0U ||
-      one_based_index > context.dtmp.rectangles.size()) {
-    return nullptr;
-  }
-  return &context.dtmp.rectangles[one_based_index - 1U];
-}
-
-RECT original_native_rectangle(const simtower::OriginalDtmpRect& source) {
-  return {static_cast<LONG>(source.left), static_cast<LONG>(source.top),
-          static_cast<LONG>(source.right), static_cast<LONG>(source.bottom)};
-}
-
-bool original_point_in_rectangle(const simtower::OriginalDtmpRect& rectangle,
-                                 int x,
-                                 int y) {
-  return rectangle.left != 0xffffU && rectangle.top != 0xffffU &&
-         x >= rectangle.left && x < rectangle.right &&
-         y >= rectangle.top && y < rectangle.bottom;
-}
-
 void size_original_dialog_client(HWND dialog,
                                  int client_width,
                                  int client_height,
@@ -2870,336 +2852,136 @@ void size_original_dialog_client(HWND dialog,
                SWP_NOACTIVATE | SWP_NOZORDER);
 }
 
-void draw_original_elevator_control_region(
-    HDC dc,
-    int bitmap_id,
-    const simtower::OriginalDtmpRect& rectangle) {
-  simtower::draw_original_dib_region(
-      dc, g_resources.find("BITMAP", bitmap_id), rectangle.left,
-      rectangle.top, rectangle.left, rectangle.top,
-      static_cast<int>(rectangle.right) - rectangle.left,
-      static_cast<int>(rectangle.bottom) - rectangle.top);
-}
-
-void paint_original_elevator_control_grid(
-    HDC dc,
-    const OriginalElevatorControlDialogContext& context,
-    const simtower::OriginalTdtDocument& document) {
-  // Exact 1098:16a4 grid-frame and line-count geometry.
-  if (!context.state.valid ||
-      context.state.elevator_index >= document.elevators.size()) {
-    return;
+// The Win32 side of the shared ELVDLOGMAIN controller: its dialog ops over
+// the HWND (InvalidateRect / UpdateWindow / the scroll bar's EnableWindow,
+// SetScrollRange without redraw at WM_INITDIALOG, SetScrollPos with
+// redraw) and its host over the native globals, each the USER call the
+// procedure made inline before it shared the controller.
+class Win32ElevatorControlOps final : public simtower::OriginalDialogOps {
+ public:
+  explicit Win32ElevatorControlOps(HWND dialog) : dialog_(dialog) {}
+  void show_item(std::uint16_t id, bool shown) override {
+    ShowWindow(GetDlgItem(dialog_, id), shown ? SW_SHOW : SW_HIDE);
   }
-  const auto& elevator =
-      document.elevators[context.state.elevator_index];
-  const auto* grid_source = original_elevator_control_rectangle(context, 6U);
-  if (!grid_source) return;
-  RECT grid = original_native_rectangle(*grid_source);
-  HBRUSH black = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-  HBRUSH white = static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
-  FrameRect(dc, &grid, black);
-
-  HPEN pen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
-  HGDIOBJ previous_pen = pen ? SelectObject(dc, pen) : nullptr;
-  int active_columns = 0;
-  for (const auto& car : elevator.car_records) {
-    if (car.exact_bytes[15] != std::byte{0}) ++active_columns;
+  void invalidate() override { InvalidateRect(dialog_, nullptr, FALSE); }
+  void update_window() override { UpdateWindow(dialog_); }
+  void resize(int, int) override {}
+  void enable_item(std::uint16_t id, bool enabled) override {
+    EnableWindow(GetDlgItem(dialog_, id), enabled);
   }
-  for (int line_index = 1; line_index <= active_columns + 1;
-       ++line_index) {
-    const int x = grid.left + line_index *
-        simtower::kOriginalElevatorControlCellSize;
-    MoveToEx(dc, x, grid.top, nullptr);
-    LineTo(dc, x, grid.bottom - 1);
+  void set_scroll_range(std::uint16_t id, int min, int max) override {
+    SetScrollRange(GetDlgItem(dialog_, id), SB_CTL, min, max, FALSE);
   }
-  for (int line_index = 1;
-       line_index < simtower::kOriginalElevatorControlVisibleFloors;
-       ++line_index) {
-    const int y = grid.top + line_index *
-        simtower::kOriginalElevatorControlCellSize;
-    MoveToEx(dc, grid.left, y, nullptr);
-    LineTo(dc, grid.right - 1, y);
+  void set_scroll_pos(std::uint16_t id, int position) override {
+    SetScrollPos(GetDlgItem(dialog_, id), SB_CTL, position, TRUE);
   }
 
-  const auto old_alignment = SetTextAlign(dc, TA_LEFT | TA_TOP);
-  const auto old_background_mode = SetBkMode(dc, TRANSPARENT);
-  const auto old_text_color = GetTextColor(dc);
-  const auto old_background_color = GetBkColor(dc);
-  HFONT floor_font = make_original_dialog_font(13);
-  HFONT small_floor_font = make_original_dialog_font(9);
-  HGDIOBJ old_font = floor_font ? SelectObject(dc, floor_font) : nullptr;
+ private:
+  HWND dialog_{};
+};
 
-  // Exact 1098:17c7/1895 fifteen-row label cells: above-shaft gray, served
-  // floors black/white, unserved floors crossed, and three-digit font inset.
-  for (std::int16_t row = 0;
-       row < simtower::kOriginalElevatorControlVisibleFloors; ++row) {
-    const auto cell_source =
-        simtower::original_elevator_control_cell_rect(-1, row);
-    RECT cell = original_native_rectangle(cell_source);
-    const auto floor_plan =
-        simtower::original_elevator_control_floor_cell_plan(
-            elevator, context.state, row);
-    const auto floor = floor_plan.floor;
-    if (floor_plan.above_top) {
-      HBRUSH gray = CreateSolidBrush(RGB(136, 136, 136));
-      if (gray) {
-        FillRect(dc, &cell, gray);
-        DeleteObject(gray);
-      }
-      continue;
-    }
+int run_original_elevator_popup(HWND owner,
+                                const simtower::OriginalDtmpRect&
+                                    phase_rectangle,
+                                std::size_t phase_item,
+                                std::uint8_t mode);
 
-    const bool serviced = floor_plan.serviced;
-    FillRect(dc, &cell, serviced ? black : white);
-    SetTextColor(dc, serviced ? RGB(255, 255, 255) : RGB(0, 0, 0));
-    SetBkColor(dc, serviced ? RGB(0, 0, 0) : RGB(255, 255, 255));
-
-    const auto label = original_cp1252_to_wide(floor_plan.label);
-    if (floor_plan.small_font && small_floor_font) {
-      SelectObject(dc, small_floor_font);
-    } else if (floor_font) {
-      SelectObject(dc, floor_font);
-    }
-    SIZE extent{};
-    GetTextExtentPoint32W(dc, label.data(), static_cast<int>(label.size()),
-                          &extent);
-    const int x = cell.left +
-                  ((cell.right - cell.left - extent.cx) / 2) +
-                  floor_plan.horizontal_inset;
-    const int y = cell.top + floor_plan.vertical_inset;
-    TextOutW(dc, x, y, label.data(), static_cast<int>(label.size()));
-
-    if (!serviced) {
-      // Exact 1098:226e BLACK_PEN diagonals, ending at right-1/bottom-1.
-      MoveToEx(dc, cell.left, cell.top, nullptr);
-      LineTo(dc, cell.right - 1, cell.bottom - 1);
-      MoveToEx(dc, cell.right - 1, cell.top, nullptr);
-      LineTo(dc, cell.left, cell.bottom - 1);
+class Win32ElevatorControlHost final
+    : public simtower::OriginalElevatorControlHost {
+ public:
+  explicit Win32ElevatorControlHost(HWND dialog) : dialog_(dialog) {}
+  simtower::OriginalTdtDocument* document() override {
+    return g_tower_document ? &*g_tower_document : nullptr;
+  }
+  const simtower::OriginalPartTable& part() override { return g_part; }
+  const simtower::OriginalYenTable& rent_income() override {
+    return g_rent_income;
+  }
+  bool& build_mode() override { return g_world_input.build_mode_enabled; }
+  int alert(int alert_id, std::uint16_t strl_id,
+            std::uint16_t strl_index) override {
+    const auto text = simtower::original_strl_entry(
+        g_resources.find("STRL", strl_id), strl_index);
+    return simtower::show_original_alert(dialog_, g_resources, alert_id,
+                                         {text, {}, {}, {}});
+  }
+  int popup(const simtower::OriginalDtmpRect& phase_rectangle,
+            std::size_t phase_item, std::uint8_t original_mode) override {
+    return run_original_elevator_popup(dialog_, phase_rectangle, phase_item,
+                                       original_mode);
+  }
+  void consume_family_dispatches(
+      std::span<const simtower::OriginalPersonFamilyDispatchResult>
+          dispatches) override {
+    consume_original_person_family_dispatches(
+        {dispatches.begin(), dispatches.end()});
+  }
+  void play_movement_sound() override {
+    if (g_audio) {
+      (void)g_audio->play_resource(
+          simtower::kOriginalElevatorControlMovementSound, 0U, 0U,
+          GetTickCount());
     }
   }
-
-  if (old_font) SelectObject(dc, old_font);
-  SetTextColor(dc, old_text_color);
-  SetBkColor(dc, old_background_color);
-  SetBkMode(dc, old_background_mode);
-  SetTextAlign(dc, old_alignment);
-
-  std::int16_t visual_column = 0;
-  for (std::size_t car_index = 0U;
-       car_index < elevator.car_records.size(); ++car_index) {
-    // Exact 1098:1f45/1f9d walk all eight raw car records, compact the active
-    // columns, and call 1e33 for selected/unselected current-floor refreshes.
-    // Painting every visible row here performs both traversals in one pass.
-    if (elevator.car_records[car_index].exact_bytes[15] == std::byte{0}) {
-      continue;
-    }
-    for (std::int16_t row = 0;
-         row < simtower::kOriginalElevatorControlVisibleFloors; ++row) {
-      const auto floor = simtower::original_elevator_control_visible_floor(
-          elevator, context.state, row);
-      const auto bitmap = simtower::original_elevator_control_car_bitmap(
-          document, context.state.elevator_index, car_index, floor);
-      if (bitmap == 0U) continue;
-      const auto cell = simtower::original_elevator_control_cell_rect(
-          visual_column, row);
-      // 11e0:0430 clips the original 16x16 DIB to this 12x12 grid cell.
-      simtower::draw_original_dib_region(
-          dc, g_resources.find("BITMAP", bitmap), cell.left, cell.top,
-          0, 0, cell.right - cell.left, cell.bottom - cell.top);
-    }
-
-    // 1098:1e33 frames the car's current floor, not its configured home.
-    if (const auto frame =
-            simtower::original_elevator_control_current_car_frame(
-                document, context.state, car_index, visual_column)) {
-      RECT cell = original_native_rectangle(*frame);
-      FrameRect(dc, &cell, black);
-    }
-    ++visual_column;
+  void rebuild_main_without_sky() override {
+    request_original_main_surface_pass(
+        simtower::OriginalMainSurfacePass::rebuild_without_sky, true);
   }
-
-  if (pen) {
-    SelectObject(dc, previous_pen);
-    DeleteObject(pen);
+  void clear_transfer_visuals() override {
+    g_elevator_transfer_visuals.clear();
   }
-}
-
-void paint_original_elevator_control(
-    HWND dialog,
-    HDC dc,
-    const OriginalElevatorControlDialogContext& context) {
-  // Native direct-DIB translation of the complete 1098:0068 painter and
-  // 1098:12e9 full refresh orchestration. The original staged BITMAP/400/401
-  // and small overlays through temporary Win16 DCs; rectangle selection,
-  // invalidated regions, layer order, text, and grid are kept by one paint.
-  simtower::draw_original_dib(
-      dc, g_resources.find("BITMAP", 400), 0, 0);
-  if (!g_tower_document || !context.state.valid ||
-      context.state.elevator_index >= g_tower_document->elevators.size()) {
-    return;
-  }
-  const auto& elevator =
-      g_tower_document->elevators[context.state.elevator_index];
-
-  if (context.state.isolation_active) {
-    if (const auto* rectangle =
-            original_elevator_control_rectangle(context, 2U)) {
-      draw_original_elevator_control_region(dc, 410, *rectangle);
-    }
-  }
-  // Exact native presentation boundary for 1098:13e4: after a schedule-bank
-  // change, the Win16 build erased/invalidated these two DTMP button regions.
-  // The direct-DIB painter redraws the selected BITMAP/401 region on demand.
-  if (const auto* rectangle = original_elevator_control_rectangle(
-          context, 12U + context.state.schedule_bank)) {
-    draw_original_elevator_control_region(dc, 401, *rectangle);
-  }
-  if (context.pressed_item == 1) {
-    if (const auto* rectangle =
-            original_elevator_control_rectangle(context, 1U)) {
-      draw_original_elevator_control_region(dc, 401, *rectangle);
-    }
-  } else if (context.pressed_item == 2) {
-    if (const auto* rectangle =
-            original_elevator_control_rectangle(context, 2U)) {
-      draw_original_elevator_control_region(
-          dc, context.state.isolation_active ? 411 : 401, *rectangle);
-    }
-  }
-
-  // Exact 1098:1502 six-phase schedule buttons and 1098:1498 selected-phase
-  // double frame.
-  for (std::uint8_t phase = 0U; phase < 6U; ++phase) {
-    if (const auto* rectangle =
-            original_elevator_control_rectangle(context, 23U + phase)) {
-      const auto mode = std::min<std::uint8_t>(
-          2U, std::to_integer<std::uint8_t>(elevator.schedule[
-                  simtower::original_elevator_control_schedule_index(
-                      28U, context.state.schedule_bank, phase)]));
-      simtower::draw_original_dib(
-          dc, g_resources.find("BITMAP", 402U + mode),
-          rectangle->left, rectangle->top);
-    }
-  }
-  if (const auto* selected = original_elevator_control_rectangle(
-          context, 23U + context.state.day_phase)) {
-    RECT frame = original_native_rectangle(*selected);
-    HBRUSH black = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-    FrameRect(dc, &frame, black);
-    InflateRect(&frame, -1, -1);
-    FrameRect(dc, &frame, black);
-  }
-  if (const auto* rectangle =
-          original_elevator_control_rectangle(context, 5U)) {
-    simtower::draw_original_dib(
-        dc,
-        g_resources.find(
-            "BITMAP",
-            simtower::original_elevator_control_show_bitmap(elevator)),
-        rectangle->left, rectangle->top);
-  }
-
-  const auto old_alignment = SetTextAlign(dc, TA_LEFT | TA_TOP);
-  const auto old_background_mode = SetBkMode(dc, TRANSPARENT);
-  const auto old_text = SetTextColor(dc, RGB(0, 0, 0));
-  const auto old_background = SetBkColor(dc, RGB(255, 255, 255));
-  HFONT font = make_original_dialog_font(16);
-  HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
-  // Exact 1098:27bd/2893 Elevator-control DTMP 41 waiting count and DTMP 42
-  // departure-delay text fields.
-  const std::array values{
-      std::pair<std::size_t, std::string>{
-          41U, simtower::original_elevator_control_waiting_text(
-                   elevator, context.state)},
-      std::pair<std::size_t, std::string>{
-          42U, simtower::original_elevator_control_departure_text(
-                   elevator, context.state)},
-  };
-  for (const auto& [index, value] : values) {
-    const auto* rectangle =
-        original_elevator_control_rectangle(context, index);
-    if (!rectangle) continue;
-    const auto wide = original_cp1252_to_wide(value);
-    TextOutW(dc, static_cast<int>(rectangle->left) + 2,
-             static_cast<int>(rectangle->top) + 3,
-             wide.data(), static_cast<int>(wide.size()));
-  }
-  if (font) {
-    SelectObject(dc, old_font);
-  }
-  SetTextColor(dc, old_text);
-  SetBkColor(dc, old_background);
-  SetBkMode(dc, old_background_mode);
-  SetTextAlign(dc, old_alignment);
-
-  paint_original_elevator_control_grid(dc, context, *g_tower_document);
-  (void)dialog;
-}
-
-int original_elevator_control_hit_item(
-    const OriginalElevatorControlDialogContext& context,
-    LPARAM position) {
-  const int x = static_cast<std::int16_t>(LOWORD(position));
-  const int y = static_cast<std::int16_t>(HIWORD(position));
-  for (std::size_t item = 1U; item <= 28U; ++item) {
-    const auto* rectangle =
-        original_elevator_control_rectangle(context, item);
-    if (rectangle && original_point_in_rectangle(*rectangle, x, y)) {
-      return static_cast<int>(item);
-    }
-  }
-  return -1;
-}
-
-void refresh_original_elevator_control_scrollbar(
-    HWND dialog,
-    const OriginalElevatorControlDialogContext& context) {
-  HWND scrollbar = GetDlgItem(dialog, 7);
-  if (!scrollbar) return;
-  const bool enabled =
-      simtower::original_elevator_control_has_scrollbar(context.state);
-  EnableWindow(scrollbar, enabled);
-  if (enabled) {
-    SetScrollRange(scrollbar, SB_CTL, context.state.scroll_min,
-                   context.state.scroll_max, FALSE);
-    SetScrollPos(scrollbar, SB_CTL, context.state.scroll_position, TRUE);
-  }
-}
-
-void mark_original_elevator_control_changed(HWND dialog,
-                                            bool world_changed) {
-  g_tower_dirty = true;
-  InvalidateRect(dialog, nullptr, FALSE);
-  if (world_changed) {
-    invalidate_original_main_surface();
-    InvalidateRect(g_info_window, nullptr, FALSE);
+  void mark_document_dirty() override { g_tower_dirty = true; }
+  void invalidate_main() override { invalidate_original_main_surface(); }
+  void invalidate_map() override {
     InvalidateRect(g_map_window, nullptr, FALSE);
   }
-}
+  void invalidate_info() override {
+    InvalidateRect(g_info_window, nullptr, FALSE);
+  }
+  void invalidate_command() override {
+    InvalidateRect(g_command_window, nullptr, FALSE);
+  }
+  void enable_window(simtower::OriginalElevatorControlCloseWindow window,
+                     bool enabled) override {
+    HWND target = nullptr;
+    switch (window) {
+      case simtower::OriginalElevatorControlCloseWindow::command:
+        target = g_command_window;
+        break;
+      case simtower::OriginalElevatorControlCloseWindow::map:
+        target = g_map_window;
+        break;
+      case simtower::OriginalElevatorControlCloseWindow::info:
+        target = g_info_window;
+        break;
+      case simtower::OriginalElevatorControlCloseWindow::main:
+        target = g_main_window;
+        break;
+    }
+    EnableWindow(target, enabled);
+  }
+  void unpublish() override {
+    if (dialog_ == g_elevator_control_window) {
+      g_elevator_control_window = nullptr;
+    }
+  }
+  void activate_main() override {
+    if (g_main_window) SetActiveWindow(g_main_window);
+  }
+  void destroy() override { DestroyWindow(dialog_); }
+
+ private:
+  HWND dialog_{};
+};
 
 struct OriginalElevatorPopupContext {
-  std::uint8_t original_mode{};
-  std::int16_t hover_mode{-1};
+  explicit OriginalElevatorPopupContext(std::uint8_t mode)
+      : controller(mode) {}
+  // ELVPOPUP's hover and original mode, shared with the SDL host.
+  simtower::OriginalElevatorPopupController controller;
   std::size_t phase_item{};
   POINT phase_screen{};
 };
-
-void paint_original_elevator_popup(HDC dc,
-                                   const OriginalElevatorPopupContext& context) {
-  simtower::draw_original_dib(
-      dc, g_resources.find("BITMAP", 405), 0, 0);
-  if (context.hover_mode < 0) return;
-  const auto highlight = simtower::original_elevator_control_popup_highlight(
-      static_cast<std::uint8_t>(context.hover_mode),
-      simtower::kOriginalElevatorControlPopupWidth,
-      simtower::kOriginalElevatorControlPopupHeight);
-  if (!highlight) return;
-  const int top = static_cast<int>(highlight->top);
-  simtower::draw_original_dib_region(
-      dc, g_resources.find("BITMAP", 406), 0, top, 0, top,
-      static_cast<int>(highlight->right - highlight->left),
-      static_cast<int>(highlight->bottom - highlight->top));
-}
 
 // Native message boundary for exported ELVPOPUP at 1098:22f8.
 INT_PTR CALLBACK elevator_popup_dialog_proc(HWND dialog, UINT message,
@@ -3215,7 +2997,8 @@ INT_PTR CALLBACK elevator_popup_dialog_proc(HWND dialog, UINT message,
         dialog, simtower::kOriginalElevatorControlPopupWidth,
         simtower::kOriginalElevatorControlPopupHeight,
         context->phase_screen.x,
-        context->phase_screen.y - context->original_mode * row_height);
+        context->phase_screen.y -
+            context->controller.original_mode() * row_height);
     SetCapture(dialog);
     RECT client{};
     GetClientRect(dialog, &client);
@@ -3242,244 +3025,78 @@ INT_PTR CALLBACK elevator_popup_dialog_proc(HWND dialog, UINT message,
     case WM_PAINT: {
       PAINTSTRUCT paint{};
       HDC dc = BeginPaint(dialog, &paint);
-      if (dc && context) paint_original_elevator_popup(dc, *context);
+      if (dc && context) {
+        // The shared ELVPOPUP painter (elevator_control_painter_parity_tests
+        // proves it paints what the direct GDI copy did).
+        try {
+          simtower::OriginalGdiDrawContext draw(
+              dc, simtower::kOriginalDialogGdiFailureText);
+          simtower::paint_original_elevator_popup(
+              draw, g_resources, context->controller.hover_mode());
+        } catch (const std::exception&) {
+        }
+      }
       EndPaint(dialog, &paint);
       return TRUE;
     }
     case WM_MOUSEMOVE:
-      if (context) {
-        const int x = static_cast<std::int16_t>(LOWORD(lparam));
-        const int y = static_cast<std::int16_t>(HIWORD(lparam));
-        const auto selection =
-            simtower::original_elevator_control_popup_selection(
-                x, y, simtower::kOriginalElevatorControlPopupWidth,
-                simtower::kOriginalElevatorControlPopupHeight);
-        // 1098:2675 shares its out-of-bounds leg with 26b2's commit/close
-        // path. ClipCursor normally makes this rare, but synthetic motion and
-        // capture transitions retain the original behavior.
-        if (!selection) {
-          ClipCursor(nullptr);
-          ReleaseCapture();
-          EndDialog(dialog, context->original_mode);
-          return TRUE;
-        }
-        if (static_cast<std::int16_t>(*selection) != context->hover_mode) {
-          context->hover_mode = static_cast<std::int16_t>(*selection);
-          InvalidateRect(dialog, nullptr, FALSE);
-          UpdateWindow(dialog);
-        }
-      }
-      return TRUE;
     case WM_LBUTTONUP:
+    case WM_RBUTTONUP: {
+      // 1098:2675 shares its out-of-bounds move leg with 26b2's commit /
+      // close path; ClipCursor normally makes it rare, but synthetic
+      // motion and capture transitions retain the original behavior.
+      simtower::OriginalDialogSignal signal{
+          message == WM_MOUSEMOVE
+              ? simtower::OriginalDialogSignal::Kind::mouse_move
+              : message == WM_LBUTTONUP
+                    ? simtower::OriginalDialogSignal::Kind::button_up
+                    : simtower::OriginalDialogSignal::Kind::right_button_up};
+      signal.x = static_cast<std::int16_t>(LOWORD(lparam));
+      signal.y = static_cast<std::int16_t>(HIWORD(lparam));
+      std::optional<int> result{};
       if (context) {
-        const int x = static_cast<std::int16_t>(LOWORD(lparam));
-        const int y = static_cast<std::int16_t>(HIWORD(lparam));
-        const auto selection =
-            simtower::original_elevator_control_popup_selection(
-                x, y, simtower::kOriginalElevatorControlPopupWidth,
-                simtower::kOriginalElevatorControlPopupHeight);
+        Win32ElevatorControlOps ops(dialog);
+        result = context->controller.signal(signal, ops).result;
+      } else if (message == WM_RBUTTONUP) {
+        result = 0;
+      }
+      if (result) {
         ClipCursor(nullptr);
         ReleaseCapture();
-        EndDialog(dialog, selection.value_or(context->original_mode));
+        EndDialog(dialog, *result);
       }
       return TRUE;
-    case WM_RBUTTONUP:
-      ClipCursor(nullptr);
-      ReleaseCapture();
-      EndDialog(dialog, context ? context->original_mode : 0);
-      return TRUE;
+    }
   }
   return FALSE;
 }
 
-std::uint8_t run_original_elevator_popup(
+int run_original_elevator_popup(
     HWND owner,
-    const OriginalElevatorControlDialogContext& context,
-    std::size_t phase_item) {
-  if (!g_tower_document ||
-      context.state.elevator_index >= g_tower_document->elevators.size()) {
-    return 0U;
-  }
-  const auto* rectangle =
-      original_elevator_control_rectangle(context, phase_item);
-  if (!rectangle) return 0U;
-  POINT phase_screen{static_cast<LONG>(rectangle->left),
-                     static_cast<LONG>(rectangle->top)};
+    const simtower::OriginalDtmpRect& phase_rectangle,
+    std::size_t phase_item,
+    std::uint8_t mode) {
+  POINT phase_screen{static_cast<LONG>(phase_rectangle.left),
+                     static_cast<LONG>(phase_rectangle.top)};
   ClientToScreen(owner, &phase_screen);
-  const auto& elevator =
-      g_tower_document->elevators[context.state.elevator_index];
-  auto popup_state = context.state;
-  popup_state.day_phase = static_cast<std::uint8_t>(phase_item - 23U);
-  const auto mode = std::min<std::uint8_t>(
-      2U, simtower::original_elevator_control_floor_mode(
-              elevator, popup_state));
   // ELVPOPUP initializes DS:1fb2 to -1 and does not composite a highlight
   // until WM_MOUSEMOVE selects a band.
-  OriginalElevatorPopupContext popup{mode, -1, phase_item, phase_screen};
+  OriginalElevatorPopupContext popup(mode);
+  popup.phase_item = phase_item;
+  popup.phase_screen = phase_screen;
   const auto original = simtower::parse_original_dialog(
-      g_resources.find("DIALOG", 124));
+      g_resources.find("DIALOG", simtower::kOriginalElevatorPopupDialogId));
   const auto native = simtower::build_native_dialog_template(original);
-  const int result = static_cast<int>(run_original_modal_dialog(
+  // The controller keeps 0..2 and maps any other result to the mode.
+  return static_cast<int>(run_original_modal_dialog(
       g_instance, reinterpret_cast<const DLGTEMPLATE*>(native.data()),
       owner, elevator_popup_dialog_proc,
       reinterpret_cast<LPARAM>(&popup)));
-  return result >= 0 && result <= 2
-             ? static_cast<std::uint8_t>(result)
-             : mode;
 }
 
-void run_original_elevator_control_grid_action(
-    HWND dialog,
-    OriginalElevatorControlDialogContext& context,
-    LPARAM position) {
-  // Exact native boundary for 1098:1ff5: scan the 15 visible rows and eight
-  // cars, apply the service-floor/car-home action, and repaint the affected
-  // cell with the original scrolling coordinate transform.
-  if (!g_tower_document) return;
-  const int x = static_cast<std::int16_t>(LOWORD(position));
-  const int y = static_cast<std::int16_t>(HIWORD(position));
-  const auto hit = simtower::original_elevator_control_grid_hit(
-      *g_tower_document, context.state, x, y);
-  if (!hit.hit()) return;
-  if (context.state.isolation_active) {
-    const auto text = simtower::original_strl_entry(
-        g_resources.find("STRL", 1004), 1U);
-    (void)simtower::show_original_alert(
-        dialog, g_resources, 1000, {text, {}, {}, {}});
-    return;
-  }
-
-  bool changed = false;
-  if (hit.kind ==
-      simtower::OriginalElevatorControlGridKind::service_floor) {
-    const auto elevator_index = context.state.elevator_index;
-    const auto floor = hit.floor;
-    const auto& elevator = g_tower_document->elevators[elevator_index];
-    const bool serviced =
-        floor >= 0 && floor < 120 &&
-        elevator.serviced_floors[static_cast<std::size_t>(floor)] !=
-            std::byte{0};
-    if (!serviced) {
-      changed = simtower::original_elevator_control_add_service_floor(
-          *g_tower_document, elevator_index, floor);
-    } else {
-      const auto warning =
-          simtower::original_elevator_service_floor_warning_code(
-              *g_tower_document, elevator_index, floor);
-      if (warning != 0U) {
-        const auto text = simtower::original_strl_entry(
-            g_resources.find("STRL", 1005), warning);
-        if (simtower::show_original_alert(
-                dialog, g_resources, 1005, {text, {}, {}, {}}) == 2) {
-          return;
-        }
-      }
-      const auto removal =
-          simtower::original_elevator_control_remove_service_floor(
-              *g_tower_document, elevator_index, floor, g_part,
-              g_rent_income);
-      changed = removal.cleanup.status ==
-          simtower::OriginalElevatorFloorPeopleCleanupStatus::cleaned;
-      if (changed) {
-        consume_original_person_family_dispatches(
-            removal.family_dispatches);
-      }
-    }
-  } else if (hit.kind ==
-             simtower::OriginalElevatorControlGridKind::car) {
-    changed = simtower::original_elevator_control_set_car_home(
-        *g_tower_document, context.state.elevator_index,
-        static_cast<std::size_t>(hit.car_index), hit.floor);
-  }
-  if (changed) mark_original_elevator_control_changed(dialog, true);
-}
-
-void resume_original_elevator_control(
-    HWND dialog,
-    OriginalElevatorControlDialogContext& context) {
-  if (!g_tower_document || !context.state.isolation_active) return;
-  if (simtower::resume_original_elevator_control_isolation(
-          *g_tower_document, context.state, g_world_input.build_mode_enabled)) {
-    g_elevator_transfer_visuals.clear();
-    InvalidateRect(dialog, nullptr, FALSE);
-    invalidate_original_main_surface();
-    InvalidateRect(g_map_window, nullptr, FALSE);
-    InvalidateRect(g_info_window, nullptr, FALSE);
-    InvalidateRect(g_command_window, nullptr, FALSE);
-  }
-}
-
-void toggle_original_elevator_control_simulation(
-    HWND dialog,
-    OriginalElevatorControlDialogContext& context) {
-  if (!g_tower_document) return;
-  if (context.state.isolation_active) {
-    resume_original_elevator_control(dialog, context);
-    return;
-  }
-  if (!simtower::begin_original_elevator_control_isolation(
-          *g_tower_document, context.state, g_world_input.build_mode_enabled)) {
-    return;
-  }
-  const auto preview = simtower::prepare_original_elevator_control_preview(
-      *g_tower_document, context.state, g_part, g_rent_income);
-  if (!preview.prepared) {
-    const auto text = simtower::original_strl_entry(
-        g_resources.find("STRL", 1004), 2U);
-    (void)simtower::show_original_alert(
-        dialog, g_resources, 1000, {text, {}, {}, {}});
-    resume_original_elevator_control(dialog, context);
-    return;
-  }
-  for (std::size_t index = 0U;
-       index < preview.movement_sound_requests; ++index) {
-    if (g_audio) {
-      (void)g_audio->play_resource(0x1772U, 0U, 0U, GetTickCount());
-    }
-  }
-  // 10f0:0090-0097 calls 1080:0a1e(0) after masking the isolated Elevator.
-  request_original_main_surface_pass(
-      simtower::OriginalMainSurfacePass::rebuild_without_sky, true);
-  InvalidateRect(dialog, nullptr, FALSE);
-  InvalidateRect(g_command_window, nullptr, FALSE);
-}
-
-void close_original_elevator_control(
-    HWND dialog,
-    OriginalElevatorControlDialogContext& context) {
-  const auto plan = simtower::original_elevator_control_close_plan();
-  if (plan.resume_isolation) {
-    resume_original_elevator_control(dialog, context);
-  }
-  if (plan.clear_published_window_before_destroy &&
-      dialog == g_elevator_control_window) {
-    g_elevator_control_window = nullptr;
-  }
-  for (const auto window : plan.enable_order) {
-    HWND target = nullptr;
-    switch (window) {
-      case simtower::OriginalElevatorControlCloseWindow::command:
-        target = g_command_window;
-        break;
-      case simtower::OriginalElevatorControlCloseWindow::map:
-        target = g_map_window;
-        break;
-      case simtower::OriginalElevatorControlCloseWindow::info:
-        target = g_info_window;
-        break;
-      case simtower::OriginalElevatorControlCloseWindow::main:
-        target = g_main_window;
-        break;
-    }
-    EnableWindow(target, TRUE);
-  }
-  if (plan.explicitly_activate_main && g_main_window) {
-    SetActiveWindow(g_main_window);
-  }
-  DestroyWindow(dialog);
-}
-
-// Native message boundary for exported ELVDLOGMAIN at 1098:0628.
+// Native message boundary for exported ELVDLOGMAIN at 1098:0628. The item
+// actions, scrolling and close run through the shared controller; window
+// creation, placement, painting, WM_CTLCOLOR and WM_ACTIVATE stay here.
 INT_PTR CALLBACK elevator_control_dialog_proc(HWND dialog, UINT message,
                                                WPARAM wparam,
                                                LPARAM lparam) {
@@ -3488,10 +3105,8 @@ INT_PTR CALLBACK elevator_control_dialog_proc(HWND dialog, UINT message,
         lparam);
     SetWindowLongPtrW(dialog, DWLP_USER,
                       reinterpret_cast<LONG_PTR>(context));
-    EnableWindow(g_main_window, FALSE);
-    EnableWindow(g_map_window, FALSE);
-    EnableWindow(g_info_window, FALSE);
-    EnableWindow(g_command_window, FALSE);
+    Win32ElevatorControlHost host(dialog);
+    context->controller.disable_windows(host);
     RECT current{};
     GetWindowRect(dialog, &current);
     size_original_dialog_client(
@@ -3500,13 +3115,14 @@ INT_PTR CALLBACK elevator_control_dialog_proc(HWND dialog, UINT message,
         current.left, current.top);
     position_original_dialog(dialog, context->requested_left);
     simtower::render_original_dtmp(
-        dialog, nullptr, context->dtmp, g_resources);
-    refresh_original_elevator_control_scrollbar(dialog, *context);
+        dialog, nullptr, context->controller.dtmp(), g_resources);
+    Win32ElevatorControlOps ops(dialog);
+    context->controller.initialize_scroll_bar(ops);
     if (g_tower_document) {
       const auto title = original_cp1252_to_wide(
           simtower::original_elevator_control_title(
               g_resources, *g_tower_document,
-              context->state.elevator_index));
+              context->controller.state().elevator_index));
       SetWindowTextW(dialog, title.c_str());
     }
     SetClassLongPtrW(dialog, GCLP_HCURSOR,
@@ -3518,12 +3134,35 @@ INT_PTR CALLBACK elevator_control_dialog_proc(HWND dialog, UINT message,
 
   auto* context = reinterpret_cast<OriginalElevatorControlDialogContext*>(
       GetWindowLongPtrW(dialog, DWLP_USER));
+  const auto run = [&](simtower::OriginalDialogSignal signal) {
+    Win32ElevatorControlOps ops(dialog);
+    Win32ElevatorControlHost host(dialog);
+    context->controller.signal(signal, ops, host);
+  };
+  const auto pointer = [&](simtower::OriginalDialogSignal::Kind kind) {
+    simtower::OriginalDialogSignal signal{kind};
+    signal.x = static_cast<std::int16_t>(LOWORD(lparam));
+    signal.y = static_cast<std::int16_t>(HIWORD(lparam));
+    return signal;
+  };
   switch (message) {
     case WM_PAINT: {
       PAINTSTRUCT paint{};
       HDC dc = BeginPaint(dialog, &paint);
       if (dc && context) {
-        paint_original_elevator_control(dialog, dc, *context);
+        // The shared DIALOG/400 client painter, also the SDL panel's
+        // (elevator_control_painter_parity_tests proves it paints what the
+        // direct GDI copy did). The GDI copy skipped a failed CreatePen;
+        // a failure here ends the paint instead of leaving WM_PAINT by an
+        // exception.
+        try {
+          simtower::OriginalGdiDrawContext draw(
+              dc, simtower::kOriginalDialogGdiFailureText);
+          simtower::paint_original_elevator_control(
+              draw, g_resources, context->controller,
+              g_tower_document ? &*g_tower_document : nullptr);
+        } catch (const std::exception&) {
+        }
       }
       EndPaint(dialog, &paint);
       return TRUE;
@@ -3563,121 +3202,27 @@ INT_PTR CALLBACK elevator_control_dialog_proc(HWND dialog, UINT message,
     }
     case WM_VSCROLL:
       if (context) {
-        std::optional<simtower::OriginalElevatorControlScrollCommand>
-            command;
-        switch (LOWORD(wparam)) {
-          case SB_LINEUP:
-            command = simtower::OriginalElevatorControlScrollCommand::line_up;
-            break;
-          case SB_LINEDOWN:
-            command = simtower::OriginalElevatorControlScrollCommand::line_down;
-            break;
-          case SB_PAGEUP:
-            command = simtower::OriginalElevatorControlScrollCommand::page_up;
-            break;
-          case SB_PAGEDOWN:
-            command = simtower::OriginalElevatorControlScrollCommand::page_down;
-            break;
-          case SB_THUMBPOSITION:
-            command =
-                simtower::OriginalElevatorControlScrollCommand::thumb_position;
-            break;
-          case SB_THUMBTRACK:
-            command =
-                simtower::OriginalElevatorControlScrollCommand::thumb_track;
-            break;
-        }
-        if (command && simtower::original_elevator_control_scroll(
-                           context->state, *command,
-                           static_cast<std::int16_t>(HIWORD(wparam)))) {
-          SetScrollPos(GetDlgItem(dialog, 7), SB_CTL,
-                       context->state.scroll_position, TRUE);
-          InvalidateRect(dialog, nullptr, FALSE);
-          UpdateWindow(dialog);
-        }
+        simtower::OriginalDialogSignal signal{
+            simtower::OriginalDialogSignal::Kind::scroll,
+            simtower::kOriginalElevatorControlScrollBarId,
+            static_cast<std::uint16_t>(LOWORD(wparam))};
+        signal.value = static_cast<std::int16_t>(HIWORD(wparam));
+        run(signal);
       }
       return TRUE;
     case WM_MOUSEMOVE:
-      if (context && context->pressed_item >= 1 &&
-          context->pressed_item <= 2) {
-        InvalidateRect(dialog, nullptr, FALSE);
-        UpdateWindow(dialog);
+      if (context) {
+        run(pointer(simtower::OriginalDialogSignal::Kind::mouse_move));
       }
       return TRUE;
     case WM_LBUTTONDOWN:
-      if (context && g_tower_document) {
-        const int item = original_elevator_control_hit_item(*context, lparam);
-        context->pressed_item = item;
-        bool changed = false;
-        if (item == 8) {
-          changed = simtower::original_elevator_control_adjust_waiting(
-              *g_tower_document, context->state, 1);
-        } else if (item == 9) {
-          changed = simtower::original_elevator_control_adjust_waiting(
-              *g_tower_document, context->state, -1);
-        } else if (item == 10) {
-          changed = simtower::original_elevator_control_adjust_departure(
-              *g_tower_document, context->state, 1);
-        } else if (item == 11) {
-          changed = simtower::original_elevator_control_adjust_departure(
-              *g_tower_document, context->state, -1);
-        } else if (item >= 23 && item <= 28) {
-          const auto mode = run_original_elevator_popup(
-              dialog, *context, static_cast<std::size_t>(item));
-          changed = simtower::original_elevator_control_select_phase(
-                        context->state,
-                        static_cast<std::uint8_t>(item - 23)) ||
-                    changed;
-          changed = simtower::original_elevator_control_set_floor_mode(
-                        *g_tower_document, context->state, mode) ||
-                    changed;
-        }
-        if (changed) {
-          mark_original_elevator_control_changed(dialog, false);
-        } else {
-          InvalidateRect(dialog, nullptr, FALSE);
-        }
-        UpdateWindow(dialog);
+      if (context) {
+        run(pointer(simtower::OriginalDialogSignal::Kind::button_down));
       }
       return TRUE;
     case WM_LBUTTONUP:
-      if (context && g_tower_document) {
-        const int item = original_elevator_control_hit_item(*context, lparam);
-        const int pressed = context->pressed_item;
-        context->pressed_item = -1;
-        InvalidateRect(dialog, nullptr, FALSE);
-        UpdateWindow(dialog);
-        if (item != pressed) return TRUE;
-        if (item == 1) {
-          close_original_elevator_control(dialog, *context);
-          return TRUE;
-        }
-        if (item == 2) {
-          toggle_original_elevator_control_simulation(dialog, *context);
-          return TRUE;
-        }
-        if (item == 5 &&
-            simtower::original_elevator_control_toggle_show(
-                *g_tower_document, context->state.elevator_index)) {
-          mark_original_elevator_control_changed(dialog, true);
-          return TRUE;
-        }
-        if (item == 6) {
-          run_original_elevator_control_grid_action(
-              dialog, *context, lparam);
-          return TRUE;
-        }
-        if ((item == 12 || item == 13) &&
-            simtower::original_elevator_control_select_bank(
-                context->state,
-                static_cast<std::uint8_t>(item - 12))) {
-          // 1098:2215 invalidates all fifteen schedule rows, then redraws the
-          // grid and phase bands. A complete native invalidation reaches the
-          // same 1098:16a4/1a5b paint paths in the following UpdateWindow.
-          InvalidateRect(dialog, nullptr, FALSE);
-          UpdateWindow(dialog);
-          return TRUE;
-        }
+      if (context) {
+        run(pointer(simtower::OriginalDialogSignal::Kind::button_up));
       }
       return TRUE;
   }
@@ -3693,14 +3238,15 @@ void open_original_elevator_control(std::size_t elevator_index,
   if (!g_tower_document || g_elevator_control_window) return;
   const auto launcher = simtower::original_elevator_control_launch_contract(
       elevator_index, pointer_x, pointer_y);
-  auto context = std::make_unique<OriginalElevatorControlDialogContext>();
-  context->dtmp = simtower::parse_original_dtmp(
+  auto dtmp = simtower::parse_original_dtmp(
       g_resources.find("DTMP", launcher.dialog_resource_id));
-  context->state = simtower::make_original_elevator_control_state(
+  auto state = simtower::make_original_elevator_control_state(
       *g_tower_document, launcher.elevator_index,
       g_simulation_state.calendar_phase,
       g_simulation_state.day_phase);
-  if (!context->state.valid) return;
+  if (!state.valid) return;
+  auto context = std::make_unique<OriginalElevatorControlDialogContext>(
+      std::move(dtmp), std::move(state));
   context->initial_pointer_x = launcher.initial_pointer_x;
   context->initial_pointer_y = launcher.initial_pointer_y;
   context->requested_left = launcher.requested_left;
@@ -5519,7 +5065,8 @@ void run_original_find_dialog(simtower::OriginalFindMode mode) {
           break;
         case simtower::OriginalFindFocusRefreshStep::restore_preview_scratch:
           if ((!g_elevator_control_context ||
-               !g_elevator_control_context->state.isolation_active) &&
+               !g_elevator_control_context->controller.state()
+                    .isolation_active) &&
               g_world_input.preview_rect) {
             g_world_input.preview_rect.reset();
             g_original_main_backing.dirty = true;
@@ -5763,24 +5310,22 @@ int run_original_transport_information_dialog(
   return result;
 }
 
+const simtower::OriginalElevatorControlState*
+original_elevator_control_live_state() {
+  return g_elevator_control_context
+             ? &g_elevator_control_context->controller.state()
+             : nullptr;
+}
+
 const simtower::OriginalTdtDocument* original_presentation_document(
     std::optional<simtower::OriginalTdtDocument>& storage) {
   if (!g_tower_document) return nullptr;
-  if (!g_elevator_control_context ||
-      !g_elevator_control_context->state.isolation_active) {
-    return &*g_tower_document;
-  }
   // 10f0 masks the shafts for dispatch, while 10f0:0121/01f9's b3ae-aware
   // presentation path continues drawing every visible floor/tenant through
-  // 11a0:0000.
-  // Reconstitute only the saved `used` bytes in a paint-only copy so the
-  // native direct renderer preserves that surface during Simulate.
-  storage = *g_tower_document;
-  for (std::size_t index = 0U; index < storage->elevators.size(); ++index) {
-    storage->elevators[index].used =
-        g_elevator_control_context->state.saved_elevator_used[index];
-  }
-  return &*storage;
+  // 11a0:0000: a paint-only copy with the saved `used` bytes (shared with
+  // the SDL host).
+  return simtower::original_elevator_control_presentation_document(
+      *g_tower_document, original_elevator_control_live_state(), storage);
 }
 
 void present_original_info_surface_direct(
@@ -5905,15 +5450,9 @@ void rebuild_original_main_backing(
   std::optional<simtower::OriginalTdtDocument> presentation_storage{};
   const auto* presentation_document =
       original_presentation_document(presentation_storage);
-  std::optional<simtower::OriginalElevatorWaitingIsolationView>
-      waiting_isolation{};
-  if (g_elevator_control_context &&
-      g_elevator_control_context->state.isolation_active &&
-      g_elevator_control_context->state.saved_elevator_record) {
-    waiting_isolation = simtower::OriginalElevatorWaitingIsolationView{
-        g_elevator_control_context->state.elevator_index,
-        &*g_elevator_control_context->state.saved_elevator_record};
-  }
+  const auto waiting_isolation =
+      simtower::original_elevator_control_waiting_view(
+          original_elevator_control_live_state());
   auto raster = simtower::render_original_world(
       g_resources, presentation_document,
       view.x, view.y, width, height, g_elevator_transfer_visuals,

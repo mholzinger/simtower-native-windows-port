@@ -68,11 +68,7 @@ void draw_dialog_text_line(OriginalDrawContext& context,
 
 void draw_dialog_outline(OriginalDrawContext& context,
                          const OriginalRect& rect, OriginalRgb rgb) {
-  context.fill_rect({rect.left, rect.top, rect.right, rect.top + 1}, rgb);
-  context.fill_rect({rect.left, rect.bottom - 1, rect.right, rect.bottom},
-                    rgb);
-  context.fill_rect({rect.left, rect.top, rect.left + 1, rect.bottom}, rgb);
-  context.fill_rect({rect.right - 1, rect.top, rect.right, rect.bottom}, rgb);
+  original_frame_rect(context, rect, rgb);
 }
 
 std::string strip_dialog_mnemonic(std::string_view text) {
@@ -405,12 +401,44 @@ void DialogWindow::place(int desktop_width, int desktop_height) {
   desktop_height_ = desktop_height;
   const OriginalDialogScreenRect desktop{0, 0, desktop_width, desktop_height};
   const OriginalDialogScreenRect window{0, 0, outer_width(), outer_height()};
-  const auto position =
-      descriptor_.placement == DialogPlacement::screen_position
-          ? original_dialog_screen_position(desktop, window, 0)
-          : original_dialog_center_position(desktop, window);
-  x_ = position.left;
-  y_ = position.top;
+  switch (descriptor_.placement) {
+    case DialogPlacement::screen_position: {
+      const auto position = original_dialog_screen_position(
+          desktop, window, descriptor_.requested_left);
+      x_ = position.left;
+      y_ = position.top;
+      break;
+    }
+    case DialogPlacement::centered: {
+      const auto position = original_dialog_center_position(desktop, window);
+      x_ = position.left;
+      y_ = position.top;
+      break;
+    }
+    case DialogPlacement::fixed_desktop: {
+      const auto position = original_dialog_screen_position(
+          {0, 0, kDesktopWidth, kDesktopHeight}, window,
+          descriptor_.requested_left);
+      x_ = position.left;
+      y_ = position.top;
+      // TEMP (owner decision): the original sat on a real 1024x768
+      // desktop. A window too small for that position moves the panel up
+      // (left) just enough to keep its outer bottom (right) edge inside;
+      // one smaller than the panel keeps the bottom edge, so OK and
+      // Simulate stay reachable and the caption goes off the top.
+      if (desktop_width > 0 && x_ + outer_width() > desktop_width) {
+        x_ = desktop_width - outer_width();
+      }
+      if (desktop_height > 0 && y_ + outer_height() > desktop_height) {
+        y_ = desktop_height - outer_height();
+      }
+      break;
+    }
+    case DialogPlacement::at:
+      x_ = descriptor_.origin_x;
+      y_ = descriptor_.origin_y;
+      break;
+  }
 }
 
 const DialogControl* DialogWindow::control(std::uint16_t id) const {
@@ -935,8 +963,14 @@ DialogStep DialogWindow::pointer_down(const DialogPointer& event, int x,
   return step;
 }
 
-DialogStep DialogWindow::pointer(const DialogPointer& event) {
+DialogStep DialogWindow::pointer(const DialogPointer& raw) {
   DialogStep step{};
+  // ClipCursor (TEMP): the pointer cannot leave the client.
+  DialogPointer event = raw;
+  if (descriptor_.clip_pointer && client_width_ > 0 && client_height_ > 0) {
+    event.x = std::clamp(event.x, client_x(), client_x() + client_width_ - 1);
+    event.y = std::clamp(event.y, client_y(), client_y() + client_height_ - 1);
+  }
   const int x = event.x - client_x();
   const int y = event.y - client_y();
   // The procedure's share: a press or release no control takes.
@@ -949,6 +983,11 @@ DialogStep DialogWindow::pointer(const DialogPointer& event) {
     case DialogPointer::Kind::down:
       return pointer_down(event, x, y);
     case DialogPointer::Kind::move: {
+      // TEMP: the thumb follows the pointer wherever it is. USER is
+      // believed to snap it back to its start (SB_THUMBTRACK of the
+      // original position) while the pointer is outside an inflated
+      // rectangle around the bar; unconfirmed until a Win3.1 reference
+      // exists.
       if (scroll_drag_ && scroll_drag_->grab >= 0) {
         auto* bar = mutable_control(scroll_drag_->id);
         if (!bar) break;
@@ -973,7 +1012,18 @@ DialogStep DialogWindow::pointer(const DialogPointer& event) {
         }
         break;
       }
-      if (captured_ == 0U) break;
+      if (captured_ == 0U) {
+        // WM_MOUSEMOVE for the procedure: over its client and no control
+        // that takes the mouse, or anywhere while it holds the capture.
+        const bool inside =
+            x >= 0 && y >= 0 && x < client_width_ && y < client_height_;
+        if (descriptor_.mouse_move && drag_ == Drag::none && !scroll_drag_ &&
+            (descriptor_.capture_pointer ||
+             (inside && control_at(x, y) == nullptr))) {
+          step.signal = descriptor_.mouse_move(event, x, y);
+        }
+        break;
+      }
       auto* entry = mutable_control(captured_);
       if (!entry) break;
       if (drag_ == Drag::button) {

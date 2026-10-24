@@ -152,6 +152,8 @@ OriginalDialogOutcome OriginalEventDialogController::signal(
     case OriginalDialogSignal::Kind::key_up:
     case OriginalDialogSignal::Kind::button_down:
     case OriginalDialogSignal::Kind::button_up:
+    case OriginalDialogSignal::Kind::mouse_move:
+    case OriginalDialogSignal::Kind::right_button_up:
       return {};
   }
   switch (original_event_dialog_action(command, argument_, balance,
@@ -187,6 +189,8 @@ OriginalDialogOutcome original_about_dialog_signal(
     case OriginalDialogSignal::Kind::key_up:
     case OriginalDialogSignal::Kind::button_down:
     case OriginalDialogSignal::Kind::button_up:
+    case OriginalDialogSignal::Kind::mouse_move:
+    case OriginalDialogSignal::Kind::right_button_up:
       return {};
   }
   return {};

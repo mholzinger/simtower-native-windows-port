@@ -1,0 +1,12 @@
+# The Magnifier on a car (shaft 0's car at floor 1, Main 440,410) is the
+# car's information (elevator_car_information), not Elevator Control: no
+# panel opens.
+# args: --scenario busy --passes 60
+# expect-stderr: transport information 1
+# reject-stderr: elevator control 0
+pass 50
+click 70 290
+click-command 182 228
+click 440 410
+expect-panel none
+pass 60

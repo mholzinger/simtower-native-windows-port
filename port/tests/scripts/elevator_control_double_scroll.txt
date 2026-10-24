@@ -1,0 +1,16 @@
+# Scroll bar 7 takes the second press of a double click like a first one
+# (its class handles WM_LBUTTONDBLCLK as a press): a double click on the
+# up arrow (client 143,200) of a 24-floor shaft of the full tower moves
+# two lines. ELVDLOGMAIN sees only the two WM_VSCROLLs.
+# args: --scenario full --passes 60
+pass 50
+open-elevator-control 0
+expect-scroll 10
+panel-at 143 200
+expect-scroll 9
+panel-dblclick 143 200
+panel-up 143 200
+expect-scroll 8
+panel-at 148 413
+expect-panel none
+pass 60

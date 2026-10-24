@@ -24,6 +24,7 @@ add_library(simtower_port_core STATIC
   src/original_dtmp.cpp
   src/original_dtmp_runtime.cpp
   src/original_elevator_control.cpp
+  src/original_elevator_control_controller.cpp
   src/original_finance.cpp
   src/original_find.cpp
   src/original_idle_pass.cpp
@@ -232,6 +233,29 @@ if(BUILD_TESTING)
     set_tests_properties(simtower_dialog_chrome_parity_tests PROPERTIES
                          SKIP_RETURN_CODE 77)
 
+    # The shared Elevator Control and ELVPOPUP painters through GDI (and
+    # the canvas, outside its text) must paint the same pixels as the
+    # frozen direct-GDI painters.
+    add_executable(simtower_elevator_control_painter_parity_tests
+                   tests/elevator_control_painter_parity_tests.cpp)
+    target_link_libraries(simtower_elevator_control_painter_parity_tests
+                          PRIVATE simtower_test_support simtower_canvas)
+    target_compile_definitions(simtower_elevator_control_painter_parity_tests
+                               PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN
+                                       NOMINMAX)
+    if(MINGW)
+      # Complete tower documents live on the stack.
+      target_link_options(simtower_elevator_control_painter_parity_tests
+                          PRIVATE -Wl,--stack,16777216)
+    endif()
+    add_test(
+      NAME simtower_elevator_control_painter_parity_tests
+      COMMAND simtower_elevator_control_painter_parity_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+    )
+    set_tests_properties(simtower_elevator_control_painter_parity_tests
+                         PROPERTIES SKIP_RETURN_CODE 77)
+
     add_executable(
       simtower_embedded_resource_tests
       tests/embedded_resource_tests.cpp
@@ -412,6 +436,26 @@ if(BUILD_TESTING)
                         simtower_sdl_runtime)
   add_test(NAME simtower_sdl_widget_tests COMMAND simtower_sdl_widget_tests)
 
+  # The shared ELVDLOGMAIN / ELVPOPUP controllers against frozen copies of
+  # the Win32 procedure branches, and the simulation oracle through the
+  # shared idle pass (also run under Wine). Needs the pack (exit 77).
+  add_executable(simtower_elevator_control_controller_tests
+                 tests/elevator_control_controller_tests.cpp)
+  target_link_libraries(simtower_elevator_control_controller_tests PRIVATE
+                        simtower_test_support simtower_canvas)
+  if(MINGW)
+    # Several complete tower documents live on the stack.
+    target_link_options(simtower_elevator_control_controller_tests PRIVATE
+                        -Wl,--stack,16777216)
+  endif()
+  add_test(
+    NAME simtower_elevator_control_controller_tests
+    COMMAND simtower_elevator_control_controller_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_elevator_control_controller_tests PROPERTIES
+                       SKIP_RETURN_CODE 77)
+
   add_executable(simtower_elevator_control_tests tests/elevator_control_tests.cpp)
   target_link_libraries(simtower_elevator_control_tests PRIVATE simtower_port_core)
   add_test(
@@ -533,7 +577,14 @@ if(BUILD_TESTING)
                    alert_answer_3_invalid
                    about_dialog dialog_frames dialog_names_list
                    dialog_tenant_focus dialog_finance dialog_movie
-                   dialog_type_not_edit)
+                   dialog_type_not_edit elevator_control_edit
+                   elevator_control_menu_blocked elevator_control_noop
+                   elevator_control_scroll elevator_control_simulate
+                   elevator_control_popup elevator_control_frames
+                   elevator_control_scroll_frame elevator_control_repeat
+                   elevator_control_double elevator_control_double_scroll
+                   elevator_control_tracking elevator_control_magnifier
+                   elevator_control_magnifier_car)
       add_test(
         NAME simtower_sdl_${script}
         COMMAND ${CMAKE_COMMAND}
@@ -617,6 +668,7 @@ if(BUILD_TESTING)
       simtower_sdl_widget_tests
       simtower_dialog_controller_tests
       simtower_elevator_control_tests
+      simtower_elevator_control_controller_tests
       simtower_audio_tests
       simtower_idle_pass_tests
       simtower_world_input_tests
@@ -632,7 +684,8 @@ if(BUILD_TESTING)
          simtower_resource_tests
          simtower_embedded_resource_tests
          simtower_dialog_template_parity_tests
-         simtower_dialog_chrome_parity_tests)
+         simtower_dialog_chrome_parity_tests
+         simtower_elevator_control_painter_parity_tests)
   endif()
   foreach(test_target IN LISTS SIMTOWER_ASSERT_TESTS)
     if(MSVC)

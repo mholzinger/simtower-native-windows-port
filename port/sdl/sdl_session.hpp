@@ -20,6 +20,7 @@
 #include "original_audio_device.hpp"
 #include "original_command_palette.hpp"
 #include "original_dialog_controllers.hpp"
+#include "original_elevator_control_controller.hpp"
 #include "original_find.hpp"
 #include "original_idle_pass.hpp"
 #include "original_info.hpp"
@@ -50,6 +51,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace simtower::sdl {
@@ -304,7 +306,16 @@ class Session : private OriginalIdlePassHost {
 
   // One empty-queue idle pass (run_original_idle_simulation).
   // Returns true when the main raster changed and should be presented.
+  // Does nothing while elevator_tracking() holds.
   bool run_idle_pass();
+  // Whether Elevator Control's scroll bar (SB_CTL 7) is being tracked. On
+  // Win32 USER's own tracking loop runs then, so SimTower's PeekMessage
+  // idle loop (and with it the simulation) does not.
+  [[nodiscard]] bool elevator_tracking() const {
+    return elevator_ && elevator_->window->scroll_tracking_active();
+  }
+  // Idle passes run so far (held ones excluded).
+  [[nodiscard]] std::uint64_t idle_passes() const { return idle_passes_; }
 
   // Milliseconds until the next idle pass can do work: the fast-mode frame
   // adapter or the six-tick gate, and the 15-tick effect palette gate.
@@ -391,6 +402,36 @@ class Session : private OriginalIdlePassHost {
   [[nodiscard]] std::vector<const DialogWindow*> dialogs() const {
     return {dialogs_.begin(), dialogs_.end()};
   }
+  // ---- Elevator Control (DIALOG/400, ELVDLOGMAIN), modeless ----
+  // The open panel (null: none). One instance (DS:31a0): the Magnifier or
+  // Finger opens it on a shaft; a second open while it exists is logged and
+  // ignored, as open_original_elevator_control does. Only its Close item
+  // (DTMP 1) closes it: the template has no system menu, and while it is
+  // open Main, Map, Info and Command are disabled (WM_INITDIALOG), so no
+  // demolition, New or Open can happen. Drawn above the palettes, below
+  // the modal dialogs.
+  [[nodiscard]] const DialogWindow* elevator_control() const {
+    return elevator_ ? elevator_->window.get() : nullptr;
+  }
+  [[nodiscard]] const OriginalElevatorControlController*
+  elevator_controller() const {
+    return elevator_ ? elevator_->controller.get() : nullptr;
+  }
+  // EnableWindow state of Main, Map, Info and Command (Elevator Control
+  // disables them while it is open). The control itself is always enabled.
+  [[nodiscard]] bool panel_enabled(Panel panel) const;
+  // A key, key release or character for the open control's dialog manager
+  // (IsDialogMessage: the control is the active window). Nothing without it.
+  void elevator_control_input(const DialogInput& input);
+  // TEST SHORTCUT (scripts' "open-elevator-control"): the open a Magnifier
+  // press on shaft `index` makes, at Main client point (0, 0).
+  void open_elevator_control_for_test(std::size_t index);
+  // The window needs presenting again for a panel repaint (1258:0285's
+  // per-pass Elevator Control refresh, a procedure repaint) that the
+  // digest-logged present_requested_ does not cover. Clears it.
+  [[nodiscard]] bool take_window_repaint() {
+    return std::exchange(window_repaint_, false);
+  }
   // The running selector modal, or null.
   [[nodiscard]] const OriginalCommandSelectorSession* active_selector()
       const {
@@ -409,6 +450,11 @@ class Session : private OriginalIdlePassHost {
   [[nodiscard]] const OriginalTdtDocument* document() const {
     return document_ ? &*document_ : nullptr;
   }
+  // The document Main, Info and Map draw: the live document, or a copy in
+  // `storage` with the saved `used` bytes while Simulate isolates a shaft
+  // (native_main.cpp original_presentation_document).
+  [[nodiscard]] const OriginalTdtDocument* presentation_document(
+      std::optional<OriginalTdtDocument>& storage) const;
   [[nodiscard]] const HostRequestCounts& host_requests() const {
     return host_requests_;
   }
@@ -533,6 +579,27 @@ class Session : private OriginalIdlePassHost {
   enum class PaletteHit : std::uint8_t { client, caption, border };
   [[nodiscard]] PaletteHit palette_hit(Panel panel, int x, int y) const;
 
+  class ElevatorControlHost;
+  friend class ElevatorControlHost;
+  // open_original_elevator_control and WM_INITDIALOG.
+  void open_elevator_control(std::size_t elevator_index,
+                             std::int16_t pointer_x, std::int16_t pointer_y);
+  // A pointer event while the control is open (it is the only enabled
+  // window under the pointer).
+  void elevator_control_pointer(const InputEvent& event);
+  // Delivers a dialog-manager step's signals to ELVDLOGMAIN and finishes a
+  // DestroyWindow the procedure asked for.
+  void elevator_control_step(const DialogStep& step);
+  void elevator_control_signal(const DialogSignal& signal);
+  // Drops the panel and its window state (disabled slots, nonclient press,
+  // pending destroy, activation) and logs the close: -2 DestroyWindow from
+  // the procedure, -3 a tower replaced under it.
+  void close_elevator_panel(int reason);
+  // The live ELVDLOGMAIN state (null: no control).
+  [[nodiscard]] const OriginalElevatorControlState* elevator_state() const {
+    return elevator_ ? &elevator_->controller->state() : nullptr;
+  }
+
   // OriginalIdlePassHost (sdl_session.cpp maps each hook to its Win32
   // counterpart). Window-only hooks keep the interface's no-op defaults.
   std::uint32_t now_ms() override { return clock_ms_(); }
@@ -545,8 +612,10 @@ class Session : private OriginalIdlePassHost {
     return world_input_.shaft_drag.capture_active;
   }
   bool fast_mode_enabled() override { return flags_.fast_mode_enabled; }
-  // No Elevator Control window yet, so never isolated (DS:b3ae).
-  bool elevator_isolation_active() override { return false; }
+  // DS:b3ae of the open Elevator Control (false without one).
+  bool elevator_isolation_active() override {
+    return elevator_ && elevator_->controller->state().isolation_active;
+  }
   bool ambient_sound_enabled() override { return flags_.sound_enabled; }
   OriginalIdleView main_view() override;
   bool step_effect_palette() override;
@@ -684,6 +753,24 @@ class Session : private OriginalIdlePassHost {
   std::optional<OriginalInputSurface> capture_{};
   OriginalCommandSelectorSession* selector_{};
   std::vector<DialogWindow*> dialogs_{};
+  // DS:31a0's modeless Elevator Control and its procedure context.
+  struct ElevatorControlPanel {
+    std::unique_ptr<DialogWindow> window;
+    std::unique_ptr<OriginalElevatorControlController> controller;
+  };
+  std::optional<ElevatorControlPanel> elevator_{};
+  std::unique_ptr<ElevatorControlHost> elevator_host_;
+  // DestroyWindow requested by the procedure (done after it returns).
+  bool elevator_destroy_pending_{};
+  // Whether the last run_idle_pass was held by elevator_tracking() (logs
+  // the hold once per track).
+  bool idle_held_{};
+  // Oracle only: hash the control state once it has ever opened, so runs
+  // that never open it keep their digests.
+  bool elevator_ever_opened_{};
+  // EnableWindow(FALSE) on main, map, info, command.
+  std::array<bool, 4> panel_disabled_{};
+  bool window_repaint_{};
   // DS:77b4..77c0: set by a Find that focused a target, expired by the idle
   // pass (10e0:051d), drawn over Main (10e0:055b).
   OriginalFindMarkerState find_marker_{};
