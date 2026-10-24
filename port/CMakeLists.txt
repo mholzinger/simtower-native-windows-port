@@ -26,7 +26,9 @@ add_library(simtower_port_core STATIC
   src/original_idle_pass.cpp
   src/original_info.cpp
   src/original_information.cpp
+  src/original_main_command.cpp
   src/original_map.cpp
+  src/original_menu.cpp
   src/original_palette_frame.cpp
   src/original_people.cpp
   src/original_resources_index.cpp
@@ -36,6 +38,7 @@ add_library(simtower_port_core STATIC
   src/original_tables.cpp
   src/original_tdt.cpp
   src/original_tdt_file.cpp
+  src/original_tower_file.cpp
   src/original_ui.cpp
   src/original_wave.cpp
   src/original_world.cpp
@@ -157,7 +160,8 @@ if(SIMTOWER_BUILD_SDL)
   find_package(SDL3 REQUIRED CONFIG)
   add_executable(simtower_sdl sdl/sdl_main.cpp sdl/sdl_session.cpp
                               sdl/sdl_audio.cpp sdl/sdl_layout.cpp
-                              sdl/sdl_panels.cpp sdl/sdl_input_script.cpp)
+                              sdl/sdl_panels.cpp sdl/sdl_input_script.cpp
+                              sdl/sdl_menu.cpp)
   target_link_libraries(simtower_sdl PRIVATE simtower_test_support
                                              simtower_canvas SDL3::SDL3)
 endif()
@@ -309,6 +313,36 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
   )
 
+  # The TOWER_MENU model and the menu op lists (original_menu.hpp). The
+  # resource half reads the pack at run time and is skipped (exit 77)
+  # without it; the synthetic half needs no assets.
+  add_executable(simtower_menu_tests tests/menu_tests.cpp)
+  target_link_libraries(simtower_menu_tests PRIVATE simtower_port_core)
+  add_test(
+    NAME simtower_menu_tests
+    COMMAND simtower_menu_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_menu_tests PROPERTIES SKIP_RETURN_CODE 77)
+
+  # The shared WM_COMMAND dispatcher against a recording host (no assets).
+  add_executable(simtower_main_command_tests tests/main_command_tests.cpp)
+  target_link_libraries(simtower_main_command_tests PRIVATE
+                        simtower_port_core)
+  add_test(NAME simtower_main_command_tests
+           COMMAND simtower_main_command_tests)
+
+  # The shared File transactions against a recording host and temporary
+  # files (no assets).
+  add_executable(simtower_tower_file_tests tests/tower_file_tests.cpp)
+  target_link_libraries(simtower_tower_file_tests PRIVATE simtower_port_core)
+  if(MINGW)
+    # Several complete tower documents live on the stack.
+    target_link_options(simtower_tower_file_tests PRIVATE
+                        -Wl,--stack,16777216)
+  endif()
+  add_test(NAME simtower_tower_file_tests COMMAND simtower_tower_file_tests)
+
   # Portable audio runtime rules and the device transaction, on a fake
   # device and the capture device. No audio device is opened. The parts that
   # need WAVE resources read the pack at run time and are skipped (exit 77)
@@ -381,6 +415,34 @@ if(BUILD_TESTING)
                            "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy")
     endforeach()
 
+    # The window's menu bar: layout, modal tracking and drawing on the
+    # pack's TOWER_MENU (pure logic and pixels, no SDL calls).
+    add_executable(simtower_sdl_menu_tests tests/sdl_menu_tests.cpp
+                                           sdl/sdl_menu.cpp sdl/sdl_layout.cpp)
+    target_include_directories(simtower_sdl_menu_tests PRIVATE
+                               ${CMAKE_CURRENT_SOURCE_DIR}/sdl)
+    target_link_libraries(simtower_sdl_menu_tests PRIVATE
+                          simtower_test_support simtower_canvas)
+    add_test(
+      NAME simtower_sdl_menu_tests
+      COMMAND simtower_sdl_menu_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack)
+    set_tests_properties(simtower_sdl_menu_tests PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
+    # Save As and Open through the scripted File menu and picker: a fresh
+    # menu Open of the saved file must continue exactly like --open of it.
+    add_test(
+      NAME simtower_sdl_save_load
+      COMMAND ${CMAKE_COMMAND}
+        -DBIN=$<TARGET_FILE:simtower_sdl>
+        -DPACK=${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+        -DWORK=${CMAKE_CURRENT_BINARY_DIR}/save-load
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_save_load_test.cmake)
+    set_tests_properties(simtower_sdl_save_load PROPERTIES
+                         ENVIRONMENT
+                         "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy")
+
     # The documented example scripts must keep running (exit 0) with the
     # --scenario and --passes their usage line names.
     file(GLOB SIMTOWER_SDL_EXAMPLE_SCRIPTS CONFIGURE_DEPENDS
@@ -419,9 +481,13 @@ if(BUILD_TESTING)
       simtower_elevator_control_tests
       simtower_audio_tests
       simtower_idle_pass_tests
-      simtower_world_input_tests)
+      simtower_world_input_tests
+      simtower_menu_tests
+      simtower_main_command_tests
+      simtower_tower_file_tests)
   if(SIMTOWER_BUILD_SDL)
-    list(APPEND SIMTOWER_ASSERT_TESTS simtower_sdl_audio_tests)
+    list(APPEND SIMTOWER_ASSERT_TESTS simtower_sdl_audio_tests
+                                      simtower_sdl_menu_tests)
   endif()
   if(WIN32)
     list(APPEND SIMTOWER_ASSERT_TESTS

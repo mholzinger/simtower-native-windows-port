@@ -10,6 +10,15 @@ namespace simtower {
 // The portable class-style and message tables in original_ui.hpp use these
 // literal Win32 values.
 static_assert(CS_DBLCLKS == 0x0008);
+// original_menu.hpp keeps the Win16 MF_* values, which Win32 kept.
+static_assert(MF_GRAYED == kOriginalMenuGrayed);
+static_assert(MF_DISABLED == kOriginalMenuDisabled);
+static_assert(MF_CHECKED == kOriginalMenuChecked);
+static_assert(MF_POPUP == kOriginalMenuPopup);
+static_assert(MF_MENUBARBREAK == kOriginalMenuBarBreak);
+static_assert(MF_MENUBREAK == kOriginalMenuBreak);
+static_assert(MF_HELP == kOriginalMenuHelp);
+static_assert(MF_ENABLED == 0 && MF_UNCHECKED == 0 && MF_BYCOMMAND == 0);
 
 namespace {
 
@@ -81,25 +90,22 @@ std::wstring cp1252_to_wide(std::string_view value) {
   return result;
 }
 
-void append_menu_level(Reader& reader, HMENU parent) {
-  while (true) {
-    const std::uint16_t original_flags = reader.u16();
-    const bool popup = (original_flags & 0x0010U) != 0;
-    const bool last = (original_flags & 0x0080U) != 0;
-    const std::uint16_t command = popup ? 0U : reader.u16();
-    const std::wstring text = cp1252_to_wide(reader.cstring());
-
+// AppendMenuW calls for one parsed level, in resource order, with the same
+// flags the Win16 template carries (the model keeps them raw).
+void append_menu_level(const OriginalMenuItems& level, HMENU parent) {
+  for (const auto& item : level) {
+    const std::wstring text = cp1252_to_wide(item.text);
     UINT native_flags = MF_STRING;
-    native_flags |= original_flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED |
-                                       MF_MENUBREAK | MF_MENUBARBREAK |
-                                       MF_HELP | MF_RIGHTJUSTIFY);
-    if (popup) {
+    native_flags |= item.flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED |
+                                  MF_MENUBREAK | MF_MENUBARBREAK | MF_HELP |
+                                  MF_RIGHTJUSTIFY);
+    if (item.popup()) {
       const HMENU child = CreatePopupMenu();
       if (!child) {
         throw std::runtime_error("CreatePopupMenu failed");
       }
       try {
-        append_menu_level(reader, child);
+        append_menu_level(item.children, child);
         if (!AppendMenuW(parent, native_flags | MF_POPUP,
                          reinterpret_cast<UINT_PTR>(child), text.c_str())) {
           throw std::runtime_error("AppendMenuW failed for original popup");
@@ -109,16 +115,12 @@ void append_menu_level(Reader& reader, HMENU parent) {
         throw;
       }
     } else {
-      if (command == 0U && text.empty()) {
+      if (item.separator()) {
         native_flags = MF_SEPARATOR;
       }
-      if (!AppendMenuW(parent, native_flags, command, text.c_str())) {
+      if (!AppendMenuW(parent, native_flags, item.id, text.c_str())) {
         throw std::runtime_error("AppendMenuW failed for original command");
       }
-    }
-
-    if (last) {
-      return;
     }
   }
 }
@@ -134,20 +136,13 @@ void fill_original_white_rect(HDC dc, const RECT& rectangle) noexcept {
 }
 
 HMENU create_original_menu(std::span<const std::byte> resource) {
-  Reader reader(resource);
-  const std::uint16_t version = reader.u16();
-  const std::uint16_t header_size = reader.u16();
-  if (version != 0U) {
-    throw std::runtime_error("Unsupported original Win16 menu version");
-  }
-  reader.skip(header_size);
-
+  const auto model = parse_original_menu(resource);
   const HMENU menu = CreateMenu();
   if (!menu) {
     throw std::runtime_error("CreateMenu failed");
   }
   try {
-    append_menu_level(reader, menu);
+    append_menu_level(model, menu);
     return menu;
   } catch (...) {
     DestroyMenu(menu);
@@ -156,21 +151,13 @@ HMENU create_original_menu(std::span<const std::byte> resource) {
 }
 
 HACCEL create_original_accelerators(std::span<const std::byte> resource) {
-  Reader reader(resource);
   std::vector<ACCEL> entries;
-  while (reader.remaining() >= 5U) {
-    const std::uint8_t original_flags = reader.u8();
+  for (const auto& original : parse_original_accelerators(resource)) {
     ACCEL entry{};
-    entry.fVirt = static_cast<BYTE>(original_flags & 0x7FU);
-    entry.key = reader.u16();
-    entry.cmd = reader.u16();
+    entry.fVirt = static_cast<BYTE>(original.flags & 0x7FU);
+    entry.key = original.key;
+    entry.cmd = original.command;
     entries.push_back(entry);
-    if ((original_flags & 0x80U) != 0) {
-      break;
-    }
-  }
-  if (entries.empty()) {
-    throw std::runtime_error("Invalid original accelerator resource");
   }
   const HACCEL table = CreateAcceleratorTableW(
       entries.data(), static_cast<int>(entries.size()));
@@ -178,6 +165,30 @@ HACCEL create_original_accelerators(std::span<const std::byte> resource) {
     throw std::runtime_error("CreateAcceleratorTableW failed");
   }
   return table;
+}
+
+void apply_original_menu_ops(HMENU menu,
+                             std::span<const OriginalMenuOp> ops) {
+  for (const auto& op : ops) {
+    HMENU target = menu;
+    for (std::uint8_t step = 0; step < op.depth && target; ++step) {
+      target = GetSubMenu(target, op.path[step]);
+    }
+    if (!target) continue;
+    const UINT flags =
+        op.flags | (op.by_position ? MF_BYPOSITION : MF_BYCOMMAND);
+    switch (op.kind) {
+      case OriginalMenuOpKind::check:
+        CheckMenuItem(target, op.target, flags);
+        break;
+      case OriginalMenuOpKind::enable:
+        EnableMenuItem(target, op.target, flags);
+        break;
+      case OriginalMenuOpKind::remove:
+        DeleteMenu(target, op.target, flags);
+        break;
+    }
+  }
 }
 
 HICON create_original_icon(const OriginalResources& resources,

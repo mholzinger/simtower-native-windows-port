@@ -2,8 +2,10 @@
 
 #include "original_world_input.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <utility>
@@ -26,6 +28,17 @@ std::int64_t parse_integer(const std::string& text, const std::string& where) {
   } catch (const std::exception&) {
   }
   throw ScriptFailure(2, where + ": bad number '" + text + "'");
+}
+
+// The rest of the line after `verb` (comment stripped, blanks trimmed), so
+// a value may hold spaces; empty when there is none.
+std::string rest_of_line(const std::string& line, const std::string& verb) {
+  const auto code = line.substr(0, line.find('#'));
+  const auto start =
+      code.find_first_not_of(" \t", code.find(verb) + verb.size());
+  if (start == std::string::npos) return {};
+  const auto end = code.find_last_not_of(" \t\r");
+  return code.substr(start, end + 1 - start);
 }
 
 // A Win16 mouse LPARAM carries signed 16-bit client coordinates.
@@ -144,6 +157,51 @@ std::vector<ScriptCommand> parse_input_script(
     } else if (verb == "digest") {
       command.op = ScriptOp::digest;
       if (words.size() != 1) throw fail("digest takes no value");
+    } else if (verb == "menu") {
+      command.op = ScriptOp::menu;
+      single_value();
+      if (command.value < 0 || command.value > 0xFFFF) {
+        throw fail("menu id must be 0..65535");
+      }
+    } else if (verb == "key") {
+      command.op = ScriptOp::key;
+      if (words.size() != 2 || (words[1] != "f1" && words[1] != "F1")) {
+        throw fail("key takes f1");
+      }
+      command.value = kOriginalVirtualKeyF1;
+    } else if (verb == "pick-file") {
+      command.op = ScriptOp::pick_file;
+      command.text = rest_of_line(line, verb);
+      if (command.text.empty()) throw fail("pick-file needs PATH or cancel");
+      if (command.text == "cancel") command.text.clear();
+    } else if (verb == "menu-show") {
+      command.op = ScriptOp::menu_show;
+      if (words.size() < 2 || words.size() > 4) {
+        throw fail("menu-show takes BAR [ITEM [SUB]]");
+      }
+      for (std::size_t index = 1; index < words.size(); ++index) {
+        const auto value = parse_integer(words[index], where);
+        if (value < 0 || value > 63) throw fail("menu-show index out of range");
+        command.numbers.push_back(static_cast<int>(value));
+      }
+    } else if (verb == "menu-hide") {
+      command.op = ScriptOp::menu_hide;
+      if (words.size() != 1) throw fail("menu-hide takes no value");
+    } else if (verb == "expect-menu") {
+      command.op = ScriptOp::expect_menu;
+      if (words.size() != 3) throw fail("expect-menu takes ID STATE");
+      command.value = parse_integer(words[1], where);
+      command.text = words[2];
+      if (command.text != "checked" && command.text != "unchecked" &&
+          command.text != "grayed" && command.text != "enabled" &&
+          command.text != "absent") {
+        throw fail("unknown menu state '" + command.text + "'");
+      }
+    } else if (verb == "expect-title" || verb == "expect-saved") {
+      command.op = verb == "expect-title" ? ScriptOp::expect_title
+                                          : ScriptOp::expect_saved;
+      command.text = rest_of_line(line, verb);
+      if (command.text.empty()) throw fail(verb + " needs a value");
     } else {
       throw fail("unknown command '" + verb + "'");
     }
@@ -188,6 +246,7 @@ const ScriptCommand* ScriptPlayer::run_until_pass() {
     const auto& command = commands_[next_++];
     if (command.op == ScriptOp::pass) return &command;
     execute(command, false);
+    if (session_.quit_requested()) return nullptr;
   }
   return nullptr;
 }
@@ -204,6 +263,21 @@ std::optional<InputEvent> ScriptPlayer::next_modal_event() {
   const auto event = pending_.front();
   pending_.pop_front();
   return event;
+}
+
+std::optional<std::optional<std::filesystem::path>>
+ScriptPlayer::next_file_pick() {
+  if (next_ >= commands_.size() ||
+      commands_[next_].op != ScriptOp::pick_file) {
+    return std::nullopt;
+  }
+  const auto& command = commands_[next_++];
+  if (command.text.empty()) {
+    return std::optional<std::optional<std::filesystem::path>>(std::in_place,
+                                                               std::nullopt);
+  }
+  return std::optional<std::optional<std::filesystem::path>>(
+      std::in_place, std::filesystem::path(command.text));
 }
 
 void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
@@ -267,6 +341,62 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
     case ScriptOp::digest:
       print_digest_();
       break;
+    case ScriptOp::menu:
+      if (!find_original_menu_command(session_.menu(),
+                                      static_cast<std::uint16_t>(
+                                          command.value))) {
+        throw ScriptFailure(2, command.where + ": menu " +
+                                   std::to_string(command.value) +
+                                   " is not in the live menu");
+      }
+      (void)session_.choose_menu_command(
+          static_cast<std::uint16_t>(command.value));
+      break;
+    case ScriptOp::key:
+      (void)session_.accelerator(static_cast<std::uint16_t>(command.value));
+      break;
+    case ScriptOp::pick_file:
+      if (command.text.empty()) {
+        session_.queue_picked_file(std::nullopt);
+      } else {
+        session_.queue_picked_file(std::filesystem::path(command.text));
+      }
+      break;
+    case ScriptOp::menu_show: {
+      MenuView view{};
+      view.bar = command.numbers[0];
+      if (command.numbers.size() > 1) view.item = command.numbers[1];
+      if (command.numbers.size() > 2) {
+        view.cascade_open = true;
+        view.cascade_item = command.numbers[2];
+      }
+      const auto* popup = original_sub_menu(
+          session_.menu(), static_cast<std::size_t>(view.bar));
+      const bool item_ok =
+          popup && view.item < static_cast<int>(popup->size());
+      const OriginalMenuItems* cascade =
+          item_ok && view.item >= 0
+              ? original_sub_menu(*popup, static_cast<std::size_t>(view.item))
+              : nullptr;
+      if (!item_ok || (view.cascade_open &&
+                       (!cascade || view.cascade_item >=
+                                        static_cast<int>(cascade->size())))) {
+        throw ScriptFailure(2, command.where +
+                                   ": menu-show indexes are outside the menu");
+      }
+      // A highlighted cascade row opens its drop-down, as USER does.
+      if (cascade) view.cascade_open = true;
+      session_.set_menu_view(view);
+      break;
+    }
+    case ScriptOp::menu_hide:
+      session_.set_menu_view({});
+      break;
+    case ScriptOp::expect_menu:
+    case ScriptOp::expect_title:
+    case ScriptOp::expect_saved:
+      check_expectation(command);
+      break;
   }
 }
 
@@ -286,6 +416,57 @@ void ScriptPlayer::check_expectation(const ScriptCommand& command) const {
       actual = session_.document() ? session_.document()->header.balance : 0;
       what = "balance";
       break;
+    case ScriptOp::expect_menu: {
+      const auto* item = find_original_menu_command(
+          session_.menu(), static_cast<std::uint16_t>(command.value));
+      std::string state = "absent";
+      if (item) {
+        if (command.text == "checked" || command.text == "unchecked") {
+          state = item->checked() ? "checked" : "unchecked";
+        } else {
+          state = item->grayed() ? "grayed" : "enabled";
+        }
+      }
+      if (state != command.text) {
+        throw ScriptFailure(3, command.where + ": expected menu " +
+                                   std::to_string(command.value) + " " +
+                                   command.text + ", got " + state);
+      }
+      return;
+    }
+    case ScriptOp::expect_saved: {
+      std::ifstream stream(command.text, std::ios::binary);
+      const std::vector<char> chars((std::istreambuf_iterator<char>(stream)),
+                                    std::istreambuf_iterator<char>());
+      const auto* document = session_.document();
+      const auto expected =
+          document ? serialize_original_tdt_game_save(*document)
+                   : std::vector<std::byte>{};
+      const bool same =
+          stream.good() || stream.eof()
+              ? chars.size() == expected.size() &&
+                    std::equal(chars.begin(), chars.end(), expected.begin(),
+                               [](char a, std::byte b) {
+                                 return static_cast<unsigned char>(a) ==
+                                        static_cast<unsigned char>(b);
+                               })
+              : false;
+      if (!document || !same) {
+        throw ScriptFailure(3, command.where + ": " + command.text +
+                                   " does not hold the live tower (" +
+                                   std::to_string(chars.size()) + " bytes, " +
+                                   std::to_string(expected.size()) +
+                                   " expected)");
+      }
+      return;
+    }
+    case ScriptOp::expect_title:
+      if (session_.window_title() != command.text) {
+        throw ScriptFailure(3, command.where + ": expected title '" +
+                                   command.text + "', got '" +
+                                   session_.window_title() + "'");
+      }
+      return;
     default:
       return;
   }
