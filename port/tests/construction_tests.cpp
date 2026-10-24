@@ -1561,6 +1561,68 @@ int main() {
   }
 
   {
+    // 11f8:17fd's overlap path accepts a facility that runs past a floor
+    // edge when the type-0 record at that edge starts at or before the
+    // facility (1ba8-1bf3), or is record 0 (1bcb-1c21), and moves the floor
+    // edge (1d7f-1daf, 1deb-1e0a). Support comes from the wider Lobby below.
+    auto tower = simtower::make_original_new_tdt();
+    tower.header.balance = 10'000'000;
+    assert(simtower::build_original_initial_lobby(
+               tower, 80, 300, 1, costs)
+               .succeeded());
+    assert(simtower::build_original_floor(tower, 11, 100, 200, costs)
+               .succeeded());
+    assert(tower.floors[11].tenants.size() == 1U);
+
+    const auto past_right = simtower::build_original_office(
+        tower, 11, 195, 0, costs);
+    assert(past_right.succeeded());
+    const auto& floor = tower.floors[11];
+    assert(floor.left_edge == 100U);
+    assert(floor.tenants.size() == 2U);
+    assert(floor.tenants[0].type == 0 && floor.tenants[0].left == 100U &&
+           floor.tenants[0].right == 195U);
+    assert(floor.tenants[1].left == 195U);
+    assert(floor.right_edge == floor.tenants[1].right);
+    assert(floor.right_edge > 200U);
+
+    const auto past_left = simtower::build_original_office(
+        tower, 11, 95, 0, costs);
+    assert(past_left.succeeded());
+    assert(floor.left_edge == 95U);
+    assert(floor.tenants.size() == 3U);
+    assert(floor.tenants[0].left == 95U);
+    assert(floor.tenants[1].type == 0 &&
+           floor.tenants[1].left == floor.tenants[0].right &&
+           floor.tenants[1].right == 195U);
+
+    // 11f8:17fd checks funds (1178:009e at 183d) before 2e64 support and
+    // 2f5a floor legality, so an unaffordable request on an unsupported
+    // floor reports the funds message, not the support one.
+    {
+      auto poor = simtower::make_original_new_tdt();
+      poor.header.balance = 0;
+      const auto office = simtower::build_original_office(
+          poor, 50, 120, 0, costs);
+      assert(office.status ==
+             simtower::OriginalConstructionStatus::insufficient_funds);
+      assert(office.construction_status_code == 7U);
+      const auto hotel = simtower::build_original_hotel_room(
+          poor, 3, 50, 120, 0, costs);
+      assert(hotel.status ==
+             simtower::OriginalConstructionStatus::insufficient_funds);
+      assert(hotel.construction_status_code == 7U);
+    }
+
+    // Overlapping an existing Office is still rejected.
+    const auto before_overlap = simtower::serialize_original_tdt(tower);
+    const auto overlap = simtower::build_original_office(
+        tower, 11, 190, 0, costs);
+    assert(overlap.status == simtower::OriginalConstructionStatus::occupied);
+    assert(simtower::serialize_original_tdt(tower) == before_overlap);
+  }
+
+  {
     auto tower = simtower::make_original_new_tdt();
     assert(simtower::build_original_initial_lobby(
                tower, 100, 200, 1, costs)
