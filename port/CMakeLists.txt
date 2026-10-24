@@ -17,6 +17,8 @@ add_library(simtower_port_core STATIC
   src/original_command_palette.cpp
   src/original_construction.cpp
   src/original_dialog.cpp
+  src/original_dialog_model.cpp
+  src/original_dialog_paint.cpp
   src/original_dib.cpp
   src/original_dtmp.cpp
   src/original_dtmp_runtime.cpp
@@ -156,6 +158,15 @@ target_include_directories(simtower_test_support PUBLIC
                            ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(simtower_test_support PUBLIC simtower_port_core)
 
+# The SDL host's portable dialog manager and its dialog descriptors
+# (sdl/sdl_dialog*.hpp). No SDL in it, so it is built on every platform:
+# simtower_sdl and the dialog tests (native and under Wine) link it.
+add_library(simtower_sdl_runtime STATIC sdl/sdl_dialog.cpp
+                                        sdl/sdl_dialog_descriptors.cpp)
+target_include_directories(simtower_sdl_runtime PUBLIC
+                           ${CMAKE_CURRENT_SOURCE_DIR}/sdl)
+target_link_libraries(simtower_sdl_runtime PUBLIC simtower_canvas)
+
 if(SIMTOWER_BUILD_SDL)
   find_package(SDL3 REQUIRED CONFIG)
   add_executable(simtower_sdl sdl/sdl_main.cpp sdl/sdl_session.cpp
@@ -163,7 +174,7 @@ if(SIMTOWER_BUILD_SDL)
                               sdl/sdl_panels.cpp sdl/sdl_input_script.cpp
                               sdl/sdl_menu.cpp)
   target_link_libraries(simtower_sdl PRIVATE simtower_test_support
-                                             simtower_canvas SDL3::SDL3)
+                                             simtower_sdl_runtime SDL3::SDL3)
 endif()
 
 include(CTest)
@@ -186,6 +197,38 @@ if(BUILD_TESTING)
       NAME simtower_resource_tests
       COMMAND simtower_resource_tests ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
     )
+
+    # The DLGTEMPLATE bytes the Win32 host builds from the shared dialog
+    # models must equal the old inline preparation (frozen copy).
+    add_executable(simtower_dialog_template_parity_tests
+                   tests/dialog_template_parity_tests.cpp)
+    target_link_libraries(simtower_dialog_template_parity_tests PRIVATE
+                          simtower_port_core)
+    target_compile_definitions(simtower_dialog_template_parity_tests PRIVATE
+                               UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(
+      NAME simtower_dialog_template_parity_tests
+      COMMAND simtower_dialog_template_parity_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+    )
+    set_tests_properties(simtower_dialog_template_parity_tests PROPERTIES
+                         SKIP_RETURN_CODE 77)
+
+    # The shared DTMP chrome painter through GDI (and the canvas) must paint
+    # the same pixels as the frozen direct-GDI painter.
+    add_executable(simtower_dialog_chrome_parity_tests
+                   tests/dialog_chrome_parity_tests.cpp)
+    target_link_libraries(simtower_dialog_chrome_parity_tests PRIVATE
+                          simtower_canvas)
+    target_compile_definitions(simtower_dialog_chrome_parity_tests PRIVATE
+                               UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(
+      NAME simtower_dialog_chrome_parity_tests
+      COMMAND simtower_dialog_chrome_parity_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+    )
+    set_tests_properties(simtower_dialog_chrome_parity_tests PROPERTIES
+                         SKIP_RETURN_CODE 77)
 
     add_executable(
       simtower_embedded_resource_tests
@@ -269,6 +312,18 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
   )
 
+  # The shared DTMP chrome painter through the canvas on every platform
+  # (synthetic probes; the pack half is skipped, exit 77, without assets).
+  add_executable(simtower_dialog_paint_tests tests/dialog_paint_tests.cpp)
+  target_link_libraries(simtower_dialog_paint_tests PRIVATE simtower_canvas)
+  add_test(
+    NAME simtower_dialog_paint_tests
+    COMMAND simtower_dialog_paint_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_dialog_paint_tests PROPERTIES
+                       SKIP_RETURN_CODE 77)
+
   # OriginalCanvasDrawContext primitives on synthetic input (no assets).
   add_executable(simtower_draw_canvas_tests tests/draw_canvas_tests.cpp)
   target_link_libraries(simtower_draw_canvas_tests PRIVATE simtower_canvas)
@@ -304,6 +359,34 @@ if(BUILD_TESTING)
     COMMAND simtower_about_tests
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
   )
+
+  # The shared dialog models (original_dialog_model.hpp): event templates
+  # and texts, About, and the message-box requests. Synthetic checks need no
+  # assets; the resource half is skipped (exit 77) without the pack.
+  add_executable(simtower_dialog_model_tests tests/dialog_model_tests.cpp)
+  target_link_libraries(simtower_dialog_model_tests PRIVATE simtower_port_core)
+  add_test(
+    NAME simtower_dialog_model_tests
+    COMMAND simtower_dialog_model_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_dialog_model_tests PROPERTIES
+                       SKIP_RETURN_CODE 77)
+
+  # The SDL host's dialog runtime (sdl/sdl_dialog.hpp has no SDL in it, so
+  # this also builds and runs under Wine): layout, focus, keys, pointer
+  # capture, timers and every event dialog's answer, the alerts and About.
+  # The resource half is skipped (exit 77) without the pack.
+  add_executable(simtower_sdl_dialog_tests tests/sdl_dialog_tests.cpp)
+  target_link_libraries(simtower_sdl_dialog_tests PRIVATE
+                        simtower_sdl_runtime)
+  add_test(
+    NAME simtower_sdl_dialog_tests
+    COMMAND simtower_sdl_dialog_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_sdl_dialog_tests PROPERTIES
+                       SKIP_RETURN_CODE 77)
 
   add_executable(simtower_elevator_control_tests tests/elevator_control_tests.cpp)
   target_link_libraries(simtower_elevator_control_tests PRIVATE simtower_port_core)
@@ -415,6 +498,29 @@ if(BUILD_TESTING)
                            "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy")
     endforeach()
 
+    # The dialog runtime end to end through scripts: expect-dialog,
+    # dialog-click/key/wait/hold, the logged answers, the held frames and
+    # the script errors (cli_dialog_test.cmake reads each header).
+    foreach(script dialog_bomb_pay dialog_bomb_esc dialog_bomb_enter
+                   dialog_timer_accept dialog_bomb_short
+                   dialog_bomb_short_timer dialog_default dialog_mismatch
+                   dialog_unbound dialog_click_static dialog_none_open
+                   alert_cancel_1001 alert_no_1001 alert_answer_3
+                   about_dialog dialog_frames)
+      add_test(
+        NAME simtower_sdl_${script}
+        COMMAND ${CMAKE_COMMAND}
+          -DBIN=$<TARGET_FILE:simtower_sdl>
+          -DPACK=${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+          -DSCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/${script}.txt
+          -DWORK=${CMAKE_CURRENT_BINARY_DIR}/dialog-scripts
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_dialog_test.cmake)
+      set_tests_properties(simtower_sdl_${script} PROPERTIES
+                           ENVIRONMENT
+                           "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy"
+                           SKIP_REGULAR_EXPRESSION "cli_dialog_test: skipped")
+    endforeach()
+
     # The window's menu bar: layout, modal tracking and drawing on the
     # pack's TOWER_MENU (pure logic and pixels, no SDL calls).
     add_executable(simtower_sdl_menu_tests tests/sdl_menu_tests.cpp
@@ -478,6 +584,9 @@ if(BUILD_TESTING)
       simtower_information_tests
       simtower_find_tests
       simtower_about_tests
+      simtower_dialog_model_tests
+      simtower_dialog_paint_tests
+      simtower_sdl_dialog_tests
       simtower_elevator_control_tests
       simtower_audio_tests
       simtower_idle_pass_tests
@@ -492,7 +601,9 @@ if(BUILD_TESTING)
   if(WIN32)
     list(APPEND SIMTOWER_ASSERT_TESTS
          simtower_resource_tests
-         simtower_embedded_resource_tests)
+         simtower_embedded_resource_tests
+         simtower_dialog_template_parity_tests
+         simtower_dialog_chrome_parity_tests)
   endif()
   foreach(test_target IN LISTS SIMTOWER_ASSERT_TESTS)
     if(MSVC)

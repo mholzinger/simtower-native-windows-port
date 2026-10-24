@@ -52,6 +52,31 @@ int parse_coordinate(const std::string& text, const std::string& where) {
   return static_cast<int>(value);
 }
 
+bool dialog_op(ScriptOp op) {
+  switch (op) {
+    case ScriptOp::dialog_click:
+    case ScriptOp::dialog_key:
+    case ScriptOp::dialog_wait:
+    case ScriptOp::dialog_timer:
+    case ScriptOp::dialog_hold:
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::string op_name(ScriptOp op) {
+  switch (op) {
+    case ScriptOp::dialog_click: return "dialog-click";
+    case ScriptOp::dialog_key: return "dialog-key";
+    case ScriptOp::dialog_wait: return "dialog-wait";
+    case ScriptOp::dialog_timer: return "dialog-timer";
+    case ScriptOp::dialog_hold: return "dialog-hold";
+    case ScriptOp::expect_dialog: return "expect-dialog";
+    default: return "command";
+  }
+}
+
 }  // namespace
 
 std::vector<ScriptCommand> parse_input_script(
@@ -142,8 +167,15 @@ std::vector<ScriptCommand> parse_input_script(
     } else if (verb == "alert") {
       command.op = ScriptOp::alert;
       single_value();
-      if (command.value != 1 && command.value != 2) {
-        throw fail("alert answer must be 1 or 2");
+      if (command.value < 1 || command.value > 3) {
+        throw fail("alert answer must be 1, 2 or 3");
+      }
+    } else if (verb == "set-balance") {
+      command.op = ScriptOp::set_balance;
+      single_value();
+      if (command.value < std::numeric_limits<std::int32_t>::min() ||
+          command.value > std::numeric_limits<std::int32_t>::max()) {
+        throw fail("balance must fit a signed 32-bit value");
       }
     } else if (verb == "expect-type") {
       command.op = ScriptOp::expect_type;
@@ -197,6 +229,66 @@ std::vector<ScriptCommand> parse_input_script(
           command.text != "absent") {
         throw fail("unknown menu state '" + command.text + "'");
       }
+    } else if (verb == "expect-dialog") {
+      command.op = ScriptOp::expect_dialog;
+      const auto usage = [&]() {
+        return fail(
+            "expect-dialog takes event ID, alert ID, about, box replace "
+            "or box invalid-filename");
+      };
+      if (words.size() == 2 && words[1] == "about") {
+        command.text = kAboutDialogLabel;
+      } else if (words.size() == 3 &&
+                 (words[1] == "event" || words[1] == "alert")) {
+        const auto id = parse_integer(words[2], where);
+        if (id < 0 || id > 0xFFFF) throw fail("dialog id must be 0..65535");
+        command.text = words[1] == "event"
+                           ? event_dialog_label(static_cast<std::uint16_t>(id))
+                           : alert_dialog_label(static_cast<int>(id));
+      } else if (words.size() == 3 && words[1] == "box" &&
+                 (words[2] == "replace" || words[2] == "invalid-filename")) {
+        command.text = "box " + words[2];
+      } else {
+        throw usage();
+      }
+    } else if (verb == "dialog-click") {
+      command.op = ScriptOp::dialog_click;
+      single_value();
+      if (command.value < 0 || command.value > 0xFFFF) {
+        throw fail("control id must be 0..65535");
+      }
+    } else if (verb == "dialog-key") {
+      command.op = ScriptOp::dialog_key;
+      if (words.size() != 2) throw fail("dialog-key needs one key");
+      static const std::pair<const char*, DialogKey> kKeys[] = {
+          {"enter", DialogKey::enter}, {"esc", DialogKey::escape},
+          {"tab", DialogKey::tab},     {"shift-tab", DialogKey::shift_tab},
+          {"space", DialogKey::space}, {"arrow", DialogKey::arrow},
+          {"other", DialogKey::other},
+      };
+      const auto* found = std::ranges::find_if(
+          kKeys, [&](const auto& entry) { return words[1] == entry.first; });
+      if (found != std::end(kKeys)) {
+        command.dialog_key = found->second;
+      } else if (words[1].size() == 1 && words[1][0] >= 'a' &&
+                 words[1][0] <= 'z') {
+        command.dialog_key = DialogKey::other;
+        command.character = words[1][0];
+      } else {
+        throw fail("unknown dialog key '" + words[1] + "'");
+      }
+    } else if (verb == "dialog-wait") {
+      command.op = ScriptOp::dialog_wait;
+      single_value();
+      if (command.value < 0 || command.value > 0x7FFFFFFF) {
+        throw fail("dialog-wait takes 0..2147483647 milliseconds");
+      }
+    } else if (verb == "dialog-timer") {
+      command.op = ScriptOp::dialog_timer;
+      if (words.size() != 1) throw fail("dialog-timer takes no value");
+    } else if (verb == "dialog-hold") {
+      command.op = ScriptOp::dialog_hold;
+      command.text = rest_of_line(line, verb);
     } else if (verb == "expect-title" || verb == "expect-saved") {
       command.op = verb == "expect-title" ? ScriptOp::expect_title
                                           : ScriptOp::expect_saved;
@@ -236,10 +328,12 @@ void validate_pass_order(const std::vector<ScriptCommand>& commands,
 
 ScriptPlayer::ScriptPlayer(std::vector<ScriptCommand> commands,
                            Session& session,
-                           std::function<void()> print_digest)
+                           std::function<void()> print_digest,
+                           DialogHoldWriter hold_dialog)
     : commands_(std::move(commands)),
       session_(session),
-      print_digest_(std::move(print_digest)) {}
+      print_digest_(std::move(print_digest)),
+      hold_dialog_(std::move(hold_dialog)) {}
 
 const ScriptCommand* ScriptPlayer::run_until_pass() {
   while (next_ < commands_.size()) {
@@ -278,6 +372,97 @@ ScriptPlayer::next_file_pick() {
   }
   return std::optional<std::optional<std::filesystem::path>>(
       std::in_place, std::filesystem::path(command.text));
+}
+
+bool ScriptPlayer::drives_dialog(const ModalDialog& dialog) {
+  if (next_ >= commands_.size()) return false;
+  const auto& command = commands_[next_];
+  if (command.op == ScriptOp::expect_dialog) {
+    if (command.text != dialog.label()) {
+      throw ScriptFailure(3, command.where + ": expect-dialog " +
+                                 command.text + ", but " + dialog.label() +
+                                 " opened");
+    }
+    ++next_;
+    return true;
+  }
+  if (dialog_op(command.op)) {
+    throw ScriptFailure(2, command.where + ": " + op_name(command.op) +
+                               " without expect-dialog: " + dialog.label() +
+                               " opened (add \"expect-dialog " +
+                               dialog.label() + "\" before it)");
+  }
+  return false;
+}
+
+std::optional<DialogInput> ScriptPlayer::next_dialog_input(
+    std::optional<std::uint32_t> /*wait_ms*/) {
+  while (pending_dialog_.empty()) {
+    if (next_ >= commands_.size()) return std::nullopt;
+    const auto& command = commands_[next_];
+    switch (command.op) {
+      case ScriptOp::dialog_click: {
+        ++next_;
+        const auto dialogs = session_.dialogs();
+        const auto id = static_cast<std::uint16_t>(command.value);
+        const auto point =
+            dialogs.empty() ? std::nullopt : dialogs.back()->click_point(id);
+        if (!point) {
+          const auto label =
+              dialogs.empty() ? std::string("none") : dialogs.back()->label();
+          throw ScriptFailure(2, command.where + ": dialog-click " +
+                                     std::to_string(id) + ": " + label +
+                                     " has no visible, enabled push button "
+                                     "with that id");
+        }
+        DialogInput input{};
+        input.pointer = {InputKind::down, point->first, point->second, 0U};
+        pending_dialog_.push_back(input);
+        input.pointer.kind = InputKind::up;
+        pending_dialog_.push_back(input);
+        break;
+      }
+      case ScriptOp::dialog_key: {
+        ++next_;
+        DialogInput input{};
+        input.kind = DialogInput::Kind::key;
+        input.key = command.dialog_key;
+        input.character = command.character;
+        pending_dialog_.push_back(input);
+        break;
+      }
+      case ScriptOp::dialog_wait: {
+        ++next_;
+        DialogInput input{};
+        input.kind = DialogInput::Kind::wait_elapsed;
+        input.elapsed_ms = static_cast<std::uint32_t>(command.value);
+        pending_dialog_.push_back(input);
+        break;
+      }
+      case ScriptOp::dialog_timer: {
+        ++next_;
+        DialogInput input{};
+        input.kind = DialogInput::Kind::timer;
+        pending_dialog_.push_back(input);
+        break;
+      }
+      case ScriptOp::dialog_hold:
+        ++next_;
+        if (!hold_dialog_) {
+          throw ScriptFailure(2, command.where +
+                                     ": dialog-hold cannot write a frame here");
+        }
+        hold_dialog_(command.text, command.where);
+        break;
+      default:
+        // Any other line (another expect-dialog included): the dialog takes
+        // its default answer.
+        return std::nullopt;
+    }
+  }
+  const auto input = pending_dialog_.front();
+  pending_dialog_.pop_front();
+  return input;
 }
 
 void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
@@ -332,6 +517,9 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
       break;
     case ScriptOp::alert:
       session_.set_alert_answer(static_cast<int>(command.value));
+      break;
+    case ScriptOp::set_balance:
+      session_.set_balance_for_test(static_cast<std::int32_t>(command.value));
       break;
     case ScriptOp::expect_type:
     case ScriptOp::expect_mode:
@@ -397,6 +585,18 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
     case ScriptOp::expect_saved:
       check_expectation(command);
       break;
+    case ScriptOp::expect_dialog:
+      // Read by drives_dialog when a dialog opens.
+      throw ScriptFailure(3, command.where + ": expect-dialog " +
+                                 command.text + ", but no dialog opened");
+    case ScriptOp::dialog_click:
+    case ScriptOp::dialog_key:
+    case ScriptOp::dialog_wait:
+    case ScriptOp::dialog_timer:
+    case ScriptOp::dialog_hold:
+      // Dialog lines are read by next_dialog_input while a dialog is open.
+      throw ScriptFailure(2, command.where + ": " + op_name(command.op) +
+                                 " with no dialog open");
   }
 }
 

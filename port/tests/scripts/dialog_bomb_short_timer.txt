@@ -1,0 +1,18 @@
+# Timer 10 on the bomb offer when the balance cannot cover the ransom: the
+# timer accept is silent (1068:0380 sets the timer flag, so no ALRT/1004)
+# and the offer ends with 1, unpaid. set-balance is a test shortcut that
+# puts the balance below the 3000 ransom.
+# args: --scenario busy --passes 320 --event bomb@300
+# expect-stderr: dialog 3020 argument -3000 wave 10003 -> 1 \(bomb offer: answered\)
+# reject-stderr: alert 1004
+# reject-stderr: sound bomb payment
+# The busy scenario's rating promotions (3030, 3031) open during the first
+# 300 passes here and keep their default answers; the bomb offer 3020 opens
+# in pass 301.
+pass 300
+set-balance 1000
+pass 301
+expect-dialog event 3020
+dialog-wait 37856
+expect-balance 1000
+pass 320

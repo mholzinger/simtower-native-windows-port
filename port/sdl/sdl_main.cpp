@@ -2,8 +2,10 @@
 // panels (sdl_layout.hpp), driven by the same portable simulation,
 // renderer and world input module as the Win32 host. TOWER_MENU is drawn
 // in the window (sdl_menu.hpp) and dispatched through the shared WM_COMMAND
-// dispatcher; New/Open/Save/Save As use the native file pickers. Dialogs
-// and help are logged requests until their runtimes exist.
+// dispatcher; New/Open/Save/Save As use the native file pickers. The event
+// dialogs, alerts and About run in the window through the dialog runtime
+// (sdl_dialog.hpp); the other dialogs and help are logged requests until
+// their runtimes exist.
 //
 // Usage:
 //   simtower_sdl [--pack FILE] [--open FILE.TDT] [--size WxH] [--slow]
@@ -43,7 +45,8 @@
 // "pick-file" result, and with none it is cancelled. --direct-build
 // (test-only) runs one constructor plus the common success tail before
 // pass PASS, as the reference for a scripted placement. --headless-window
-// FILE.bmp writes the composed window (panels included) after the passes.
+// FILE.bmp writes the composed window (panels included) after the passes,
+// unless a script's "dialog-hold" already wrote it with a dialog open.
 //
 // Window keys: a lone Alt or F10 enters keyboard menu mode (arrows, Enter,
 // Esc, mnemonics), Alt+letter opens that title's drop-down, and F1 is the
@@ -604,6 +607,8 @@ int run_headless(const Options& options) {
     std::printf("\n");
   };
   int completed = 0;
+  // A "dialog-hold" without FILE wrote --headless-window already.
+  bool window_held = false;
   const auto run_pass = [&]() {
     const int pass = completed;
     for (const auto& [build, at_pass] : options.direct_builds) {
@@ -634,8 +639,30 @@ int run_headless(const Options& options) {
     // validate_pass_order makes every target reachable in order.
     auto commands = simtower::sdl::parse_input_script(*options.input_script);
     simtower::sdl::validate_pass_order(commands, options.passes);
+    const auto hold_dialog = [&](const std::string& path,
+                                 const std::string& where) {
+      std::filesystem::path target = path;
+      if (target.empty()) {
+        if (!options.headless_window) {
+          throw simtower::sdl::ScriptFailure(
+              2, where + ": dialog-hold needs FILE or --headless-window");
+        }
+        target = *options.headless_window;
+        window_held = true;
+      }
+      // No session.present() here: it may rebuild the backing, which is
+      // digest state. The frame shows the backing as the dialog opened.
+      const auto raster = simtower::sdl::compose_window(session);
+      if (!write_bmp(raster, target)) {
+        throw std::runtime_error("could not write " + target.string() +
+                                 ": " + SDL_GetError());
+      }
+      std::fprintf(stderr, "simtower_sdl: wrote %s (%dx%d, dialog held)\n",
+                   target.string().c_str(), raster.width, raster.height);
+    };
     simtower::sdl::ScriptPlayer player(std::move(commands), session,
-                                       [&] { print_digest(completed); });
+                                       [&] { print_digest(completed); },
+                                       hold_dialog);
     session.set_input_source(&player);
     while (const auto* pass = player.run_until_pass()) {
       while (completed < static_cast<int>(pass->value) &&
@@ -704,7 +731,7 @@ int run_headless(const Options& options) {
       !write(session.main_raster(), *options.headless_frame)) {
     return 1;
   }
-  if (options.headless_window &&
+  if (options.headless_window && !window_held &&
       !write(simtower::sdl::compose_window(session),
              *options.headless_window)) {
     return 1;
@@ -924,6 +951,97 @@ class WindowModalSource final : public simtower::sdl::InputSource {
 
   void modal_changed() override {
     window_.present(simtower::sdl::compose_window(session_));
+  }
+
+  // The window answers every dialog.
+  bool drives_dialog(const simtower::sdl::ModalDialog& /*dialog*/) override {
+    return true;
+  }
+
+  // The open dialog's loop (sdl_dialog.hpp): pointer input, the keys the
+  // dialog manager and procedures see, and the timer wait. Other events
+  // (focus, wheel, key releases) only end a timed wait early, so the
+  // session can check the deadline again. Every input carries the
+  // milliseconds this call waited (the dialog clock).
+  std::optional<simtower::sdl::DialogInput> next_dialog_input(
+      std::optional<std::uint32_t> wait_ms) override {
+    using simtower::sdl::DialogInput;
+    using simtower::sdl::DialogKey;
+    // 1068:00fb / 1010:057b select the stock arrow.
+    window_.set_cursor(0U);
+    const Uint64 started = SDL_GetTicks();
+    const auto with_elapsed = [&](DialogInput input) {
+      input.elapsed_ms = static_cast<std::uint32_t>(std::min<Uint64>(
+          SDL_GetTicks() - started, 0xFFFFFFFFU));
+      return input;
+    };
+    SDL_Event event{};
+    while (!quit_requested_) {
+      std::optional<std::uint32_t> remaining{};
+      if (wait_ms) {
+        const auto spent = SDL_GetTicks() - started;
+        remaining = spent >= *wait_ms
+                        ? 0U
+                        : static_cast<std::uint32_t>(*wait_ms - spent);
+      }
+      const bool got =
+          remaining ? SDL_WaitEventTimeout(
+                          &event, static_cast<Sint32>(std::min<std::uint32_t>(
+                                      *remaining, 0x7fffffffU)))
+                    : SDL_WaitEvent(&event);
+      if (!got) {
+        if (!remaining) return std::nullopt;
+        return with_elapsed({DialogInput::Kind::wait_elapsed, {}, {}});
+      }
+      if (event.type == SDL_EVENT_QUIT) {
+        quit_requested_ = true;
+        break;
+      }
+      if (event.type == SDL_EVENT_WINDOW_EXPOSED) {
+        modal_changed();
+        continue;
+      }
+      if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+        // Session::resize re-places the open dialogs.
+        resize_session(event, session_);
+        modal_changed();
+        continue;
+      }
+      if (const auto input = pointer_input(event)) {
+        return with_elapsed({DialogInput::Kind::pointer, *input, {}});
+      }
+      if (event.type == SDL_EVENT_KEY_DOWN) {
+        DialogInput input{DialogInput::Kind::key, {}, DialogKey::other};
+        switch (event.key.key) {
+          case SDLK_RETURN:
+          case SDLK_KP_ENTER: input.key = DialogKey::enter; break;
+          case SDLK_ESCAPE: input.key = DialogKey::escape; break;
+          case SDLK_TAB:
+            input.key = (event.key.mod & SDL_KMOD_SHIFT) != 0
+                            ? DialogKey::shift_tab
+                            : DialogKey::tab;
+            break;
+          case SDLK_SPACE: input.key = DialogKey::space; break;
+          case SDLK_LEFT:
+          case SDLK_RIGHT:
+          case SDLK_UP:
+          case SDLK_DOWN: input.key = DialogKey::arrow; break;
+          default:
+            // A letter is a button mnemonic (SDL keycodes of letters are
+            // their lower-case ASCII).
+            if (event.key.key >= SDLK_A && event.key.key <= SDLK_Z) {
+              input.character = static_cast<char>(event.key.key);
+            }
+            break;
+        }
+        return with_elapsed(input);
+      }
+      if (wait_ms) {
+        return with_elapsed({DialogInput::Kind::wait_elapsed, {}, {}});
+      }
+    }
+    // Quit: the dialog takes its default answer and the main loop ends.
+    return std::nullopt;
   }
 
  private:

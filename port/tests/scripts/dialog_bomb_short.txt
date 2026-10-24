@@ -1,0 +1,21 @@
+# "Pay Them" (control 2) on the bomb offer when the balance cannot cover the
+# ransom: close_original_event_dialog shows ALRT/1004 ("not enough money")
+# owned by the open dialog (a nested, re-entrant modal), and after it is
+# acknowledged the offer ends with 1, unpaid. set-balance is a test
+# shortcut that puts the balance below the 3000 ransom.
+# args: --scenario busy --passes 320 --event bomb@300
+# expect-stderr: alert 1004 "Not enough money\." -> 1
+# expect-stderr: dialog 3020 argument -3000 wave 10003 -> 1 \(bomb offer: answered\)
+# reject-stderr: sound bomb payment
+# The busy scenario's rating promotions (3030, 3031) open during the first
+# 300 passes here and keep their default answers; the bomb offer 3020 opens
+# in pass 301.
+pass 300
+set-balance 1000
+pass 301
+expect-dialog event 3020
+dialog-click 2
+expect-dialog alert 1004
+dialog-key enter
+expect-balance 1000
+pass 320

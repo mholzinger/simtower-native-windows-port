@@ -1,0 +1,5 @@
+# Reference for dialog_default.txt: the same run without dialog lines.
+pass 300
+pass 301
+digest
+pass 400
