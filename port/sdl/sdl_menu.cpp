@@ -1,4 +1,5 @@
 #include "sdl_menu.hpp"
+#include "sdl_style.hpp"
 
 #include "original_canvas_font.hpp"
 #include "original_draw_canvas.hpp"
@@ -10,19 +11,18 @@
 namespace simtower::sdl {
 namespace {
 
-// TEMP colours: the Windows 3.1 defaults (COLOR_MENU white, COLOR_MENUTEXT
-// black, COLOR_GRAYTEXT dark gray, COLOR_HIGHLIGHT navy with white text),
-// and the same navy for the active caption as the palette frames use.
-constexpr OriginalRgb kMenuRgb = 0x00FFFFFFU;
-constexpr OriginalRgb kMenuTextRgb = 0x00000000U;
-constexpr OriginalRgb kGrayTextRgb = 0x00808080U;
-constexpr OriginalRgb kHighlightRgb = 0x00000080U;
-constexpr OriginalRgb kHighlightTextRgb = 0x00FFFFFFU;
-constexpr OriginalRgb kBorderRgb = 0x00000000U;
-constexpr OriginalRgb kCaptionRgb = 0x00000080U;
-constexpr OriginalRgb kCaptionTextRgb = 0x00FFFFFFU;
-constexpr OriginalRgb kButtonFaceRgb = 0x00C0C0C0U;
-constexpr OriginalRgb kButtonShadowRgb = 0x00808080U;
+// TEMP colours: the shared Windows 3.1 table (sdl_style.hpp; the navy
+// highlight and caption are an owner decision, 2026-10-23).
+constexpr OriginalRgb kMenuRgb = style::kMenu;
+constexpr OriginalRgb kMenuTextRgb = style::kMenuText;
+constexpr OriginalRgb kGrayTextRgb = style::kGrayText;
+constexpr OriginalRgb kHighlightRgb = style::kHighlight;
+constexpr OriginalRgb kHighlightTextRgb = style::kHighlightText;
+constexpr OriginalRgb kBorderRgb = style::kFrame;
+constexpr OriginalRgb kCaptionRgb = style::kCaption;
+constexpr OriginalRgb kCaptionTextRgb = style::kCaptionText;
+constexpr OriginalRgb kButtonFaceRgb = style::kButtonFace;
+constexpr OriginalRgb kButtonShadowRgb = style::kButtonShadow;
 
 // TEMP metrics (USER's are System-font based: 16-pixel cells on VGA).
 constexpr int kFontHeight = 13;

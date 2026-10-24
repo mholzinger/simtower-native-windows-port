@@ -1,0 +1,8 @@
+# dialog-click on a control that is not a push button (the rating text,
+# static 3) is exit 2.
+# args: --scenario busy --passes 320 --event bomb@300
+# expect-exit: 2
+# expect-stderr: dialog-click 3: event 3030 has no visible, enabled push button
+pass 301
+expect-dialog event 3030
+dialog-click 3

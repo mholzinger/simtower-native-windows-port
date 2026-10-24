@@ -1,0 +1,14 @@
+# Esc on the bomb offer sends IDCANCEL = 2, AHOTTADLOGFILTER's accept
+# button: it pays the ransom, as on Win32 (owner decision 2026-10-23).
+# args: --scenario busy --passes 320 --event bomb@300
+# expect-stderr: dialog 3020 argument -3000 wave 10003 -> 2 \(bomb offer: answered\)
+# expect-stderr: sound bomb payment 1
+# The busy scenario promotes the rating (3030, 3031) in the pass the bomb
+# event starts, before the bomb offer 3020 opens. An expect-dialog line
+# followed by another one leaves that dialog with its default answer.
+pass 301
+expect-dialog event 3030
+expect-dialog event 3031
+expect-dialog event 3020
+dialog-key esc
+pass 320

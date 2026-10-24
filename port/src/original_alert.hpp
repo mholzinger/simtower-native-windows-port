@@ -1,5 +1,6 @@
 #pragma once
 
+#include "original_dialog.hpp"
 #include "original_resources.hpp"
 
 #include <array>
@@ -18,15 +19,21 @@ using OriginalAlertStyle = std::uint32_t;
 // against the MB_* and ID* macros in original_alert_win32.cpp.
 inline constexpr OriginalAlertStyle kOriginalAlertIconExclamation = 0x30U;
 inline constexpr OriginalAlertStyle kOriginalAlertSystemModal = 0x1000U;
+// MB_ICONMASK: the icon bits of a style (MB_ICONEXCLAMATION is 0x30).
+inline constexpr OriginalAlertStyle kOriginalAlertIconMask = 0xF0U;
 inline constexpr OriginalAlertStyle kOriginalAlertButtonsOk = 0U;
 inline constexpr OriginalAlertStyle kOriginalAlertButtonsOkCancel = 1U;
 inline constexpr OriginalAlertStyle kOriginalAlertButtonsAbortRetryIgnore =
     2U;
 inline constexpr OriginalAlertStyle kOriginalAlertButtonsYesNoCancel = 3U;
 inline constexpr OriginalAlertStyle kOriginalAlertButtonsYesNo = 4U;
-inline constexpr int kOriginalAlertResultOk = 1;
-inline constexpr int kOriginalAlertResultCancel = 2;
+inline constexpr OriginalAlertStyle kOriginalAlertButtonsRetryCancel = 5U;
+// IDOK and IDCANCEL are the dialog manager's ids (original_dialog.hpp).
+inline constexpr int kOriginalAlertResultOk = kOriginalDialogIdOk;
+inline constexpr int kOriginalAlertResultCancel = kOriginalDialogIdCancel;
 inline constexpr int kOriginalAlertResultAbort = 3;
+inline constexpr int kOriginalAlertResultRetry = 4;
+inline constexpr int kOriginalAlertResultIgnore = 5;
 inline constexpr int kOriginalAlertResultYes = 6;
 inline constexpr int kOriginalAlertResultNo = 7;
 

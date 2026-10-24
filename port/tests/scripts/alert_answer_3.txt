@@ -1,0 +1,8 @@
+# "alert 3" answers an undriven ALRT/1001 with Cancel.
+# args: --scenario busy --passes 3
+# expect-stderr: alert 1001 "Save the tower "untitled" before closing\?" -> 3
+# expect-stderr: after 3 passes: frame_time [0-9]+ day [0-9]+ rating [0-9]+ balance 49767200 people records 3328
+pass 1
+alert 3
+menu 40005
+pass 3

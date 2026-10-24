@@ -1,0 +1,28 @@
+# Review frames of the dialog runtime (written next to the test's work
+# directory): the rating promotion 3030, the bomb offer 3020 with "Find the
+# Bomb" focused, the STRL/1001 confirmation and About.
+# args: --scenario busy --passes 320 --event bomb@300
+# held: frame_3030.bmp
+# held: frame_3020.bmp
+# held: frame_1001.bmp
+# held: frame_about.bmp
+pass 301
+expect-dialog event 3030
+dialog-hold frame_3030.bmp
+dialog-key enter
+expect-dialog event 3031
+dialog-key enter
+expect-dialog event 3020
+dialog-hold frame_3020.bmp
+dialog-click 2
+pass 302
+menu 40005
+expect-dialog alert 1001
+dialog-hold frame_1001.bmp
+dialog-click 2
+menu 40018
+expect-dialog about
+dialog-wait 2000
+dialog-hold frame_about.bmp
+dialog-key space
+pass 320

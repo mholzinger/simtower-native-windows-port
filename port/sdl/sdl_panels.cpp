@@ -1,6 +1,8 @@
 #include "sdl_panels.hpp"
 
+#include "sdl_dialog.hpp"
 #include "sdl_menu.hpp"
+#include "sdl_style.hpp"
 
 #include "original_command_palette.hpp"
 #include "original_info.hpp"
@@ -16,13 +18,13 @@ namespace {
 
 // TEMP: desktop and Main nonclient colors until the Win16 frame and
 // scrollbars are drawn (the caption and menu bar are, in sdl_menu.cpp).
-constexpr std::uint32_t kDesktopRgb = 0x00808080U;
-constexpr std::uint32_t kNonclientRgb = 0x00C0C0C0U;
-constexpr std::uint32_t kBorderRgb = 0x00000000U;
-constexpr std::uint32_t kWhiteRgb = 0x00FFFFFFU;
-// COLOR_ACTIVECAPTION has no portable source. [LIKELY 70%] the Windows 3.1
-// default (navy). TEMP until the user picks a value.
-constexpr std::uint32_t kActiveCaptionRgb = 0x00000080U;
+// The shared TEMP colours (sdl_style.hpp); the active caption is navy by
+// owner decision 2026-10-23.
+constexpr std::uint32_t kDesktopRgb = style::kDesktop;
+constexpr std::uint32_t kNonclientRgb = style::kButtonFace;
+constexpr std::uint32_t kBorderRgb = style::kFrame;
+constexpr std::uint32_t kWhiteRgb = style::kWhite;
+constexpr std::uint32_t kActiveCaptionRgb = style::kCaption;
 
 class Canvas {
  public:
@@ -212,6 +214,10 @@ OriginalWorldRaster compose_window(const Session& session) {
                     resources, selector->group(), selector->highlight(),
                     input.build_mode_enabled),
                 rect.x, rect.y, rect);
+  }
+  // Open dialogs, bottom to top (sdl_dialog.hpp), above the panels.
+  for (const auto* dialog : session.dialogs()) {
+    draw_dialog(canvas.raster(), *dialog, resources);
   }
   // An open drop-down (and cascade) is above every window, as USER's
   // popup menu windows are.

@@ -1,7 +1,10 @@
 #include "sdl_session.hpp"
 
+#include "original_about.hpp"
+#include "original_alert.hpp"
 #include "original_canvas_font.hpp"
 #include "original_construction.hpp"
+#include "original_dialog_model.hpp"
 #include "original_draw_canvas.hpp"
 #include "original_resources.generated.hpp"
 #include "original_tables.hpp"
@@ -20,13 +23,14 @@
 namespace simtower::sdl {
 namespace {
 
-// Event-dialog choices used while dialogs are logged instead of shown. They
-// are explicit so the run stays deterministic: DIALOG/3020 returns 1 = Find
-// the Bomb (only 2 pays, 10c8:006e), and the scheduled fire-crew offer
-// treats 1 as No (10e8:01e2; every other value hires).
-constexpr std::uint16_t kBombOfferChoice = 1U;
-constexpr std::uint16_t kFireCrewOfferChoice = 1U;
-constexpr std::uint16_t kAcknowledgeChoice = 1U;
+// Event-dialog default choices: the answer when no input answers the dialog
+// (original_dialog_model.hpp explains each).
+constexpr std::uint16_t kBombOfferChoice =
+    kOriginalEventDialogBombOfferDefault;
+constexpr std::uint16_t kFireCrewOfferChoice =
+    kOriginalEventDialogFireCrewOfferDefault;
+constexpr std::uint16_t kAcknowledgeChoice =
+    kOriginalEventDialogAcknowledgeDefault;
 
 void log_line(const std::string& text) {
   std::fprintf(stderr, "simtower_sdl: %s\n", text.c_str());
@@ -217,17 +221,11 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
   }
 
   int alert(int resource_id, std::string_view text) override {
-    const int answer = s_.alert_answer_;
-    s_.alert_answer_ = 1;
-    ++s_.host_requests_.dialogs;
-    s_.log_request(RequestKind::alert, {resource_id, answer});
-    s_.tally("alert " + std::to_string(resource_id));
-    log_line("alert " + std::to_string(resource_id) + " \"" +
-             std::string(text) + "\" -> " + std::to_string(answer));
-    return answer;
+    // The Win32 host: show_original_alert(id, {text, {}, {}, {}}).
+    return s_.show_alert(resource_id, {text, {}, {}, {}});
   }
   int event_dialog(const OriginalEventDialogRequest& request) override {
-    return s_.log_dialog(request, kAcknowledgeChoice, "construction");
+    return s_.run_event_dialog(request, kAcknowledgeChoice, "construction");
   }
   void open_elevator_control(std::size_t elevator_index,
                              std::int16_t pointer_x,
@@ -283,9 +281,9 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
 
 // The SDL host of the shared File transactions (original_tower_file.hpp).
 // Pickers come from the scripted queue or the window's native dialogs;
-// prompts and alerts are logged and answered with the scripted alert
-// answer (1 = Yes/OK, the default; 2 = No/Cancel) until the dialog runtime
-// exists.
+// prompts and alerts are message boxes of the dialog runtime when an input
+// source runs them, and otherwise answered with the scripted alert answer
+// (1 = Yes/OK, the default; 2 = No/Cancel). Either way they are logged.
 class Session::TowerFileHost final : public OriginalTowerFileHost {
  public:
   explicit TowerFileHost(Session& session) : s_(session) {}
@@ -321,8 +319,12 @@ class Session::TowerFileHost final : public OriginalTowerFileHost {
     return s_.next_picked_file(true);
   }
   bool confirm_replace(const std::filesystem::path& path) override {
-    // MessageBeep + MB_YESNO: answer 2 is IDNO.
-    const int answer = take_answer();
+    // MessageBeep + MB_YESNO: Win32 replaces unless the result is IDNO.
+    // TEMP: the MessageBeep is not reproduced (no beep request is logged).
+    const auto raw = s_.run_message_box(
+        original_replace_existing_message_box(), kReplaceBoxLabel);
+    int answer = take_answer();
+    if (raw) answer = *raw == kOriginalAlertResultNo ? 2 : 1;
     s_.log_request(RequestKind::alert, {-1, answer});
     s_.tally("replace prompt");
     log_line("replace " + path.string() + "? -> " +
@@ -347,6 +349,8 @@ class Session::TowerFileHost final : public OriginalTowerFileHost {
 #endif
   }
   void invalid_filename() override {
+    (void)s_.run_message_box(original_invalid_filename_message_box(),
+                             kInvalidFilenameBoxLabel);
     s_.log_request(RequestKind::alert, {-2, 1});
     s_.tally("invalid filename");
     log_line("That is not a valid filename.");
@@ -358,10 +362,12 @@ class Session::TowerFileHost final : public OriginalTowerFileHost {
   }
   int transition_alert(std::uint16_t action_index) override {
     if (s_.audio_) s_.audio_->stop_all(true);
+    // The Win32 host: ALRT/1001 with ^0 = the file title and ^1 = the
+    // STRL/1001 action ("Save the tower ... before closing?").
     const auto action = original_strl_entry(
         s_.resources_.find("STRL", 1001), action_index);
-    return s_.world_host_->alert(
-        1001, s_.tower_title_.string() + ": " + action);
+    const auto title = s_.tower_title_.string();
+    return s_.show_alert(1001, {title, action, {}, {}});
   }
   void remove_recent_file_items() override { s_.remove_recent_file_items(); }
   void install_empty_document() override { s_.install_empty_document(); }
@@ -382,10 +388,11 @@ class Session::TowerFileHost final : public OriginalTowerFileHost {
 };
 
 // The SDL host of the shared WM_COMMAND dispatcher (original_main_command.
-// hpp). Dialogs other than the event dialogs, help, and window z-order are
-// logged requests until their runtimes exist. Every request it logs uses a
-// RequestKind that only input reaches, except the hidden 9000/9002 event
-// path, which --event drives with the calls trigger_event made before.
+// hpp). Dialogs other than the event dialogs, the alerts and About, help,
+// and window z-order are logged requests until their runtimes exist. Every
+// request it logs uses a RequestKind that only input reaches, except the
+// hidden 9000/9002 event path, which --event drives with the calls
+// trigger_event made before.
 class Session::MainCommandHost final : public OriginalMainCommandHost {
  public:
   explicit MainCommandHost(Session& session) : s_(session) {}
@@ -396,7 +403,7 @@ class Session::MainCommandHost final : public OriginalMainCommandHost {
 
   bool modal_input_locked() override { return s_.modal_depth_ != 0; }
   int event_dialog(const OriginalEventDialogRequest& request) override {
-    return s_.log_dialog(request, kAcknowledgeChoice, "command");
+    return s_.run_event_dialog(request, kAcknowledgeChoice, "command");
   }
   void exit_command() override {
     // apply_original_main_shutdown_message(exit_command).
@@ -484,7 +491,12 @@ class Session::MainCommandHost final : public OriginalMainCommandHost {
     s_.present_requested_ = true;
   }
   void finance_dialog() override { dialog(kOriginalCommandFinance, "finance"); }
-  void about_dialog() override { dialog(kOriginalCommandAbout, "about"); }
+  void about_dialog() override {
+    // The About modal when an input source runs it, then the same logged
+    // request as before, so runs without input keep their digests.
+    s_.run_about_dialog();
+    dialog(kOriginalCommandAbout, "about");
+  }
   void find_dialog(OriginalFindMode mode) override {
     dialog(mode == OriginalFindMode::person ? kOriginalCommandFindPerson
                                             : kOriginalCommandFindTenant,
@@ -518,7 +530,9 @@ class Session::MainCommandHost final : public OriginalMainCommandHost {
   void present_main_direct() override { s_.present_main(); }
 
  private:
-  // TEMP: Finance, About and Find are logged until the dialog runtime.
+  // TEMP: Finance and Find are logged until their dialogs are ported
+  // (sdl_dialog_descriptors.hpp lists the deferred dialogs); About is logged
+  // here too.
   void dialog(std::uint16_t command, const char* name) {
     ++s_.host_requests_.dialogs;
     s_.log_request(RequestKind::command_dialog, {command});
@@ -678,6 +692,12 @@ void Session::resize(int width, int height) {
   viewport_.height = std::max(0, height);
   layout_ = make_window_layout(viewport_.width, viewport_.height,
                                command_outer_height_);
+  // Open dialogs keep their placement rule in the new desktop (a Win32
+  // dialog stays put, but here the window is the desktop and shrinking it
+  // must not leave a dialog outside).
+  for (auto* dialog : dialogs_) {
+    dialog->place(layout_.window_width, layout_.window_height);
+  }
   if (first_size) {
     // Window creation: 1128:08d6 (create_original_windows) installs the
     // initial view, centred horizontally with the bottom 324 px above the
@@ -973,7 +993,8 @@ void Session::focus_event_coordinate(std::int16_t floor, std::int16_t x) {
 
 std::uint16_t Session::log_dialog(const OriginalEventDialogRequest& dialog,
                                   std::uint16_t choice,
-                                  std::string_view meaning) {
+                                  std::string_view meaning,
+                                  bool play_dialog_sound) {
   // run_original_event_dialog stand-in.
   ++host_requests_.dialogs;
   log_request(RequestKind::dialog, {dialog.dialog_id, dialog.argument,
@@ -984,7 +1005,7 @@ std::uint16_t Session::log_dialog(const OriginalEventDialogRequest& dialog,
            std::to_string(dialog.argument) + " wave " +
            std::to_string(dialog.wave_resource) + " -> " +
            std::to_string(choice) + " (" + std::string(meaning) + ")");
-  if (audio_ && dialog.valid()) {
+  if (play_dialog_sound && audio_ && dialog.valid()) {
     // run_original_event_dialog: 1068:0000 forcibly stops both mixer
     // channels, then submits the dialog's WAVE resource at priority four
     // before opening it.
@@ -992,6 +1013,226 @@ std::uint16_t Session::log_dialog(const OriginalEventDialogRequest& dialog,
     if (dialog.wave_resource != 0) play_audio(dialog.wave_resource, 0U, 4U);
   }
   return choice;
+}
+
+std::uint16_t Session::run_event_dialog(
+    const OriginalEventDialogRequest& dialog,
+    std::uint16_t default_choice,
+    std::string_view meaning) {
+  // Without a driving input source, or for a request
+  // run_original_event_dialog would not open, the logged stand-in exactly
+  // as before the runtime.
+  if (!input_source_ || !dialog.valid()) {
+    return log_dialog(dialog, default_choice, meaning);
+  }
+  auto modal = make_event_dialog(
+      resources_, prepare_original_event_dialog(resources_, dialog),
+      event_dialog_label(dialog.dialog_id));
+  if (!drives(modal)) return log_dialog(dialog, default_choice, meaning);
+  // 1068:0000: stop both channels and submit the WAVE before opening.
+  if (audio_) {
+    audio_->stop_all(true);
+    if (dialog.wave_resource != 0) play_audio(dialog.wave_resource, 0U, 4U);
+  }
+  OriginalEventDialogController controller(dialog.argument);
+  const auto result = run_dialog_modal(
+      modal, [&](const DialogSignal& signal,
+                 OriginalDialogOps& /*ops*/) -> std::optional<int> {
+        const auto outcome = controller.signal(
+            signal, document_ ? document_->header.balance : 0);
+        // close_original_event_dialog: ALRT/1004 owned by the dialog.
+        if (outcome.warn_insufficient_funds) (void)show_alert(1004, {});
+        return outcome.result;
+      });
+  if (!result) return log_dialog(dialog, default_choice, meaning, false);
+  // "<context>: answered" (the default's action word dropped, e.g.
+  // "bomb offer: search" -> "bomb offer: answered").
+  return log_dialog(dialog, static_cast<std::uint16_t>(*result),
+                    std::string(meaning.substr(0, meaning.find(':'))) +
+                        ": answered",
+                    false);
+}
+
+bool Session::drives(const ModalDialog& dialog) {
+  return input_source_ != nullptr && input_source_->drives_dialog(dialog);
+}
+
+std::optional<int> Session::run_message_box(
+    const OriginalMessageBoxRequest& request, std::string label) {
+  if (!input_source_) return std::nullopt;
+  // TEMP: beep_first's MessageBeep is not reproduced.
+  auto modal = make_message_box(request, std::move(label));
+  if (!drives(modal)) return std::nullopt;
+  return run_dialog_modal(
+      modal, [](const DialogSignal& signal, OriginalDialogOps& /*ops*/) {
+        return original_message_box_signal(signal).result;
+      });
+}
+
+int Session::show_alert(int alert_id,
+                        const std::array<std::string_view, 4>& substitutions) {
+  const auto presentation =
+      prepare_original_alert(resources_, alert_id, substitutions);
+  std::optional<int> answered{};
+  if (const auto raw = run_message_box(build_original_message_box(presentation),
+                                       alert_dialog_label(alert_id))) {
+    answered = original_alert_result(presentation.button_mode, *raw);
+  }
+  const int answer = answered.value_or(alert_answer_);
+  alert_answer_ = 1;
+  ++host_requests_.dialogs;
+  log_request(RequestKind::alert, {alert_id, answer});
+  tally("alert " + std::to_string(alert_id));
+  log_line("alert " + std::to_string(alert_id) + " \"" +
+           presentation.message + "\" -> " + std::to_string(answer));
+  return answer;
+}
+
+void Session::run_about_dialog() {
+  if (!input_source_) return;
+  auto modal = make_about_dialog(prepare_original_about_dialog(resources_));
+  if (!drives(modal)) return;
+  // Reactivates the mixer backend if the modal step throws (a ScriptFailure
+  // from a dialog-* line) after the plan deactivated it.
+  struct MixerBackend {
+    OriginalAudioRuntime* audio{};
+    bool deactivated{};
+    MixerBackend() = default;
+    MixerBackend(const MixerBackend&) = delete;
+    MixerBackend& operator=(const MixerBackend&) = delete;
+    ~MixerBackend() {
+      if (deactivated && audio) audio->activate_mixer_backend();
+    }
+  } mixer;
+  mixer.audio = audio_.get();
+  for (const auto step : original_about_launcher_plan()) {
+    using Step = OriginalAboutLauncherStep;
+    switch (step) {
+      case Step::stop_audio_channels:
+        if (audio_) audio_->stop_all(true);
+        break;
+      case Step::deactivate_mixer_backend:
+        if (audio_) audio_->deactivate_mixer_backend();
+        mixer.deactivated = true;
+        break;
+      case Step::compact_global_heap:
+        break;
+      case Step::run_modal_dialog:
+        (void)run_dialog_modal(
+            modal, [](const DialogSignal& signal, OriginalDialogOps& ops) {
+              return original_about_dialog_signal(signal, ops).result;
+            });
+        break;
+      case Step::activate_mixer_backend:
+        if (audio_) audio_->activate_mixer_backend();
+        mixer.deactivated = false;
+        break;
+    }
+  }
+}
+
+std::optional<int> Session::run_dialog_modal(ModalDialog& dialog,
+                                             const DialogProcedure& procedure) {
+  // DialogBoxIndirectParamW's own loop: no idle pass runs until the dialog
+  // ends. Event dialogs and About hold DS:24b8; MessageBox does not. The
+  // open dialog is drawn by compose_window.
+  auto* source = input_source_;
+  const bool lock = dialog.counts_modal_lock();
+  dialog.place(layout_.window_width, layout_.window_height);
+  // Undone on every exit, including a ScriptFailure thrown by the source or
+  // an exception from the procedure (a nested alert).
+  struct Open {
+    Session& session;
+    InputSource* source;
+    bool lock;
+    Open(Session& s, InputSource* src, bool l, ModalDialog& d)
+        : session(s), source(src), lock(l) {
+      session.dialogs_.push_back(&d);
+      if (lock) ++session.modal_depth_;
+    }
+    Open(const Open&) = delete;
+    Open& operator=(const Open&) = delete;
+    ~Open() {
+      session.dialogs_.pop_back();
+      if (lock) --session.modal_depth_;
+      try {
+        source->modal_changed();
+      } catch (...) {
+        // Unwinding already; the next present repaints anyway.
+      }
+    }
+  } open(*this, source, lock, dialog);
+  source->modal_changed();
+  // The dialog clock: milliseconds since it opened, advanced only by the
+  // inputs' elapsed_ms. SetTimer at WM_INITDIALOG (event dialogs) or the
+  // first WM_PAINT (About) arms the first deadline.
+  std::uint64_t now = 0U;
+  std::optional<std::uint64_t> deadline{};
+  if (dialog.timer_interval_ms() != 0U) deadline = dialog.timer_interval_ms();
+  std::optional<int> result{};
+  const auto deliver = [&](const DialogStep& step) {
+    if (step.redraw) source->modal_changed();
+    if (step.signal) result = procedure(*step.signal, dialog);
+    // The procedure's show_item / invalidate / resize repaint an open
+    // dialog.
+    if (dialog.take_invalidated() && !result) source->modal_changed();
+    return result.has_value();
+  };
+  // WM_TIMER: the event timer is one-shot (1068:0380 kills it); About's
+  // repeats every interval.
+  const auto fire_timer = [&](std::uint64_t at) {
+    deadline.reset();
+    if (dialog.timer_repeats()) deadline = at + dialog.timer_interval_ms();
+    return deliver(dialog.timer());
+  };
+  while (true) {
+    std::optional<std::uint32_t> wait{};
+    if (deadline) {
+      wait = static_cast<std::uint32_t>(
+          std::min<std::uint64_t>(*deadline - now, 0xFFFFFFFFU));
+    }
+    const auto input = source->next_dialog_input(wait);
+    if (!input) break;
+    now += input->elapsed_ms;
+    bool done = false;
+    switch (input->kind) {
+      case DialogInput::Kind::pointer: {
+        DialogPointer pointer{DialogPointer::Kind::move, input->pointer.x,
+                              input->pointer.y};
+        switch (input->pointer.kind) {
+          case InputKind::move: break;
+          // The dialog classes have no CS_DBLCLKS: a double click is a
+          // down.
+          case InputKind::down:
+          case InputKind::double_click:
+            pointer.kind = DialogPointer::Kind::down;
+            break;
+          case InputKind::up: pointer.kind = DialogPointer::Kind::up; break;
+          case InputKind::right_down:
+            pointer.kind = DialogPointer::Kind::right_down;
+            break;
+        }
+        done = deliver(dialog.pointer(pointer));
+        break;
+      }
+      case DialogInput::Kind::key:
+        done = deliver(dialog.key(input->key, input->character));
+        break;
+      case DialogInput::Kind::timer:
+        // A scripted WM_TIMER now (nothing without a live timer).
+        if (deadline) done = fire_timer(now);
+        break;
+      case DialogInput::Kind::wait_elapsed:
+        break;
+    }
+    // WM_TIMER has the lowest priority: due timers fire after the input,
+    // one per elapsed interval.
+    while (!done && deadline && now >= *deadline) done = fire_timer(*deadline);
+    if (done) break;
+  }
+  // The uncovered windows repaint. Only an answered dialog requests it.
+  if (result) present_requested_ = true;
+  return result;
 }
 
 void Session::sound(std::int32_t resource, std::string_view source) {
@@ -1121,24 +1362,26 @@ std::uint16_t Session::event_dialog(const OriginalEventDialogRequest& dialog,
                                     OriginalIdleDialog kind) {
   switch (kind) {
     case OriginalIdleDialog::bomb_offer:
-      return log_dialog(dialog, kBombOfferChoice, "bomb offer: search");
+      return run_event_dialog(dialog, kBombOfferChoice, "bomb offer: search");
     case OriginalIdleDialog::bomb_followup:
-      return log_dialog(dialog, kAcknowledgeChoice, "bomb follow-up");
+      return run_event_dialog(dialog, kAcknowledgeChoice, "bomb follow-up");
     case OriginalIdleDialog::bomb_event:
-      return log_dialog(dialog, kAcknowledgeChoice, "bomb");
+      return run_event_dialog(dialog, kAcknowledgeChoice, "bomb");
     case OriginalIdleDialog::fire_offer:
     case OriginalIdleDialog::fire_event:
-      return log_dialog(dialog, kAcknowledgeChoice, "fire");
+      return run_event_dialog(dialog, kAcknowledgeChoice, "fire");
     case OriginalIdleDialog::fire_crew_offer:
-      return log_dialog(dialog, kFireCrewOfferChoice, "fire crew offer: no");
+      return run_event_dialog(dialog, kFireCrewOfferChoice,
+                              "fire crew offer: no");
     case OriginalIdleDialog::fire_crew_followup:
-      return log_dialog(dialog, kAcknowledgeChoice, "fire crew follow-up");
+      return run_event_dialog(dialog, kAcknowledgeChoice,
+                              "fire crew follow-up");
     case OriginalIdleDialog::hotel:
-      return log_dialog(dialog, kAcknowledgeChoice, "hotel");
+      return run_event_dialog(dialog, kAcknowledgeChoice, "hotel");
     case OriginalIdleDialog::rating:
-      return log_dialog(dialog, kAcknowledgeChoice, "rating");
+      return run_event_dialog(dialog, kAcknowledgeChoice, "rating");
   }
-  return log_dialog(dialog, kAcknowledgeChoice, "event");
+  return run_event_dialog(dialog, kAcknowledgeChoice, "event");
 }
 
 void Session::focus(std::int16_t floor, std::int16_t x) {
