@@ -58,13 +58,18 @@
 //                 box invalid-filename | finance | find person |
 //                 find tenant | rename person | rename tenant | movie |
 //                 elevator popup | facility ID | person ID |
-//                 transport ID
+//                 transport ID | startup
 //                          the dialog that is opening now (see Dialogs);
-//                          exit 3 if another one opens, or none is open
+//                          exit 3 if another one opens, or none is open.
+//                          "startup" is New / Load (DIALOG 10000), which
+//                          --startup opens before the first pass: 1 New
+//                          Tower, 2 Quit, 3 Load Saved Tower (then a
+//                          "pick-file" answers its Open sheet)
 //   dialog-click ID        press and release the center of push button ID
 //                          of that dialog (sdl_dialog.hpp) through its hit
 //                          test: the event dialogs' template ids (3020: 1
-//                          Find the Bomb, 2 Pay Them; 3012: 1 No, 2 Yes),
+//                          Find the Bomb, 2 Pay Them; 3012: 1 No, 2 Yes;
+//                          startup: 1 New Tower, 2 Quit, 3 Load),
 //                          the MessageBox ids (1 OK, 2 Cancel, 6 Yes, 7 No;
 //                          alert 1001 shows 6, 7, 2), or 0 for About (no
 //                          controls: its center). Exit 2 if ID is not a
@@ -175,18 +180,20 @@
 //
 // Dialogs: a dialog opens modally when the session runs it (an event
 // dialog, an alert or other MessageBox, About). If the line at the
-// script's read position (right after the command that opened it, or, for
-// a dialog an idle pass opens, after the "pass N" line that ran that pass)
-// is "expect-dialog" naming it, the dialog is driven: it reads the
+// script's read position (right after the command that opened it, for
+// a dialog an idle pass opens after the "pass N" line that ran that pass,
+// and for --startup's New / Load the script's first line) is
+// "expect-dialog" naming it, the dialog is driven: it reads the
 // following "dialog-*" lines and, at the first other line (another
 // "expect-dialog" included), closes with its default answer unless one of
 // them answered it. An "expect-dialog" naming a different dialog is exit 3;
 // a "dialog-*" line there without "expect-dialog" is exit 2. Any other line
 // leaves the dialog undriven: it takes the default answer (the event
-// dialogs' fixed choice, or the "alert" answer) exactly as runs without
-// dialog lines do, with identical digests. A "dialog-*" line with no
-// dialog open is exit 2. The virtual clock does not move inside a dialog;
-// only "dialog-wait" and "dialog-timer" move its timers.
+// dialogs' fixed choice, New Tower for startup, or the "alert" answer)
+// exactly as runs without dialog lines do, with identical digests. A
+// "dialog-*" line with no dialog open is exit 2. The virtual clock does
+// not move inside a dialog; only "dialog-wait" and "dialog-timer" move its
+// timers.
 //
 // Determinism: commands after "pass N" run after N passes and before pass
 // N+1 (the --event NAME@PASS convention). The virtual clock does not move

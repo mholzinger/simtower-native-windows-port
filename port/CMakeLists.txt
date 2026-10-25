@@ -597,6 +597,15 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME simtower_tower_file_tests COMMAND simtower_tower_file_tests)
 
+  # The shared New / Load controller and startup choice against frozen
+  # copies of the Win32 code (no assets; also run under Wine).
+  add_executable(simtower_startup_controller_tests
+                 tests/startup_controller_tests.cpp)
+  target_link_libraries(simtower_startup_controller_tests PRIVATE
+                        simtower_port_core)
+  add_test(NAME simtower_startup_controller_tests
+           COMMAND simtower_startup_controller_tests)
+
   # Portable audio runtime rules and the device transaction, on a fake
   # device and the capture device. No audio device is opened. The parts that
   # need WAVE resources read the pack at run time and are skipped (exit 77)
@@ -766,6 +775,22 @@ if(BUILD_TESTING)
                          ENVIRONMENT
                          "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy")
 
+    # WinMain's startup through --startup: New / Load driven by scripts
+    # (New, Load of a file saved by Save As, a cancelled Load, Quit, Esc,
+    # Enter, undriven, and --open bypassing the dialog), each against the
+    # equivalent run without --startup, plus the held startup frames.
+    add_test(
+      NAME simtower_sdl_startup
+      COMMAND ${CMAKE_COMMAND}
+        -DBIN=$<TARGET_FILE:simtower_sdl>
+        -DPACK=${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+        -DWORK=${CMAKE_CURRENT_BINARY_DIR}/startup
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_startup_test.cmake)
+    set_tests_properties(simtower_sdl_startup PROPERTIES
+                         ENVIRONMENT
+                         "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy"
+                         SKIP_REGULAR_EXPRESSION "cli_startup_test: skipped")
+
     # The documented example scripts must keep running (exit 0) with the
     # --scenario and --passes their usage line names.
     file(GLOB SIMTOWER_SDL_EXAMPLE_SCRIPTS CONFIGURE_DEPENDS
@@ -817,7 +842,8 @@ if(BUILD_TESTING)
       simtower_world_input_tests
       simtower_menu_tests
       simtower_main_command_tests
-      simtower_tower_file_tests)
+      simtower_tower_file_tests
+      simtower_startup_controller_tests)
   if(SIMTOWER_BUILD_SDL)
     list(APPEND SIMTOWER_ASSERT_TESTS simtower_sdl_audio_tests
                                       simtower_sdl_menu_tests)

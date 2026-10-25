@@ -14,6 +14,7 @@
 #include "original_transport_information_controller.hpp"
 #include "original_resources.generated.hpp"
 #include "original_tables.hpp"
+#include "original_startup.hpp"
 #include "original_startup_data.hpp"
 #include "original_tdt_file.hpp"
 #include "original_time.hpp"
@@ -21,6 +22,7 @@
 #include "original_ui.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -778,13 +780,12 @@ Session::Session(std::vector<std::byte> pack,
   // Deliberately omitted Win32 startup steps (WinMain), none of which
   // touches the document RNG or simulation state:
   // - SIMTOWER.INI profile, logical palette, font bank, cursors and icon;
-  // - the BITMAP/128 -> 256 splash and its 180-tick wait (1128:0042-00a7);
   // - the bootstrap reset_original_command_state(true),
   //   refresh_original_rating_command(rating, 0) and Map-focus adjustment
-  //   (10d0:0ac2): New/Open reset the command state again before any pass;
-  // - WAVE/20000 (play_startup_sound, which only the interactive window
-  //   calls). The bootstrap's fire-menu update is applied to the menu
-  //   below without a logged request.
+  //   (10d0:0ac2): New/Open reset the command state again before any pass.
+  // The bootstrap's fire-menu update is applied to the menu below without
+  // a logged request. The splash, WAVE/20000 and New / Load are
+  // run_startup's, which only the window and --startup run.
   // WinMain's base palette, then its never-stored bootstrap tower
   // (its frame 0x09e5 selects the CLUT 1002->1001 transition).
   reset_original_palette_runtime(resources_, nullptr, palette_runtime_,
@@ -1821,6 +1822,118 @@ bool Session::run_movie_dialog(std::size_t linked_record_index) {
   return chosen;
 }
 
+// 1128:01a5-01d3's New and Open on the session.
+class Session::StartupChoiceHost final : public OriginalStartupChoiceHost {
+ public:
+  explicit StartupChoiceHost(Session& session) : s_(session) {}
+  // 10d0:0122: File > Open's transaction (no confirmation: no tower yet).
+  bool open_tower() override { return open_original_tower(*s_.file_host_); }
+  bool has_document() override { return s_.document_.has_value(); }
+  void begin_new_tower() override { s_.new_tower(); }
+
+ private:
+  Session& s_;
+};
+
+int Session::run_startup_dialog() {
+  OriginalNewLoadDialogController controller;
+  std::optional<int> result{};
+  if (input_source_) {
+    auto modal = make_startup_dialog(resources_);
+    if (drives(modal)) {
+      // WM_INITDIALOG's tail; its TRUE return lets the dialog manager
+      // focus the first tab stop (New Tower) as well.
+      if (controller.initial_focus(modal)) modal.focus_first_tab_stop();
+      result = run_dialog_modal(
+          modal, [&](const DialogSignal& signal, OriginalDialogOps&) {
+            return controller.signal(signal).result;
+          });
+    }
+  }
+  return result.value_or(kOriginalNewLoadNewTowerId);
+}
+
+bool Session::run_startup(
+    const StartupCallbacks& callbacks,
+    const std::optional<std::filesystem::path>& command_line) {
+  // 1128:05eb / 08d6 create Main and the palettes hidden; 1128:01d9-0209
+  // shows them after New / Load.
+  startup_hidden_ = true;
+  // 1128:003a-0063: Wait, then 1010:0018's modeless TOWER_TITLE splash
+  // with BITMAP/128 over the whole desktop.
+  cursor_id_ = 4U;
+  startup_splash_ = 128;
+  callbacks.present();
+  // 1128:0064-00a0: at least 180 coarse ticks (1208:05e6) of BITMAP/128.
+  const auto started = coarse_tick_now();
+  while (std::bit_cast<std::int32_t>(original_tick_magnitude_delta(
+             coarse_tick_now(), started)) <
+         static_cast<std::int32_t>(kOriginalStartupSplashMinimumTicks)) {
+    if (!callbacks.wait()) {
+      startup_splash_.reset();
+      return false;
+    }
+  }
+  // 1128:00a2-00c3: BITMAP/256, painted synchronously; Wait again.
+  startup_splash_ = 256;
+  callbacks.present();
+  // 1128:00c4-00c9 (the bootstrap tower): applied at construction, see
+  // the constructor. 1128:00ce-00e4: WAVE/20000, then Arrow.
+  play_startup_sound();
+  cursor_id_ = 0U;
+  int choice = kOriginalNewLoadNewTowerId;
+  if (command_line) {
+    // 1128:00e5-0196: Wait, 10d0:0225 on the command-line path (an alert
+    // and New when it fails), then 1010:00fd destroys the splash.
+    cursor_id_ = 4U;
+    (void)load_original_tower_from_path(*file_host_, *command_line, {});
+    startup_splash_.reset();
+  } else {
+    // 1128:0198-01a0: 1018:0000, then 1010:00fd.
+    choice = run_startup_dialog();
+    startup_splash_.reset();
+    log_request(RequestKind::startup, {choice});
+    tally("startup choice " + std::to_string(choice));
+    log_line("startup choice " + std::to_string(choice));
+    StartupChoiceHost host(*this);
+    if (apply_original_startup_choice(choice, host)) {
+      // 1128:01b9: the initialization fails and WinMain returns.
+      log_line("startup Quit: the run ends");
+      window_repaint_ = true;
+      return false;
+    }
+  }
+  // 1128:01d9-0223. The windows appear together here: the session draws
+  // them only when it is presented next.
+  for (const auto action :
+       original_startup_show_plan(world_input_.build_mode_enabled)) {
+    using Action = OriginalStartupShowAction;
+    switch (action) {
+      case Action::show_map:
+      case Action::show_info:
+      case Action::show_command:
+      case Action::show_main:
+        startup_hidden_ = false;
+        break;
+      case Action::select_arrow_cursor:
+        cursor_id_ = 0U;
+        break;
+      case Action::toggle_construction_mode:
+        apply_original_construction_toggle(world_input_context(),
+                                           *world_host_);
+        break;
+      case Action::compose_and_present_command:
+        present_requested_ = true;
+        break;
+      case Action::preload_command_surfaces:
+      case Action::none:
+        break;
+    }
+  }
+  window_repaint_ = true;
+  return true;
+}
+
 std::optional<int> Session::run_dialog_modal(DialogWindow& dialog,
                                              const DialogProcedure& procedure) {
   // DialogBoxIndirectParamW's own loop: no idle pass runs until the dialog
@@ -2553,10 +2666,11 @@ void Session::select_tool(std::optional<std::uint16_t> edit_mode,
 
 bool Session::panel_visible(Panel panel) const {
   switch (panel) {
-    case Panel::map: return map_visible_;
-    case Panel::info: return info_visible_;
-    case Panel::command: return command_visible_;
-    case Panel::main: return true;
+    // Hidden until the startup's show sequence (run_startup).
+    case Panel::map: return map_visible_ && !startup_hidden_;
+    case Panel::info: return info_visible_ && !startup_hidden_;
+    case Panel::command: return command_visible_ && !startup_hidden_;
+    case Panel::main: return !startup_hidden_;
     case Panel::elevator_control: return elevator_.has_value();
     case Panel::none: return false;
   }

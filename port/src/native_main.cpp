@@ -2325,6 +2325,8 @@ void destroy_original_startup_splash() {
 }
 
 HFONT make_original_dialog_font(int pixel_height);
+// The shared NEWORLOADDLOGFILTER focus tail over Win32DialogOps (below).
+bool original_new_load_initial_focus(HWND dialog);
 
 struct OriginalStartupDialogContext {
   HFONT paint_font{};
@@ -2381,8 +2383,9 @@ INT_PTR CALLBACK startup_dialog_proc(HWND dialog, UINT message,
         paint_original_startup_dialog(dialog, dc, *context, true);
         ReleaseDC(dialog, dc);
       }
-      SetFocus(GetDlgItem(dialog, 1));
-      return TRUE;
+      // 1018:012d-0142 and the TRUE of 1018:01e7, through the shared
+      // OriginalNewLoadDialogController.
+      return original_new_load_initial_focus(dialog) ? TRUE : FALSE;
     }
     case WM_PAINT: {
       // NEWORLOADDLOGFILTER 1018:015e-01bd.
@@ -2411,17 +2414,18 @@ INT_PTR CALLBACK startup_dialog_proc(HWND dialog, UINT message,
     }
     case WM_COMMAND:
       {
-        const auto plan = simtower::original_new_load_dialog_command_plan(
-            static_cast<std::uint16_t>(LOWORD(wparam)));
-        if (plan.release_dtmp_before_end) {
+        // 1018:01bf through the shared OriginalNewLoadDialogController.
+        const auto outcome = simtower::OriginalNewLoadDialogController{}
+                                 .signal({simtower::OriginalDialogSignal::
+                                              Kind::command,
+                                          LOWORD(wparam), HIWORD(wparam)});
+        if (outcome.result) {
           // Native value ownership replaces 1070:051f's HWND-slot lookup,
           // FreeResource, slot clear, and live-count decrement.
           g_startup_dtmp = {};
+          EndDialog(dialog, *outcome.result);
         }
-        if (plan.end_dialog) {
-          EndDialog(dialog, plan.dialog_result);
-        }
-        return plan.consume ? TRUE : FALSE;
+        return outcome.result ? TRUE : FALSE;
       }
   }
   return FALSE;
@@ -2910,6 +2914,11 @@ class Win32DialogOps final : public simtower::OriginalDialogOps {
   HWND dialog_{};
   ScrollRangeRedraw scroll_range_redraw_{ScrollRangeRedraw::yes};
 };
+
+bool original_new_load_initial_focus(HWND dialog) {
+  Win32DialogOps ops(dialog);
+  return simtower::OriginalNewLoadDialogController{}.initial_focus(ops);
+}
 
 int run_original_elevator_popup(HWND owner,
                                 const simtower::OriginalDtmpRect&
@@ -7193,6 +7202,17 @@ void show_original_windows() {
   }
 }
 
+// The startup choice's New and Open (apply_original_startup_choice).
+class Win32StartupChoiceHost final
+    : public simtower::OriginalStartupChoiceHost {
+ public:
+  bool open_tower() override { return open_original_tower(g_main_window); }
+  bool has_document() override { return static_cast<bool>(g_tower_document); }
+  void begin_new_tower() override {
+    begin_original_new_tower(g_main_window);
+  }
+};
+
 void validate_original_startup_data() {
   // The portable startup loader (original_startup_data.cpp) is shared with
   // the SDL3 frontend so both hosts fail fast on the same pack defects.
@@ -7306,7 +7326,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     const auto startup_target = simtower::original_startup_command_target(
         module_directory, native_command_line);
     if (startup_target) {
-      // 1128:00e5 bypasses DIALOG/124 for a nonempty WinMain tail. 10d0:0225
+      // 1128:00e5 bypasses DIALOG/10000 for a nonempty WinMain tail. 10d0:0225
       // itself creates a fresh tower after any failed direct load.
       (void)load_original_tower_from_path(
           g_main_window,
@@ -7317,21 +7337,17 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int) {
     } else {
       const int startup_choice = run_original_startup_dialog();
       destroy_original_startup_splash();
-      if (startup_choice == 2 || startup_choice == -1) {
+      // 1128:01a5-01d3 (apply_original_startup_choice): a cancelled/failed
+      // startup Open falls through to New. 10d0:0225 already performs that
+      // fallback after an accepted path.
+      Win32StartupChoiceHost choice_host;
+      if (const auto exit_code = simtower::apply_original_startup_choice(
+              startup_choice, choice_host)) {
         // 1258:0095 invokes 10b8:0000/0039 without first destroying Main.
         // USER releases that still-hidden top-level window when WinMain exits.
         destroy_original_auxiliary_windows();
         destroy_original_process_resources();
-        return startup_choice == 2 ? 0 : 1;
-      }
-      // 1128:01a5-01d3: a cancelled/failed startup Open falls through to
-      // New. 10d0:0225 already performs that fallback after an accepted path.
-      if (startup_choice == 3) {
-        if (!open_original_tower(g_main_window) && !g_tower_document) {
-          begin_original_new_tower(g_main_window);
-        }
-      } else if (startup_choice == 1) {
-        begin_original_new_tower(g_main_window);
+        return *exit_code;
       }
     }
     show_original_windows();

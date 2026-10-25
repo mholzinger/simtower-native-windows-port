@@ -1,9 +1,10 @@
 #pragma once
 
-// Portable dialog controllers for the Find, Rename, New Movie and Finance
-// dialogs: the transaction half of FINDDIALOGFILTER (10d8:006f),
-// NAMEPEPLEDIALOGFILTER / NAMETENANTDIALOGFILTER (1100:3a39 / 3dc4),
-// MOVIETITLEDIALOGFILTER (1100:4138) and COUNTDLOGMAIN (1060:00d3), over
+// Portable dialog controllers for the Find, Rename, New Movie, New / Load
+// and Finance dialogs: the transaction half of FINDDIALOGFILTER
+// (10d8:006f), NAMEPEPLEDIALOGFILTER / NAMETENANTDIALOGFILTER (1100:3a39 /
+// 3dc4), MOVIETITLEDIALOGFILTER (1100:4138), NEWORLOADDLOGFILTER
+// (1018:0067) and COUNTDLOGMAIN (1060:00d3), over
 // OriginalDialogOps (the dialog's own controls) and a small host interface
 // (the document and the windows outside the dialog). Both hosts run them:
 // the SDL dialog runtime over DialogWindow, and the Win32 procedures in
@@ -219,6 +220,24 @@ class OriginalMovieChoiceController {
  private:
   std::size_t record_{};
   bool changed_{};
+};
+
+// --- New / Load (DIALOG/DTMP 10000, NEWORLOADDLOGFILTER 1018:0067) -------
+
+// The procedure half of the startup chooser; its result goes to
+// apply_original_startup_choice (original_startup.hpp).
+class OriginalNewLoadDialogController {
+ public:
+  // The end of WM_INITDIALOG (1018:012d-0142): SetFocus(GetDlgItem(1)),
+  // then TRUE (1018:01e7), so the dialog manager focuses the first tab
+  // stop, which is New Tower (1) as well.
+  [[nodiscard]] bool initial_focus(OriginalDialogOps& ops) const;
+  // WM_COMMAND through original_new_load_dialog_command_plan (1018:01bf):
+  // IDs 1..3 close with that id (the host first releases the DTMP, as
+  // 1070:051f does), whatever the notification code; any other id and
+  // every other signal keep it open (FALSE, 1018:01ee).
+  [[nodiscard]] OriginalDialogOutcome signal(
+      const OriginalDialogSignal& signal) const;
 };
 
 // --- Finance (DIALOG 500, COUNTDLOGMAIN) ---------------------------------

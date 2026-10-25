@@ -1,5 +1,6 @@
 #include "original_dialog_controllers.hpp"
 
+#include "original_startup.hpp"
 #include "original_ui.hpp"
 
 #include <bit>
@@ -284,6 +285,22 @@ OriginalDialogOutcome OriginalMovieChoiceController::signal(
       return {};
   }
   return {};
+}
+
+// --- New / Load ----------------------------------------------------------
+
+bool OriginalNewLoadDialogController::initial_focus(
+    OriginalDialogOps& ops) const {
+  ops.focus_item(kOriginalNewLoadNewTowerId);
+  return true;
+}
+
+OriginalDialogOutcome OriginalNewLoadDialogController::signal(
+    const OriginalDialogSignal& signal) const {
+  if (signal.kind != OriginalDialogSignal::Kind::command) return {};
+  const auto plan = original_new_load_dialog_command_plan(signal.id);
+  if (!plan.end_dialog) return {};
+  return {static_cast<int>(plan.dialog_result)};
 }
 
 // --- Finance ------------------------------------------------------------

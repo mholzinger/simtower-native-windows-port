@@ -21,6 +21,23 @@ std::string normalize_native_startup_command_line(
   return std::string(command_line);
 }
 
+std::optional<int> apply_original_startup_choice(
+    int choice, OriginalStartupChoiceHost& host) {
+  if (choice == kOriginalNewLoadQuitId || choice == -1) {
+    return choice == kOriginalNewLoadQuitId ? 0 : 1;
+  }
+  if (choice == kOriginalNewLoadLoadId) {
+    // 1128:01bd-01c4. 10d0:0122 returns an uninitialized local after an
+    // accepted sheet, so the native result is "loaded"; a failed load
+    // already installed New through 10d0:0225, which has_document sees.
+    if (!host.open_tower() && !host.has_document()) host.begin_new_tower();
+  } else if (choice == kOriginalNewLoadNewTowerId) {
+    // 1128:01c6-01cc.
+    host.begin_new_tower();
+  }
+  return std::nullopt;
+}
+
 std::optional<OriginalStartupCommandTarget>
 original_startup_command_target(std::string_view module_directory,
                                 std::string_view command_line) {
