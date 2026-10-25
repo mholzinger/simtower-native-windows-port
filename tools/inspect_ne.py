@@ -131,6 +131,28 @@ class NewExecutable:
         name, _ = counted_string(self.data, self.resource_table_offset + raw)
         return name
 
+    def _name_table(
+        self, entries: list[tuple[int | str, int | str, int, int, int]]
+    ) -> dict[tuple[int, int], tuple[str, str]]:
+        """Decode RT_NAMETABLE (type 15), which some builds use to give ordinal resources their names."""
+        names: dict[tuple[int, int], tuple[str, str]] = {}
+        for type_id, _resource_id, offset, size, _flags in entries:
+            if type_id != 15:
+                continue
+            blob = self.data[offset : offset + size]
+            cursor = 0
+            while cursor + 6 <= len(blob):
+                length, raw_type, raw_id = struct.unpack_from("<HHH", blob, cursor)
+                if length == 0:
+                    break
+                type_name, id_name = blob[cursor + 6 : cursor + length].split(b"\0")[:2]
+                names[(raw_type & 0x7FFF, raw_id & 0x7FFF)] = (
+                    type_name.decode("ascii"),
+                    id_name.decode("ascii"),
+                )
+                cursor += length
+        return names
+
     def resources(self, output: Path | None = None) -> list[Resource]:
         if self.resource_table_offset >= self.resident_name_offset:
             return []
@@ -139,6 +161,7 @@ class NewExecutable:
         resources: list[Resource] = []
         if output:
             output.mkdir(parents=True, exist_ok=True)
+        entries: list[tuple[int | str, int | str, int, int, int]] = []
         while True:
             raw_type = u16(self.data, cursor)
             cursor += 2
@@ -153,45 +176,52 @@ class NewExecutable:
                     "<HHHHHH", self.data, cursor
                 )
                 cursor += 12
-                offset = raw_offset << alignment
-                size = raw_size << alignment
-                blob = self.data[offset : offset + size]
-                resource_id = self._resource_identifier(raw_id)
-                type_name = (
-                    RESOURCE_TYPES.get(type_id, f"TYPE_{type_id}")
-                    if isinstance(type_id, int)
-                    else str(type_id)
+                entries.append(
+                    (type_id, self._resource_identifier(raw_id), raw_offset << alignment, raw_size << alignment, flags)
                 )
-                suffix = {
-                    1: ".cursor",
-                    2: ".dib",
-                    3: ".icon",
-                    4: ".menu",
-                    5: ".dialog",
-                    6: ".strings",
-                    7: ".fontdir",
-                    8: ".fnt",
-                    9: ".accelerator",
-                    10: ".bin",
-                    12: ".group_cursor",
-                    14: ".group_icon",
-                    15: ".nametable",
-                    16: ".version",
-                }.get(type_id, ".bin")
-                filename = f"{type_name}_{resource_id}{suffix}".replace("/", "_").replace("\\", "_")
-                if output:
-                    (output / filename).write_bytes(blob)
-                resources.append(
-                    Resource(
-                        type_id=type_id,
-                        resource_id=resource_id,
-                        offset=offset,
-                        size=size,
-                        flags=flags,
-                        sha256=hashlib.sha256(blob).hexdigest(),
-                        file=filename if output else None,
-                    )
+        names = self._name_table(entries)
+        for type_id, resource_id, offset, size, flags in entries:
+            blob = self.data[offset : offset + size]
+            type_name_override, id_name_override = names.get((type_id, resource_id), ("", ""))
+            if type_name_override:
+                type_id = type_name_override
+            if id_name_override:
+                resource_id = id_name_override
+            type_name = (
+                RESOURCE_TYPES.get(type_id, f"TYPE_{type_id}")
+                if isinstance(type_id, int)
+                else str(type_id)
+            )
+            suffix = {
+                1: ".cursor",
+                2: ".dib",
+                3: ".icon",
+                4: ".menu",
+                5: ".dialog",
+                6: ".strings",
+                7: ".fontdir",
+                8: ".fnt",
+                9: ".accelerator",
+                10: ".bin",
+                12: ".group_cursor",
+                14: ".group_icon",
+                15: ".nametable",
+                16: ".version",
+            }.get(type_id, ".bin")
+            filename = f"{type_name}_{resource_id}{suffix}".replace("/", "_").replace("\\", "_")
+            if output:
+                (output / filename).write_bytes(blob)
+            resources.append(
+                Resource(
+                    type_id=type_id,
+                    resource_id=resource_id,
+                    offset=offset,
+                    size=size,
+                    flags=flags,
+                    sha256=hashlib.sha256(blob).hexdigest(),
+                    file=filename if output else None,
                 )
+            )
         return resources
 
     def segments(self) -> list[Segment]:

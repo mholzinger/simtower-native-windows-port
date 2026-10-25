@@ -2454,7 +2454,7 @@ void checkout_original_hotel_room(
       document, rent_income, static_cast<std::uint8_t>(owner.type),
       std::to_integer<std::uint8_t>(owner.exact_bytes[16]));
 
-  document.hotel_checkout_effect_active = true;
+  document.balance_changed_effect_active = true;
   document.hotel_checkout_count = static_cast<std::uint16_t>(
       document.hotel_checkout_count + 1U);
   if (document.hotel_checkout_count < 20U) {
@@ -3165,11 +3165,11 @@ OriginalOfficeMedicalLeaveStatus leave_original_office_medical_service(
 OriginalHotelCheckoutPresentation
 consume_original_hotel_checkout_presentation(
     OriginalTdtDocument& document) noexcept {
-  if (!document.hotel_checkout_effect_active) return {};
+  if (!document.balance_changed_effect_active) return {};
   OriginalHotelCheckoutPresentation result{
       true, document.hotel_checkout_effect_cadence};
   document.hotel_checkout_effect_cadence = true;
-  document.hotel_checkout_effect_active = false;
+  document.balance_changed_effect_active = false;
   return result;
 }
 
@@ -6708,14 +6708,18 @@ OriginalCathedralArrivalResult apply_original_cathedral_arrival_check(
           load_original_header_word(document, 60U) + 4U));
   store_original_header_dword(document, 66U, 0U);
   result.effect_floor = 111;
-  result.effect_x = static_cast<std::uint16_t>(
-      load_u16(bottom.exact_bytes, 6U, document.header.byte_swapped) + 14U);
+  // 1040:02f5-0310 indexes the floor's record array and reads record +0
+  // (ES:[BX+6] past the 6-byte floor header): the bottom part's left edge.
+  result.effect_x = static_cast<std::uint16_t>(bottom.left + 14U);
 
+  // 1040:0322 calls 1140:00a8: set rating six, then 1148:003d's promotion
+  // state and modal.
   document.header.rating = 6U;
   if (document.header.exact_bytes.size() >= 4U) {
     store_u16(document.header.exact_bytes, 2U, 6U,
               document.header.byte_swapped);
   }
+  result.rating_dialog = apply_original_rating_promotion(document);
   for (auto& floor : document.floors) {
     for (auto& tenant : floor.tenants) {
       if (tenant.type >= 36 && tenant.type <= 40) {
