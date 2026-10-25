@@ -161,20 +161,18 @@ void triangle(OriginalDrawContext& context, const OriginalRect& r, bool up,
   }
 }
 
-// A vertical scroll bar: arrow buttons, the gray trough and the thumb (none
-// for an empty range). tracking: the thumb's ghost position while dragged.
-void draw_scroll_bar(OriginalDrawContext& context, const OriginalRect& bar,
-                     int min, int max, int position, bool enabled,
-                     OriginalRgb trough = kButtonFace) {
-  const auto parts = dialog_scroll_parts(bar, min, max, position);
-  context.fill_rect(bar, trough);
-  draw_dialog_outline(context, bar, kBlack);
-  raised_box(context, parts.up);
-  raised_box(context, parts.down);
-  const OriginalRgb ink = enabled && max > min ? kBlack : kButtonShadow;
-  triangle(context, original_deflate_rect(parts.up, 2), true, ink);
-  triangle(context, original_deflate_rect(parts.down, 2), false, ink);
-  if (parts.thumb.bottom > parts.thumb.top) raised_box(context, parts.thumb);
+// The same triangle turned to point left or right (the columns of the
+// up / down one), centered in r.
+void side_triangle(OriginalDrawContext& context, const OriginalRect& r,
+                   bool left, OriginalRgb rgb) {
+  const int columns = std::clamp((r.bottom - r.top) / 3, 2, 4);
+  const int cy = (r.top + r.bottom) / 2;
+  const int start = (r.left + r.right - columns) / 2;
+  for (int column = 0; column < columns; ++column) {
+    const int half = left ? column : columns - 1 - column;
+    context.fill_rect(
+        {start + column, cy - half, start + column + 1, cy + half + 1}, rgb);
+  }
 }
 
 void draw_edit(OriginalDrawContext& context, OriginalCanvasFont& font,
@@ -268,8 +266,8 @@ void draw_list(OriginalDrawContext& context, OriginalCanvasFont& font,
   if (bar) {
     const int most = std::max(
         0, static_cast<int>(list.items.size()) - dialog.list_rows(list));
-    draw_scroll_bar(context, dialog.scroll_track(list), 0, most,
-                    list.top_index, list.enabled);
+    draw_dialog_scroll_bar(context, dialog.scroll_track(list), 0, most,
+                           list.top_index, list.enabled, kButtonFace);
   }
 }
 
@@ -328,6 +326,26 @@ void draw_combo_list(OriginalDrawContext& context, OriginalCanvasFont& font,
 
 }  // namespace
 
+void draw_dialog_scroll_bar(OriginalDrawContext& context,
+                            const OriginalRect& bar, int min, int max,
+                            int position, bool enabled, OriginalRgb trough,
+                            DialogScrollAxis axis) {
+  const auto parts = dialog_scroll_parts(bar, min, max, position, axis);
+  context.fill_rect(bar, trough);
+  draw_dialog_outline(context, bar, kBlack);
+  raised_box(context, parts.up);
+  raised_box(context, parts.down);
+  const OriginalRgb ink = enabled && max > min ? kBlack : kButtonShadow;
+  if (axis == DialogScrollAxis::vertical) {
+    triangle(context, original_deflate_rect(parts.up, 2), true, ink);
+    triangle(context, original_deflate_rect(parts.down, 2), false, ink);
+  } else {
+    side_triangle(context, original_deflate_rect(parts.up, 2), true, ink);
+    side_triangle(context, original_deflate_rect(parts.down, 2), false, ink);
+  }
+  if (parts.thumb.bottom > parts.thumb.top) raised_box(context, parts.thumb);
+}
+
 void paint_dialog_controls(OriginalDrawContext& context,
                            OriginalCanvasFont& font,
                            const DialogWindow& dialog) {
@@ -360,7 +378,7 @@ void paint_dialog_controls(OriginalDrawContext& context,
       case DialogControlKind::scroll_bar: {
         const auto ghost = dialog.scroll_tracking(it->id);
         // WM_CTLCOLORSCROLLBAR's brush (Elevator Control: white).
-        draw_scroll_bar(
+        draw_dialog_scroll_bar(
             context, it->rect, it->scroll_min, it->scroll_max,
             ghost.value_or(it->scroll_pos), it->enabled,
             dialog.descriptor().scroll_bar_background.value_or(kButtonFace));

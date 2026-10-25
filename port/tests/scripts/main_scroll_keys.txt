@@ -1,0 +1,15 @@
+# The SDL-only arrow key, Page Up / Down and wheel stand-ins send the
+# scroll bars' line and page codes through the same path (no
+# SB_ENDSCROLL): the run must match main_scroll_key_messages.txt.
+# args: --scenario busy --passes 40
+# same-digest-as: main_scroll_key_messages.txt
+pass 5
+key right
+key down
+key pgup
+pass 10
+wheel 1 -2
+key left
+key up
+key pgdn
+pass 40

@@ -2,6 +2,7 @@
 
 #include "sdl_dialog.hpp"
 #include "sdl_focus_rect.hpp"
+#include "sdl_main_scrollbars.hpp"
 #include "sdl_menu.hpp"
 #include "sdl_style.hpp"
 
@@ -21,8 +22,9 @@
 namespace simtower::sdl {
 namespace {
 
-// TEMP: desktop and Main nonclient colors until the Win16 frame and
-// scrollbars are drawn (the caption and menu bar are, in sdl_menu.cpp).
+// TEMP: desktop and Main nonclient colors until the Win16 frame is drawn
+// (the caption and menu bar are, in sdl_menu.cpp, the scroll bars in
+// sdl_main_scrollbars.cpp).
 // The shared TEMP colours (sdl_style.hpp); the active caption is navy by
 // owner decision 2026-10-23.
 constexpr std::uint32_t kDesktopRgb = style::kDesktop;
@@ -125,8 +127,8 @@ OriginalWorldRaster compose_window(const Session& session) {
   canvas.fill({0, 0, layout.window_width, layout.window_height}, kDesktopRgb);
 
   const auto draw_main = [&] {
-    // TEMP nonclient strips (frame, caption, menu, scrollbars), then the
-    // retained backing at the client origin.
+    // TEMP nonclient frame, the caption and menu bar, the retained backing
+    // at the client origin, then the WS_HSCROLL / WS_VSCROLL bars.
     const auto& main = layout.main_client;
     canvas.fill(layout.main_outer, kNonclientRgb);
     canvas.outline(layout.main_outer, kBorderRgb);
@@ -146,6 +148,9 @@ OriginalWorldRaster compose_window(const Session& session) {
                                    session.menu_view(),
                                    session.window_title(), main_active);
     canvas.blit(session.main_raster(), main.x, main.y, main);
+    draw_main_scroll_bars(canvas.raster(), layout,
+                          session.main_scroll_ranges(),
+                          session.main_scroll_bars());
   };
   const auto* palette = session.palette_runtime().initialized
                             ? &session.palette_runtime().colors

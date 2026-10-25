@@ -1,0 +1,14 @@
+# Reference for main_scroll_keys.txt.
+# args: --scenario busy --passes 40
+pass 5
+scroll h line-down
+scroll v line-down
+scroll v page-up
+pass 10
+scroll v line-down
+scroll v line-down
+scroll h line-down
+scroll h line-up
+scroll v line-up
+scroll v page-down
+pass 40

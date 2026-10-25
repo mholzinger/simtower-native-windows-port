@@ -1,0 +1,9 @@
+# While Elevator Control is open Main is disabled: a scripted scroll
+# message is an error (exit 2), like a menu pick.
+# args: --scenario busy --passes 3
+# expect-exit: 2
+# expect-stderr: scroll: Main is disabled
+pass 2
+open-elevator-control 0
+scroll h line-down
+pass 3

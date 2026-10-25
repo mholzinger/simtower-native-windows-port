@@ -48,9 +48,10 @@
 // clicks the push button whose mnemonic it is unless the focused control
 // takes characters. Alt and F10 alone (WM_SYSKEYDOWN) reach no procedure.
 //
-// Scroll bars are vertical only: a template SBS_HORZ bar (style bit 0
-// clear) is laid out, painted and hit-tested as a vertical one; none of
-// the ported dialogs has one.
+// Dialog scroll bars are vertical only: a template SBS_HORZ bar (style
+// bit 0 clear) is laid out, painted and hit-tested as a vertical one; none
+// of the ported dialogs has one. The geometry and painter below take
+// either axis (Main's WS_HSCROLL bar uses the horizontal one).
 //
 // Modeless use (Elevator Control 400, CreateDialogIndirectParamW): the
 // session keeps one DialogWindow beside the main loop and feeds it the
@@ -675,22 +676,38 @@ struct DialogEditLayout {
 [[nodiscard]] OriginalRect dialog_combo_list_rect(const DialogControl& combo,
                                                   int line_height);
 
-// The parts of a vertical scroll bar (SB_CTL or a list's WS_VSCROLL) at a
-// position in [min, max]: the arrow buttons (each min(width, height / 2)
-// tall), the trough between them and the square thumb. The painter, the
-// hit test and the thumb drag all use it.
+// A scroll bar's axis: vertical (SB_CTL, a list's WS_VSCROLL, Main's
+// WS_VSCROLL) or horizontal (Main's WS_HSCROLL).
+enum class DialogScrollAxis : std::uint8_t { vertical, horizontal };
+
+// The parts of a scroll bar at a position in [min, max]: the arrow
+// buttons (each min(thickness, length / 2) long), the trough between them
+// and the square thumb. up is the arrow toward min (the left one on a
+// horizontal bar), down the one toward max; track_start and track_end
+// bound the trough along the axis (y, or x on a horizontal bar). The
+// painter, the hit tests and the thumb drags all use it.
 struct DialogScrollParts {
   OriginalRect up{};
   OriginalRect down{};
-  int track_top{};
-  int track_bottom{};
+  int track_start{};
+  int track_end{};
   // Empty when the range is empty or there is no room (no thumb).
   OriginalRect thumb{};
 };
-[[nodiscard]] DialogScrollParts dialog_scroll_parts(const OriginalRect& bar,
-                                                    int min,
-                                                    int max,
-                                                    int position);
+[[nodiscard]] DialogScrollParts dialog_scroll_parts(
+    const OriginalRect& bar, int min, int max, int position,
+    DialogScrollAxis axis = DialogScrollAxis::vertical);
+// The position whose thumb starts at thumb_start along the axis (a thumb
+// drag: the pointer minus its grab offset), rounded to the nearest one.
+[[nodiscard]] int dialog_scroll_position_at(
+    const OriginalRect& bar, int min, int max, int thumb_start,
+    DialogScrollAxis axis = DialogScrollAxis::vertical);
+// The TEMP Win3.1-style painter of every scroll bar: arrow buttons, the
+// trough in `trough` and the thumb (none for an empty range).
+void draw_dialog_scroll_bar(
+    OriginalDrawContext& context, const OriginalRect& bar, int min, int max,
+    int position, bool enabled, OriginalRgb trough,
+    DialogScrollAxis axis = DialogScrollAxis::vertical);
 
 // The controls, bottom up (the first template child is on top), each in
 // its Win3.1-style look (TEMP), then an open combo box list over them.

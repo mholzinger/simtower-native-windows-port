@@ -14,8 +14,9 @@
 //   (original_main_window_geometry, 204,53); its client starts after the
 //   frame, caption and menu of kMainNonclientMetrics, the same metrics
 //   sdl_main.cpp uses for the client-size limits. [INFERRED] from those
-//   metrics: the caption, menu strip and scrollbar strips stay reserved
-//   (empty) until the Win16 menus and scrollbars are drawn.
+//   metrics: the caption and menu strip hold the caption and TOWER_MENU's
+//   bar (sdl_menu.hpp), the scroll bar strips right of and below the
+//   client Main's WS_VSCROLL / WS_HSCROLL bars (sdl_main_scrollbars.hpp).
 // - The window is the Main client plus its outer origin and nonclient
 //   extents (MainFrame::extra_width/extra_height, 228x115).
 //

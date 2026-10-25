@@ -49,6 +49,7 @@ add_library(simtower_port_core STATIC
   src/original_information.cpp
   src/original_information_paint.cpp
   src/original_main_command.cpp
+  src/original_main_scroll.cpp
   src/original_map.cpp
   src/original_menu.cpp
   src/original_palette_frame.cpp
@@ -185,6 +186,7 @@ target_link_libraries(simtower_test_support PUBLIC simtower_port_core)
 add_library(simtower_sdl_runtime STATIC sdl/sdl_dialog.cpp
                                         sdl/sdl_dialog_widgets.cpp
                                         sdl/sdl_dialog_descriptors.cpp
+                                        sdl/sdl_main_scrollbars.cpp
                                         sdl/sdl_help.cpp)
 target_include_directories(simtower_sdl_runtime PUBLIC
                            ${CMAKE_CURRENT_SOURCE_DIR}/sdl)
@@ -586,6 +588,14 @@ if(BUILD_TESTING)
   add_test(NAME simtower_main_command_tests
            COMMAND simtower_main_command_tests)
 
+  # The shared WM_HSCROLL / WM_VSCROLL handler against a frozen copy of the
+  # Win32 code (no assets; also run under Wine).
+  add_executable(simtower_main_scroll_tests tests/main_scroll_tests.cpp)
+  target_link_libraries(simtower_main_scroll_tests PRIVATE
+                        simtower_port_core)
+  add_test(NAME simtower_main_scroll_tests
+           COMMAND simtower_main_scroll_tests)
+
   # The shared File transactions against a recording host and temporary
   # files (no assets).
   add_executable(simtower_tower_file_tests tests/tower_file_tests.cpp)
@@ -706,7 +716,8 @@ if(BUILD_TESTING)
 
     # The dialog runtime end to end through scripts: expect-dialog,
     # dialog-click/key/wait/hold, the logged answers, the held frames and
-    # the script errors (cli_dialog_test.cmake reads each header).
+    # the script errors (cli_dialog_test.cmake reads each header); also
+    # Main's scroll bars, the scroll stand-ins and scroll messages.
     foreach(script dialog_bomb_pay dialog_bomb_esc dialog_bomb_enter
                    dialog_timer_accept dialog_bomb_short
                    dialog_bomb_short_timer dialog_default dialog_mismatch
@@ -723,6 +734,7 @@ if(BUILD_TESTING)
                    elevator_control_double elevator_control_double_scroll
                    elevator_control_tracking elevator_control_magnifier
                    elevator_control_magnifier_car
+                   elevator_control_scrolled_magnifier
                    elevator_control_accelerator
                    elevator_control_phase_released
                    facility_magnifier facility_rent facility_rename
@@ -732,6 +744,9 @@ if(BUILD_TESTING)
                    person_exit_latch person_frames
                    transport_magnifier transport_portrait
                    transport_exit_latch transport_frames
+                   main_scrollbars main_scroll_bars_digest
+                   main_scroll_keys main_scroll_blocked
+                   main_scroll_key_blocked
                    help_contents help_missing)
       add_test(
         NAME simtower_sdl_${script}
@@ -842,6 +857,7 @@ if(BUILD_TESTING)
       simtower_world_input_tests
       simtower_menu_tests
       simtower_main_command_tests
+      simtower_main_scroll_tests
       simtower_tower_file_tests
       simtower_startup_controller_tests)
   if(SIMTOWER_BUILD_SDL)

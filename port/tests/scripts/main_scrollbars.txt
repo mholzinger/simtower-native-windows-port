@@ -1,0 +1,85 @@
+# Main's WS_HSCROLL / WS_VSCROLL bars (window 1019x628: client 208,95
+# 791x513; horizontal bar y 608..623, vertical bar x 999..1014). Each
+# press goes through USER's tracking into MAINWNDPROC's WM_HSCROLL /
+# WM_VSCROLL (1158:015b / 01e7): arrows move 16 pixels, the trough the
+# client extent minus 16, the thumb its raw position. The Map's view
+# rectangle follows. A thumb drag holds the idle passes like the Elevator
+# Control scroll bar; the held frames are review frames.
+# args: --scenario busy --passes 60
+# expect-stderr: idle passes held: scroll bar tracking
+# held: main_bars_start.bmp
+# held: main_bars_drag.bmp
+# held: main_bars_basement.bmp
+pass 5
+expect-view 1104 3483
+expect-map-view 73 250 126 284
+hold main_bars_start.bmp
+# Right and left arrows, then the trough right and left of the thumb.
+click 991 616
+expect-view 1120 3483
+click 216 616
+expect-view 1104 3483
+click 900 616
+expect-view 1879 3483
+expect-map-view 125 250 178 284
+click 300 616
+expect-view 1104 3483
+# Down arrow (clamped at the bottom of the range: 4320 - 513 = 3807),
+# up arrow, and the trough above the thumb.
+click 1007 600
+expect-view 1104 3499
+click 1007 103
+expect-view 1104 3483
+click 1007 300
+expect-view 1104 2986
+click 1007 590
+expect-view 1104 3483
+# The horizontal thumb (x 595..610 at 1104): grab it 8 pixels in and
+# drag it across passes 5..10; SB_THUMBTRACK moves the view with it,
+# the release sends SB_THUMBPOSITION (and SB_ENDSCROLL).
+expect-idle-passes 5
+down 603 616
+move 803 616
+expect-view 1698 3483
+hold main_bars_drag.bmp
+pass 10
+expect-idle-passes 5
+move 2000 300
+expect-view 2209 3483
+up 2000 300
+expect-view 2209 3483
+expect-map-view 147 250 200 284
+pass 11
+expect-idle-passes 6
+# The vertical thumb to the bottom of its range: the basement.
+down 1007 540
+move 1007 700
+up 1007 700
+expect-view 2209 3807
+expect-map-view 147 271 200 306
+hold main_bars_basement.bmp
+# The SDL-only stand-ins: arrow keys and Page Up / Down, and the wheel.
+key left
+expect-view 2193 3807
+key up
+expect-view 2193 3791
+key pgup
+expect-view 2193 3294
+key pgdn
+expect-view 2193 3791
+key right
+key down
+expect-view 2209 3807
+wheel 0 2
+expect-view 2209 3775
+wheel -1 -1
+expect-view 2193 3791
+# Scripted WM_HSCROLL / WM_VSCROLL messages.
+scroll h thumb-position 0
+scroll v thumb-track 70
+expect-view 0 70
+scroll v end
+scroll h top
+scroll v bottom
+expect-view 0 70
+pass 60

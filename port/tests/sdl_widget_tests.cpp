@@ -2,19 +2,24 @@
 // single-line edit, list box, drop-down-list combo box and SB_CTL scroll
 // bar behavior (the Win32 messages and notifications the game's dialogs
 // use), the IsDialogMessage group rules for the arrow keys, the dialog
-// WM_PAINT event, and their Win3.1-style painting through the canvas.
+// WM_PAINT event, and their Win3.1-style painting through the canvas;
+// plus the scroll bar geometry along both axes and Main's WS_HSCROLL /
+// WS_VSCROLL bars (sdl/sdl_main_scrollbars.hpp).
 // Synthetic controls only: no game assets, so this runs everywhere (also
 // under Wine).
 
 #include "sdl_dialog.hpp"
 #include "sdl_focus_rect.hpp"
+#include "sdl_main_scrollbars.hpp"
 #include "sdl_style.hpp"
 
 #include "original_canvas_font.hpp"
 #include "original_dialog.hpp"
 #include "original_dialog_model.hpp"
+#include "original_draw_canvas.hpp"
 
 #include <cassert>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -590,6 +595,181 @@ void scroll_bar_tests() {
   assert(count(image, rect, simtower::sdl::style::kButtonFace) > 500);
 }
 
+// --- Scroll bars along both axes, Main's bars ------------------------------
+
+OriginalRect transpose(const OriginalRect& r) {
+  return {r.top, r.left, r.bottom, r.right};
+}
+
+void scroll_axis_tests() {
+  using simtower::sdl::DialogScrollAxis;
+  using simtower::sdl::dialog_scroll_parts;
+  using simtower::sdl::dialog_scroll_position_at;
+  // A horizontal bar is the transpose of the vertical one: the same
+  // arrows, trough and thumb with x and y swapped.
+  const OriginalRect vertical{3, 10, 19, 250};
+  const auto horizontal = transpose(vertical);
+  for (const int position : {0, 1, 37, 500, 999, 1000}) {
+    const auto v = dialog_scroll_parts(vertical, 0, 1000, position);
+    const auto h = dialog_scroll_parts(horizontal, 0, 1000, position,
+                                       DialogScrollAxis::horizontal);
+    assert(h.up == transpose(v.up));
+    assert(h.down == transpose(v.down));
+    assert(h.thumb == transpose(v.thumb));
+    assert(h.track_start == v.track_start && h.track_end == v.track_end);
+  }
+  const auto parts = dialog_scroll_parts(horizontal, 0, 1000, 0,
+                                         DialogScrollAxis::horizontal);
+  assert((parts.up == OriginalRect{10, 3, 26, 19}));
+  assert((parts.down == OriginalRect{234, 3, 250, 19}));
+  assert((parts.thumb == OriginalRect{26, 3, 42, 19}));
+  // The drag mapping: every thumb start maps to a position whose thumb
+  // starts there (rounded), the ends to the range ends, and past them it
+  // clamps.
+  const int room = parts.track_end - parts.track_start - 16;
+  for (int start = parts.track_start; start <= parts.track_start + room;
+       ++start) {
+    const int position = dialog_scroll_position_at(
+        horizontal, 0, 1000, start, DialogScrollAxis::horizontal);
+    const auto back = dialog_scroll_parts(horizontal, 0, 1000, position,
+                                          DialogScrollAxis::horizontal);
+    assert(std::abs(back.thumb.left - start) <= 1);
+    assert(position == dialog_scroll_position_at(vertical, 0, 1000, start));
+  }
+  assert(dialog_scroll_position_at(horizontal, 0, 1000, -50,
+                                   DialogScrollAxis::horizontal) == 0);
+  assert(dialog_scroll_position_at(horizontal, 0, 1000, 900,
+                                   DialogScrollAxis::horizontal) == 1000);
+  // An empty range has no thumb and maps everything to min.
+  assert(dialog_scroll_parts(horizontal, 5, 5, 5,
+                             DialogScrollAxis::horizontal)
+             .thumb.right == 0);
+  assert(dialog_scroll_position_at(horizontal, 5, 5, 100,
+                                   DialogScrollAxis::horizontal) == 5);
+  // Painting: the horizontal bar is the vertical one transposed, pixel
+  // for pixel (arrows turned, bevels on the same sides).
+  const auto paint = [](const OriginalRect& bar, DialogScrollAxis axis) {
+    simtower::OriginalWorldRaster raster{};
+    raster.width = 260;
+    raster.height = 260;
+    raster.pixels.assign(260U * 260U, 0x00123456U);
+    simtower::OriginalCanvasDrawContext context(
+        raster, simtower::OriginalCanvasFont::bundled());
+    simtower::sdl::draw_dialog_scroll_bar(
+        context, bar, 0, 1000, 400, true,
+        simtower::sdl::style::kButtonFace, axis);
+    return raster;
+  };
+  const auto v_image = paint(vertical, DialogScrollAxis::vertical);
+  const auto h_image = paint(horizontal, DialogScrollAxis::horizontal);
+  for (int y = 0; y < 260; ++y) {
+    for (int x = 0; x < 260; ++x) {
+      assert(at(v_image, x, y) == at(h_image, y, x));
+    }
+  }
+  // The arrows are drawn in black (enabled) inside their raised boxes.
+  assert(count(h_image, parts.up, 0U) > 0);
+}
+
+void main_scroll_bar_tests() {
+  using simtower::OriginalMainScrollBar;
+  using simtower::sdl::MainScrollBars;
+  using simtower::sdl::MainScrollRanges;
+  using simtower::sdl::MainScrollSignal;
+  // The default window: client 208,95 791x513.
+  simtower::sdl::WindowLayout layout{};
+  layout.main_client = {208, 95, 791, 513};
+  const auto rects = simtower::sdl::main_scroll_bar_rects(layout);
+  assert((rects.horizontal == simtower::sdl::PanelRect{208, 608, 791, 16}));
+  assert((rects.vertical == simtower::sdl::PanelRect{999, 95, 16, 513}));
+  assert((rects.corner == simtower::sdl::PanelRect{999, 608, 16, 16}));
+  const MainScrollRanges ranges{{{0, 2209, 1104}, {0, 3807, 3483}}};
+  const auto h = OriginalMainScrollBar::horizontal;
+  const auto v = OriginalMainScrollBar::vertical;
+  using Signals = std::vector<MainScrollSignal>;
+  MainScrollBars bars;
+  // Off the bars: not taken.
+  assert(!bars.press(layout, ranges, 500, 300));
+  assert(!bars.tracking());
+  // Arrows and trough: the code on the press, SB_ENDSCROLL on release.
+  assert((*bars.press(layout, ranges, 991, 616) ==
+          Signals{{h, simtower::kOriginalScrollLineDown, 0}}));
+  assert(bars.tracking());
+  assert(bars.move(layout, ranges, 900, 616).empty());
+  assert((bars.release() == Signals{{h, simtower::kOriginalScrollEnd, 0}}));
+  assert(!bars.tracking());
+  assert((*bars.press(layout, ranges, 216, 616) ==
+          Signals{{h, simtower::kOriginalScrollLineUp, 0}}));
+  (void)bars.release();
+  assert((*bars.press(layout, ranges, 300, 616) ==
+          Signals{{h, simtower::kOriginalScrollPageUp, 0}}));
+  (void)bars.release();
+  assert((*bars.press(layout, ranges, 900, 616) ==
+          Signals{{h, simtower::kOriginalScrollPageDown, 0}}));
+  (void)bars.release();
+  assert((*bars.press(layout, ranges, 1007, 103) ==
+          Signals{{v, simtower::kOriginalScrollLineUp, 0}}));
+  (void)bars.release();
+  assert((*bars.press(layout, ranges, 1007, 600) ==
+          Signals{{v, simtower::kOriginalScrollLineDown, 0}}));
+  (void)bars.release();
+  assert((*bars.press(layout, ranges, 1007, 300) ==
+          Signals{{v, simtower::kOriginalScrollPageUp, 0}}));
+  (void)bars.release();
+  // The corner takes the press and sends nothing, with no tracking.
+  assert(bars.press(layout, ranges, 1005, 615)->empty());
+  assert(!bars.tracking());
+  assert(bars.release().empty());
+  // The horizontal thumb (x 595..610 at 1104): no code on the press,
+  // SB_THUMBTRACK per changed position, the release SB_THUMBPOSITION then
+  // SB_ENDSCROLL. thumb_tracking is the drag position for the painter.
+  assert(bars.press(layout, ranges, 603, 616)->empty());
+  assert(bars.thumb_tracking(h) == 1104);
+  assert(!bars.thumb_tracking(v));
+  assert((bars.move(layout, ranges, 803, 300) ==
+          Signals{{h, simtower::kOriginalScrollThumbTrack, 1698}}));
+  assert(bars.move(layout, ranges, 803, 900).empty());
+  assert((bars.move(layout, ranges, 5000, 616) ==
+          Signals{{h, simtower::kOriginalScrollThumbTrack, 2209}}));
+  assert((bars.move(layout, ranges, -5000, 616) ==
+          Signals{{h, simtower::kOriginalScrollThumbTrack, 0}}));
+  assert((bars.release() ==
+          Signals{{h, simtower::kOriginalScrollThumbPosition, 0},
+                  {h, simtower::kOriginalScrollEnd, 0}}));
+  assert(!bars.thumb_tracking(h));
+  // A thumb press released without a move still sends its position.
+  const auto vertical_thumb = simtower::sdl::dialog_scroll_parts(
+      simtower::sdl::main_scroll_bar_rect(layout, v), 0, 3807, 3483);
+  assert(bars.press(layout, ranges, 1007, vertical_thumb.thumb.top + 1)
+             ->empty());
+  assert((bars.release() ==
+          Signals{{v, simtower::kOriginalScrollThumbPosition, 3483},
+                  {v, simtower::kOriginalScrollEnd, 0}}));
+  // WM_CANCELMODE ends the track with nothing more.
+  assert(bars.press(layout, ranges, 603, 616)->empty());
+  assert(bars.cancel());
+  assert(!bars.cancel());
+  assert(bars.move(layout, ranges, 803, 616).empty());
+  assert(bars.release().empty());
+  // Painting: both bars and the corner in the window raster, the
+  // horizontal thumb at its tracking position while dragged.
+  simtower::OriginalWorldRaster raster{};
+  raster.width = 1019;
+  raster.height = 628;
+  raster.pixels.assign(1019U * 628U, 0x00123456U);
+  simtower::sdl::draw_main_scroll_bars(raster, layout, ranges, bars);
+  assert(at(raster, 1005, 615) == simtower::sdl::style::kButtonFace);
+  assert(count(raster, {208, 608, 999, 624}, 0x00123456U) == 0);
+  assert(count(raster, {999, 95, 1015, 608}, 0x00123456U) == 0);
+  // The thumb's white bevel at x 596 (thumb 595..610).
+  assert(at(raster, 596, 610) == simtower::sdl::style::kWhite);
+  assert(bars.press(layout, ranges, 603, 616)->empty());
+  (void)bars.move(layout, ranges, 803, 616);
+  simtower::sdl::draw_main_scroll_bars(raster, layout, ranges, bars);
+  assert(at(raster, 596, 610) != simtower::sdl::style::kWhite);
+  (void)bars.release();
+}
+
 // --- Modeless additions (Elevator Control) ------------------------------
 
 std::optional<OriginalDialogSignal> move_signal(const DialogPointer&, int x,
@@ -811,6 +991,8 @@ int main() {
   list_tests();
   combo_tests();
   scroll_bar_tests();
+  scroll_axis_tests();
+  main_scroll_bar_tests();
   group_tests();
   modeless_tests();
   std::printf("sdl widget tests passed\n");
