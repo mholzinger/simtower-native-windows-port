@@ -309,6 +309,8 @@ class OriginalWorldInputHost {
       const OriginalMagnifierTarget& target) = 0;
   virtual void facility_information(std::int16_t floor,
                                     std::size_t tenant_index) = 0;
+  // A Magnifier click on a Lobby (1100:0468): Finance, 1060:0083.
+  virtual void finance_dialog() = 0;
   virtual void person_information(std::size_t person_index) = 0;
   // Command outer origin (GetWindowRect) for the selector anchor.
   virtual OriginalWorldPoint command_outer_origin() = 0;

@@ -183,6 +183,9 @@ enum class OriginalMagnifierTargetKind : std::uint8_t {
   vertical_transport_information,
   waiting_person_information,
   facility_information,
+  // 1100:03ac's type table sends Lobby types 24..26 to 1100:0468, which
+  // opens Finance (1060:0083, DIALOG 500) instead of a facility dialog.
+  lobby_finance,
 };
 
 struct OriginalMagnifierTarget {

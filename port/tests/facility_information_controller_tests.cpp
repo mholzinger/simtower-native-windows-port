@@ -10,6 +10,17 @@
 // facility of the "full" staged tower. Also: the portable painter on the
 // canvas and the preview raster. Runs natively and under Wine; needs the
 // pack (exit 77 without it).
+//
+// 2026-10-25: the owner chose the original's behaviour on both hosts, so
+// the frozen copy now asserts it. Its WM_INITDIALOG / refresh EnableWindow
+// and its CBN_SELCHANGE setter come from the shared builder
+// (rent_control_enabled, set_original_facility_rent_rate), which now
+// disables the combo only for a sold condo (1100:096f-09a5) and has no
+// condo test in the setter (1100:0bae-0c2b); before, both were inverted.
+// The staged condos are unsold (status 0x18 / 0x20), so their rent picks
+// now change the tower on both sides. original_behaviour_tests covers the
+// sold and unsold states, Yesterday's Profit for restaurants and fast
+// food (1100:1716 -> 2715) and the shop's own picture (1228:02c2).
 
 #include "original_construction.hpp"
 #include "original_draw_canvas.hpp"
@@ -590,6 +601,94 @@ void controller_tests(const simtower::OriginalResources& resources,
   assert(false && "no office staged");
 }
 
+// The four Facility Information behaviours matched to the original on
+// 2026-10-25 (see original_facility_information_controller.hpp).
+void original_behaviour_tests(const simtower::OriginalResources& resources,
+                              const simtower::OriginalPartTable& part,
+                              const OriginalTdtDocument& base) {
+  struct Found {
+    std::int16_t floor{-1};
+    std::size_t tenant{};
+  };
+  const auto find_type = [&](int type) {
+    for (std::size_t floor = 0; floor < base.floors.size(); ++floor) {
+      const auto& tenants = base.floors[floor].tenants;
+      for (std::size_t tenant = 0; tenant < tenants.size(); ++tenant) {
+        if (std::to_integer<std::int8_t>(tenants[tenant].exact_bytes[4]) ==
+            type) {
+          return Found{static_cast<std::int16_t>(floor), tenant};
+        }
+      }
+    }
+    return Found{};
+  };
+
+  // 1. Condo (group 4): 1100:096f-09a5 disables combo 13 for a sold condo
+  // (byte 5 < 24) only; 1100:0bae-0c2b sets the price in both states.
+  const auto condo = find_type(9);
+  assert(condo.floor >= 0);
+  for (const int status : {0x10, 0x17, 0x18, 0x20}) {
+    auto document = std::make_unique<OriginalTdtDocument>(base);
+    auto& tenant = document->floors[static_cast<std::size_t>(condo.floor)]
+                       .tenants[condo.tenant];
+    tenant.exact_bytes[5] = static_cast<std::byte>(status);
+    tenant.status = static_cast<std::uint8_t>(status);
+    const auto information = simtower::original_facility_information(
+        resources, *document, part, condo.floor, condo.tenant);
+    assert(information.dialog_group == 4U &&
+           information.rent_control_visible);
+    const bool sold = status < 24;
+    assert(information.occupancy_text == (sold ? "Occupied" : "For Sale"));
+    assert(information.rent_control_enabled == !sold);
+    Log log;
+    Combo combo;
+    RecordingOps ops(combo, log);
+    simtower::OriginalFacilityInformationController controller(
+        condo.floor, condo.tenant, information,
+        simtower::parse_original_dtmp(resources.find("DTMP", 752)));
+    controller.initialize(ops);
+    assert(log.back() == (sold ? "EnableWindow 13 0" : "EnableWindow 13 1"));
+    const auto rate = information.selected_rent_rate == 3U ? 0U : 3U;
+    assert(simtower::set_original_facility_rent_rate(
+        *document, part, condo.floor, condo.tenant,
+        static_cast<std::uint8_t>(rate)));
+    assert(tenant.exact_bytes[16] == static_cast<std::byte>(rate));
+  }
+
+  // 3. Yesterday's Profit: group 12 (types 6 and 12) through 1100:2715;
+  // a shop (group 5) has none.
+  const auto suffix = simtower::original_strl_entry(
+      resources.find("STRL", 713), 7U);
+  for (const int type : {6, 12}) {
+    const auto found = find_type(type);
+    assert(found.floor >= 0);
+    auto document = std::make_unique<OriginalTdtDocument>(base);
+    const auto& tenant = document->floors[static_cast<std::size_t>(
+        found.floor)].tenants[found.tenant];
+    const auto linked = std::to_integer<std::size_t>(tenant.exact_bytes[6]) |
+                        (std::to_integer<std::size_t>(tenant.exact_bytes[7])
+                         << 8U);
+    assert(linked < document->retail.size());
+    for (const int profit : {7, -3}) {
+      document->retail[linked].exact_bytes[10] =
+          static_cast<std::byte>(profit);
+      const auto information = simtower::original_facility_information(
+          resources, *document, part, found.floor, found.tenant);
+      assert(information.dialog_id == 760U);
+      assert(information.yesterday_profit_text ==
+             std::to_string(profit) + suffix);
+    }
+  }
+  const auto shop = find_type(10);
+  assert(shop.floor >= 0);
+  const auto shop_information = simtower::original_facility_information(
+      resources, base, part, shop.floor, shop.tenant);
+  assert(shop_information.dialog_id == 753U &&
+         shop_information.yesterday_profit_text.empty());
+  std::printf("facility original behaviour: condo floor %d tenant %zu\n",
+              condo.floor, condo.tenant);
+}
+
 // The portable painter on the canvas for every staged dialog: the chrome
 // fills the client, the preview is stretched into item 2, the name is drawn
 // in item 3.
@@ -698,6 +797,7 @@ int main(int argc, char** argv) {
   auto active = std::make_unique<OriginalTdtDocument>(*document);
   simtower::activate_all_original_pending_facilities_for_schedule(*active);
   parity_tests(resources, startup.part, *active);
+  original_behaviour_tests(resources, startup.part, *active);
   controller_tests(resources, startup.part, *document);
   painter_tests(resources, startup.part, *document);
   std::printf("facility information controller tests passed\n");

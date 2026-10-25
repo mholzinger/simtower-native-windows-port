@@ -190,6 +190,7 @@ class RecordingHost final : public OriginalWorldInputHost,
     log("facility_info " + std::to_string(floor) + " " +
         std::to_string(tenant));
   }
+  void finance_dialog() override { log("finance"); }
   void person_information(std::size_t person) override {
     log("person_info " + std::to_string(person));
   }
@@ -863,6 +864,30 @@ void test_edit_tools(const Tables& tables) {
     }
     expect(opened == 1U, "magnifier opens Facility Information");
     expect(same_tower(a, base), "magnifier does not mutate");
+  }
+  // Magnifier on the Lobby (2026-10-25, matches the original): 1100:03ac
+  // sends types 24..26 to 0468, which opens Finance (1060:0083) and no
+  // Facility Information.
+  {
+    auto a = base;
+    auto state = construction_state(tables, 7U);
+    state.command_mode = 2U;
+    RecordingHost host;
+    host.view = original_facility_focus_view(240, 10, kClientWidth,
+                                             kClientHeight);
+    std::size_t finance = 0U;
+    std::size_t facility = 0U;
+    for (int y = 2; y < kClientHeight && finance == 0U; y += 6) {
+      host.clear();
+      click(context(a, tables, state), host, 320, y);
+      for (const auto& token : host.trace) {
+        if (token == "finance") ++finance;
+        if (token.rfind("facility_info 10 ", 0) == 0) ++facility;
+      }
+    }
+    expect(finance == 1U, "magnifier on the Lobby opens Finance");
+    expect(facility == 0U, "the Lobby opens no Facility Information");
+    expect(same_tower(a, base), "lobby magnifier does not mutate");
   }
   // Bulldozer on an office: the facility-click damage path mutates.
   {

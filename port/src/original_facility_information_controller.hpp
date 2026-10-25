@@ -13,32 +13,33 @@
 // Win32 branches in facility_information_controller_tests.cpp proves the
 // call order is unchanged. No windows.h here.
 //
-// What the original does that the Win32 port (and so this controller) does
-// differently is listed for the owner, not applied (fdis.py of 1100:03ac,
-// 1100:085b and 1100:1716):
-// - The condo (group 4) price combo is enabled the wrong way round.
-//   1100:096f-09a5 calls EnableWindow(GetDlgItem(13), FALSE) only when
-//   DS:b3ac == 4 and record byte +0xb (exact_bytes[5]) < 0x18, so the
-//   original disables it for sold condos (byte 5 < 24, 'Occupied') and
-//   leaves it enabled for unsold ones (byte 5 >= 24, 'For Sale'). The
-//   shared builder (original_facility_information, rent_control_enabled)
-//   does the reverse on both hosts: a player cannot price an unsold condo
-//   and can reprice a sold one. set_original_facility_rent_rate carries
-//   the same inverted guard (it refuses group 4 with byte 5 >= 24), where
-//   the original's CBN_SELCHANGE tail 1100:0bae-0c2b has no condo test at
-//   all (group <= 5, a changed selection, then byte +0x16 and 1130:06e9).
-//   Fix (owner approval needed, a Win32 behaviour change): enabled =
-//   `group != 4U || signed_byte(exact_bytes[5]) >= 24`, and drop (or
-//   flip) the setter's condo guard.
-// - Restaurants (type 6) show an empty Yesterday's Profit. 1100:1716
-//   dispatches on DS:b3ac through cs:1a40; group 12 (DIALOG 760: types 6
-//   and 12) goes to 194a, which calls 1100:2715 (signed Retail byte 10 plus
-//   STRL/713 item 7) with no type test. The builder formats it for type 12
-//   only. Fix (owner approval needed, a Win32 behaviour change):
-//   `group == 12U && linked < document.retail.size()`.
-// - Lobbies open no Finance, types 45 / 46 are swapped, there is no Main /
-//   Map / Command repaint after the dialog closes, and refreshes repaint
-//   the whole client instead of items 5/6/8/10.
+// Matches the original since 2026-10-25 on both hosts (owner decision;
+// fdis.py of 1100:03ac, 1100:085b, 1100:1716 and 1228:0103):
+// - The condo (group 4) price combo. 1100:096f-09a5 calls
+//   EnableWindow(GetDlgItem(13), FALSE) only when DS:b3ac == 4 and record
+//   byte +0xb (exact_bytes[5]) < 0x18: disabled for a sold condo ('Occupied')
+//   and enabled for an unsold one ('For Sale'). The builder's
+//   rent_control_enabled is `group != 4U || exact_bytes[5] >= 24`, and
+//   set_original_facility_rent_rate has no condo test, as the CBN_SELCHANGE
+//   tail 1100:0bae-0c2b (group <= 5, a changed selection, byte +0x16,
+//   1130:06e9). Until then both were the wrong way round.
+// - Yesterday's Profit for group 12 (DIALOG 760: types 6 and 12). 1100:1716
+//   jumps through cs:1a40; group 12 goes to 194a, which calls 1100:2715
+//   (signed Retail byte 10 plus STRL/713 item 7) with no type test. The
+//   builder now fills it for restaurants too, not only fast food.
+// - A Magnifier click on a Lobby (types 24..26) opens Finance. 1100:03ac's
+//   cs:054e table sends them to 0468: 1060:0083 (DIALOG 500), return 0.
+//   select_original_magnifier_target returns lobby_finance and
+//   run_original_magnifying_glass calls the host's finance_dialog.
+// - A shop's picture and name come from its own Retail record. 1100:465a
+//   (477c) and 1100:2715 read record word +0xc unchecked; the cause of the
+//   Soba picture was construction: 1228:02c2 (type 10) joins the type 6/12
+//   tail at 0354, so 11a8:07d3 allocates a Retail record for every shop at
+//   activation (allocate_original_commercial_service).
+// Still different, listed for the owner: types 45 / 46 are swapped (1100:
+// 03ac opens nothing for 45 and group 8 for 46), there is no Main / Map /
+// Command repaint after the dialog closes, and refreshes repaint the whole
+// client instead of items 5/6/8/10.
 //
 // There is no eviction: TENANTINFODLOGFILTER's WM_COMMAND (1100:0b20-0b2f)
 // compares only ids 1 (OK), 7 (Rename) and 13 (rent combo / New Movie)

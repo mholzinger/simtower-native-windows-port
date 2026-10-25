@@ -3,6 +3,7 @@
 #include "original_construction.hpp"
 #include "original_dialog.hpp"
 #include "original_dtmp.hpp"
+#include "original_finance.hpp"
 #include "original_find.hpp"
 #include "original_people.hpp"
 #include "original_simulation.hpp"
@@ -1867,8 +1868,19 @@ OriginalMagnifierTarget select_original_magnifier_target(
   if (!facility.hit) return {};
   const auto& tenant = document.floors[static_cast<std::size_t>(facility.floor)]
                            .tenants[facility.tenant_index];
-  const auto dialog_id = original_facility_information_dialog_id(
-      signed_byte(tenant.exact_bytes[4]));
+  const auto type = signed_byte(tenant.exact_bytes[4]);
+  if (type >= 24 && type <= 26) {
+    // 1100:03ac's cs:054e table sends Lobby types 24..26 to 0468: a far
+    // call to 1060:0083 (Finance, DIALOG 500), then return 0 (which
+    // 1058:019d ignores).
+    OriginalMagnifierTarget target{};
+    target.kind = OriginalMagnifierTargetKind::lobby_finance;
+    target.dialog_id = original_finance_launcher_contract().dialog_resource_id;
+    target.floor = facility.floor;
+    target.tenant_index = facility.tenant_index;
+    return target;
+  }
+  const auto dialog_id = original_facility_information_dialog_id(type);
   if (!dialog_id) return {};
 
   OriginalMagnifierTarget target{};
@@ -2383,8 +2395,10 @@ OriginalFacilityInformation original_facility_information(
 
   if (group <= 5U) {
     information.rent_control_visible = true;
+    // 1100:096f-09a5 disables combo 13 only for a sold condo (group 4,
+    // record byte +0xb = exact_bytes[5] < 0x18); an unsold one keeps it.
     information.rent_control_enabled =
-        group != 4U || signed_byte(tenant.exact_bytes[5]) < 24;
+        group != 4U || signed_byte(tenant.exact_bytes[5]) >= 24;
     information.rent_choices = original_rent_choices(group);
     information.selected_rent_rate =
         std::to_integer<std::uint8_t>(tenant.exact_bytes[16]);
@@ -2415,8 +2429,11 @@ OriginalFacilityInformation original_facility_information(
       information.commercial_value_text = std::to_string(
           information.commercial_meter.value);
     }
-    if (type == 12 && linked < document.retail.size()) {
-      // 1100:2715 formats signed Retail byte 10 and appends STRL/713 item 7.
+    if (group == 12U && linked < document.retail.size()) {
+      // 1100:1716 jumps through cs:1a40 on the dialog group; group 12
+      // (DIALOG 760: Restaurant and Fast Food) reaches 194a, which calls
+      // 1100:2715 with no type test. 2715 formats signed Retail byte 10
+      // and appends STRL/713 item 7 (it reads the record unchecked).
       information.yesterday_profit_text = std::to_string(
           signed_byte(document.retail[linked].exact_bytes[10]));
       information.yesterday_profit_text += original_strl_entry(
@@ -2463,10 +2480,10 @@ bool set_original_facility_rent_rate(
   auto& tenant = floor.tenants[tenant_index];
   const auto group = original_facility_dialog_group(
       static_cast<std::int8_t>(signed_byte(tenant.exact_bytes[4])));
-  if (group > 5U ||
-      (group == 4U && signed_byte(tenant.exact_bytes[5]) >= 24)) {
-    return false;
-  }
+  // 1100:0bae-0c2b, TENANTINFODLOGFILTER's CBN_SELCHANGE tail: groups
+  // 0..5 and a changed selection, with no condo test (a sold condo's combo
+  // is disabled at WM_INITDIALOG instead).
+  if (group > 5U) return false;
   if (std::to_integer<std::uint8_t>(tenant.exact_bytes[16]) == rent_rate) {
     return false;
   }

@@ -653,7 +653,8 @@ if(BUILD_TESTING)
                    elevator_control_phase_released
                    facility_magnifier facility_rent facility_rename
                    facility_movie facility_portrait facility_frames
-                   facility_frames_full person_magnifier person_rename
+                   facility_frames_full facility_lobby_finance
+                   person_magnifier person_rename
                    person_exit_latch person_frames
                    transport_magnifier transport_portrait
                    transport_exit_latch transport_frames)

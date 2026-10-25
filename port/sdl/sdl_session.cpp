@@ -275,6 +275,14 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
                             std::size_t tenant_index) override {
     s_.open_facility_information(floor, tenant_index);
   }
+  void finance_dialog() override {
+    // A Magnifier click on a Lobby: 1100:0468 -> 1060:0083.
+    ++s_.host_requests_.dialogs;
+    s_.log_request(RequestKind::info_dialog, {-3, 500});
+    s_.tally("lobby finance");
+    log_line("lobby finance");
+    (void)s_.run_finance_dialog();
+  }
   void person_information(std::size_t person_index) override {
     (void)s_.open_person_information(
         person_index, OriginalPersonInformationContext::main_world);

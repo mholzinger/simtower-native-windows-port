@@ -6576,6 +6576,7 @@ class Win32WorldInputHost final : public simtower::OriginalWorldInputHost {
     (void)run_original_facility_information_dialog(g_main_window, floor,
                                                    tenant_index);
   }
+  void finance_dialog() override { run_original_finance_dialog(); }
   void person_information(std::size_t person_index) override {
     (void)run_original_person_information_dialog(g_main_window,
                                                  person_index);
