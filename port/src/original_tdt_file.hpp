@@ -83,8 +83,11 @@ void save_original_tdt_file(const std::filesystem::path& path,
 
 // The Win16 save-as path measures from the last backslash to the first dot in
 // the complete normalized path and rejects signed lengths greater than eight.
+// separators names the characters that count as that backslash: the
+// default is the original's; a POSIX host passes L"/".
 [[nodiscard]] bool original_tdt_basename_is_valid(
-    const std::filesystem::path& normalized_path) noexcept;
+    const std::filesystem::path& normalized_path,
+    std::wstring_view separators = L"\\") noexcept;
 
 // 10d0:0225/03f1 constructs "SimTower - <file title>" and then removes the
 // four-character .TDT suffix. New towers use the literal "untitled".

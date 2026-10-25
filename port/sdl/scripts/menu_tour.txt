@@ -1,0 +1,52 @@
+# A tour of TOWER_MENU through the shared WM_COMMAND dispatcher on the
+# staged busy tower: the Options toggles and their check marks, the Sound
+# items (grayed while sound is off, so not sent), the Windows toggles, the
+# logged Finance/About/Find/Help requests, F1, a cancelled Save As, and New
+# behind its confirmation alert. "menu-show" only changes what
+# --headless-window draws.
+#
+#   simtower_sdl --scenario busy --input-script menu_tour.txt --passes 4 \
+#                --state-digest --headless-window menu.bmp
+
+pass 1
+expect-title SimTower - untitled
+# WM_CREATE removed the hidden debug items and checked Fast Mode.
+expect-menu 9000 absent
+expect-menu 40007 checked
+expect-menu 40008 grayed
+# Options toggles flip their word and the check mark.
+menu 40007
+expect-menu 40007 unchecked
+menu 40007
+expect-menu 40007 checked
+menu 40009
+expect-menu 40009 unchecked
+menu 40009
+# Headless runs have no sound device: the Sound items are grayed.
+expect-menu 40011 grayed
+menu 40011
+expect-menu 40011 checked
+pass 2
+# Windows: hide and show the Map; its check mark never changes.
+menu 40016
+expect-menu 40016 unchecked
+menu 40016
+# Logged until the dialog and help runtimes exist.
+menu 40017
+menu 40018
+menu 40019
+menu 40020
+menu 40021
+key f1
+# Save As, cancelled at the picker: the tower stays untitled.
+menu 40002
+pick-file cancel
+expect-title SimTower - untitled
+pass 3
+# New on a tower with floor-10 tenants asks first (alert 1001); answer 2
+# proceeds without saving.
+alert 2
+menu 40005
+expect-title SimTower - untitled
+menu-show 1 1 0
+pass 4

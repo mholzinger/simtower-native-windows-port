@@ -4,6 +4,7 @@
 #include "original_construction.hpp"
 #include "original_draw_canvas.hpp"
 #include "original_resources.generated.hpp"
+#include "original_tables.hpp"
 #include "original_startup_data.hpp"
 #include "original_tdt_file.hpp"
 #include "original_time.hpp"
@@ -280,6 +281,256 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
   Session& s_;
 };
 
+// The SDL host of the shared File transactions (original_tower_file.hpp).
+// Pickers come from the scripted queue or the window's native dialogs;
+// prompts and alerts are logged and answered with the scripted alert
+// answer (1 = Yes/OK, the default; 2 = No/Cancel) until the dialog runtime
+// exists.
+class Session::TowerFileHost final : public OriginalTowerFileHost {
+ public:
+  explicit TowerFileHost(Session& session) : s_(session) {}
+
+  OriginalTdtDocument* document() override {
+    return s_.document_ ? &*s_.document_ : nullptr;
+  }
+  std::filesystem::path tower_path() override { return s_.tower_path_; }
+  std::filesystem::path tower_title() override { return s_.tower_title_; }
+  void commit_tower_identity(const std::filesystem::path& path,
+                             const std::filesystem::path& title) override {
+    s_.tower_path_ = path;
+    s_.tower_title_ = title;
+    s_.document_dirty_ = false;
+    s_.log_request(RequestKind::file, {1});
+    log_line("tower is now " + path.string() + " (" + s_.window_title() +
+             ")");
+  }
+  void store_view_in_header() override {
+    s_.document_->header.view_x = static_cast<std::uint16_t>(s_.viewport_.x);
+    s_.document_->header.view_y = static_cast<std::uint16_t>(s_.viewport_.y);
+  }
+  // TEMP: palettes are panels in the one window, so there is no
+  // activation order to demote; only the Arrow cursor is restored.
+  void begin_file_dialog() override { s_.cursor_id_ = 0U; }
+  void end_file_dialog() override {}
+  std::optional<OriginalPickedTowerFile> pick_open_file() override {
+    auto path = s_.next_picked_file(false);
+    if (!path) return std::nullopt;
+    return OriginalPickedTowerFile{std::move(*path), {}};
+  }
+  std::optional<std::filesystem::path> pick_save_file() override {
+    return s_.next_picked_file(true);
+  }
+  bool confirm_replace(const std::filesystem::path& path) override {
+    // MessageBeep + MB_YESNO: answer 2 is IDNO.
+    const int answer = take_answer();
+    s_.log_request(RequestKind::alert, {-1, answer});
+    s_.tally("replace prompt");
+    log_line("replace " + path.string() + "? -> " +
+             (answer == 2 ? "no" : "yes"));
+    return answer != 2;
+  }
+  // The 8-character basename rule measured from the platform's directory
+  // separator: '/' off Windows (where '\\' is an ordinary name character),
+  // the original's backslash (and '/') on Windows.
+  [[nodiscard]] bool basename_rule_uses_file_name_only() const override {
+#ifdef _WIN32
+    return false;
+#else
+    return true;
+#endif
+  }
+  [[nodiscard]] std::wstring_view path_separators() const override {
+#ifdef _WIN32
+    return L"\\/";
+#else
+    return L"/";
+#endif
+  }
+  void invalid_filename() override {
+    s_.log_request(RequestKind::alert, {-2, 1});
+    s_.tally("invalid filename");
+    log_line("That is not a valid filename.");
+  }
+  void file_error(std::uint16_t strl_index) override {
+    (void)s_.world_host_->alert(
+        1000, original_strl_entry(s_.resources_.find("STRL", 1002),
+                                  strl_index));
+  }
+  int transition_alert(std::uint16_t action_index) override {
+    if (s_.audio_) s_.audio_->stop_all(true);
+    const auto action = original_strl_entry(
+        s_.resources_.find("STRL", 1001), action_index);
+    return s_.world_host_->alert(
+        1001, s_.tower_title_.string() + ": " + action);
+  }
+  void remove_recent_file_items() override { s_.remove_recent_file_items(); }
+  void install_empty_document() override { s_.install_empty_document(); }
+  void install_loaded_document(OriginalTdtDocument document) override {
+    s_.install_document(std::move(document));
+  }
+  void begin_new_tower() override { s_.new_tower(); }
+
+ private:
+  int take_answer() {
+    const int answer = s_.alert_answer_;
+    s_.alert_answer_ = 1;
+    ++s_.host_requests_.dialogs;
+    return answer;
+  }
+
+  Session& s_;
+};
+
+// The SDL host of the shared WM_COMMAND dispatcher (original_main_command.
+// hpp). Dialogs other than the event dialogs, help, and window z-order are
+// logged requests until their runtimes exist. Every request it logs uses a
+// RequestKind that only input reaches, except the hidden 9000/9002 event
+// path, which --event drives with the calls trigger_event made before.
+class Session::MainCommandHost final : public OriginalMainCommandHost {
+ public:
+  explicit MainCommandHost(Session& session) : s_(session) {}
+
+  // Whether the last 9000/9002 offer started its event (trigger_event).
+  [[nodiscard]] bool offer_started() const { return offer_started_; }
+  void reset_offer() { offer_started_ = false; }
+
+  bool modal_input_locked() override { return s_.modal_depth_ != 0; }
+  int event_dialog(const OriginalEventDialogRequest& request) override {
+    return s_.log_dialog(request, kAcknowledgeChoice, "command");
+  }
+  void exit_command() override {
+    // apply_original_main_shutdown_message(exit_command).
+    auto plan = original_main_shutdown_plan(
+        OriginalMainShutdownMessage::exit_command, s_.main_closing_, false);
+    if (plan.request_confirmation) {
+      plan = original_main_shutdown_plan(
+          OriginalMainShutdownMessage::exit_command, s_.main_closing_,
+          confirm_original_tower_transition(*s_.file_host_, 4));
+    }
+    if (plan.set_closing_latch) s_.main_closing_ = true;
+    if (plan.stop_audio_channels && s_.audio_) s_.audio_->stop_all(true);
+    if (plan.destroy_main_window) s_.quit_requested_ = true;
+    s_.log_request(RequestKind::shutdown, {plan.destroy_main_window});
+    log_line(plan.destroy_main_window ? "exit: Main destroyed"
+                                      : "exit: cancelled");
+  }
+  OriginalTowerFileHost& tower_file() override { return *s_.file_host_; }
+  bool& command_flag(OriginalMainCommandFlag flag) override {
+    switch (flag) {
+      case OriginalMainCommandFlag::people_animation:
+        return s_.flags_.people_animation_enabled;
+      case OriginalMainCommandFlag::effects_animation:
+        return s_.flags_.effects_animation_enabled;
+      case OriginalMainCommandFlag::fast_mode:
+        break;
+    }
+    return s_.flags_.fast_mode_enabled;
+  }
+  void apply_menu_op(const OriginalMenuOp& op) override {
+    s_.apply_menu_ops({&op, 1U});
+  }
+  OriginalTdtDocument* document() override {
+    return s_.document_ ? &*s_.document_ : nullptr;
+  }
+  const OriginalPartTable& part() override { return s_.part_; }
+  bool consume_fire_crew_resolution(
+      const OriginalFireCrewResolution& resolution) override {
+    auto context = s_.idle_pass_context();
+    return consume_original_fire_crew_resolution(context, s_, resolution);
+  }
+  void fire_crew_hired() override {
+    // InvalidateRect on Main and Info.
+    s_.main_backing_dirty_ = true;
+    s_.present_requested_ = true;
+    s_.paint_info();
+  }
+  // As Win32 (g_audio != nullptr): without a runtime the Sound toggles are
+  // no-ops. They are also grayed then (original_sound_menu_ops), so only a
+  // direct dispatch reaches this. The session keeps the category words
+  // (digest, menu checks) and mirrors them into the runtime.
+  bool audio_available() override { return s_.audio_ != nullptr; }
+  bool audio_category_enabled(std::size_t category) override {
+    return s_.sound_categories_[category];
+  }
+  void set_audio_category_enabled(std::size_t category,
+                                  bool enabled) override {
+    s_.sound_categories_[category] = enabled;
+    if (s_.audio_) s_.audio_->set_category_enabled(category, enabled);
+  }
+  void stop_all_audio(bool force) override {
+    if (s_.audio_) s_.audio_->stop_all(force);
+  }
+  bool& auxiliary_visible(OriginalAuxiliaryWindow window) override {
+    switch (window) {
+      case OriginalAuxiliaryWindow::command: return s_.command_visible_;
+      case OriginalAuxiliaryWindow::info: return s_.info_visible_;
+      case OriginalAuxiliaryWindow::map: break;
+    }
+    return s_.map_visible_;
+  }
+  // TEMP: the panel z-order is fixed (kPanelZOrder), so the HWND_TOP /
+  // HWND_TOPMOST raise is not reproduced yet.
+  void show_auxiliary(OriginalAuxiliaryWindow window,
+                      OriginalAuxiliaryInsertAfter insert_after) override {
+    // The shown Info window repaints its whole client (WM_PAINT).
+    if (window == OriginalAuxiliaryWindow::info) s_.paint_info();
+    s_.log_request(RequestKind::panel,
+                   {static_cast<int>(window), 1,
+                    static_cast<int>(insert_after)});
+    s_.present_requested_ = true;
+  }
+  void hide_auxiliary(OriginalAuxiliaryWindow window) override {
+    s_.log_request(RequestKind::panel, {static_cast<int>(window), 0});
+    s_.present_requested_ = true;
+  }
+  void finance_dialog() override { dialog(kOriginalCommandFinance, "finance"); }
+  void about_dialog() override { dialog(kOriginalCommandAbout, "about"); }
+  void find_dialog(OriginalFindMode mode) override {
+    dialog(mode == OriginalFindMode::person ? kOriginalCommandFindPerson
+                                            : kOriginalCommandFindTenant,
+           mode == OriginalFindMode::person ? "find person" : "find tenant");
+  }
+  void help_contents() override {
+    // WinHelp(SIMTOWER.HLP, HELP_CONTENTS = 3). TEMP: a logged request
+    // until the help viewer exists.
+    s_.log_request(RequestKind::help, {3});
+    s_.tally("help contents");
+    log_line("help contents requested (SIMTOWER.HLP, WinHelp command 3)");
+  }
+  bool bomb_offer() override {
+    auto context = s_.idle_pass_context();
+    offer_started_ = run_original_bomb_offer_boundary(context, s_);
+    return offer_started_;
+  }
+  bool fire_offer() override {
+    auto context = s_.idle_pass_context();
+    offer_started_ = run_original_fire_offer_boundary(context, s_);
+    return offer_started_;
+  }
+  void world_interaction_changed() override {
+    mark_original_world_interaction_changed(*s_.world_host_);
+  }
+  void mark_document_dirty() override { s_.document_dirty_ = true; }
+  void present_info_status() override {
+    s_.paint_info();
+    s_.present_requested_ = true;
+  }
+  void present_main_direct() override { s_.present_main(); }
+
+ private:
+  // TEMP: Finance, About and Find are logged until the dialog runtime.
+  void dialog(std::uint16_t command, const char* name) {
+    ++s_.host_requests_.dialogs;
+    s_.log_request(RequestKind::command_dialog, {command});
+    s_.tally(std::string("dialog ") + name);
+    log_line(std::string("dialog ") + name + " requested (" +
+             std::to_string(command) + ")");
+  }
+
+  Session& s_;
+  bool offer_started_{};
+};
+
 Session::Session(std::vector<std::byte> pack,
                  std::function<std::uint32_t()> clock_ms,
                  SessionFlags flags,
@@ -287,7 +538,9 @@ Session::Session(std::vector<std::byte> pack,
     : pack_(std::move(pack)),
       clock_ms_(std::move(clock_ms)),
       flags_(flags),
-      world_host_(std::make_unique<WorldInputHost>(*this)) {
+      world_host_(std::make_unique<WorldInputHost>(*this)),
+      command_host_(std::make_unique<MainCommandHost>(*this)),
+      file_host_(std::make_unique<TowerFileHost>(*this)) {
   verify_pack_extent(pack_);
   // WinMain: the portable span constructor replaces from_current_module.
   resources_ = OriginalResources(std::span<const std::byte>(pack_));
@@ -322,16 +575,26 @@ Session::Session(std::vector<std::byte> pack,
   // publishes the live modifier (1058:0028).
   world_input_.control_modifier = flags_.world_control_modifier;
 
+  // WinMain's TOWER_MENU and accelerator table, then MAINWNDPROC
+  // WM_CREATE (Fast Mode check, debug items deleted) and 1128:0ae7's Sound
+  // profile after the scrollbars. None of this touches game state.
+  menu_ = parse_original_menu(resources_.find("MENU", "TOWER_MENU"));
+  accelerators_ = parse_original_accelerators(
+      resources_.find("ACCELERATOR", "TOWER_MENU"));
+  apply_menu_ops(original_main_create_menu_ops(flags_.fast_mode_enabled));
+  apply_menu_ops(
+      original_sound_menu_ops(sound_categories_, flags_.sound_enabled));
+
   // Deliberately omitted Win32 startup steps (WinMain), none of which
   // touches the document RNG or simulation state:
-  // - SIMTOWER.INI profile, logical palette, font bank, cursors, icon,
-  //   accelerators and menu (no menus or fonts yet);
+  // - SIMTOWER.INI profile, logical palette, font bank, cursors and icon;
   // - the BITMAP/128 -> 256 splash and its 180-tick wait (1128:0042-00a7);
   // - the bootstrap reset_original_command_state(true),
   //   refresh_original_rating_command(rating, 0) and Map-focus adjustment
   //   (10d0:0ac2): New/Open reset the command state again before any pass;
-  // - the fire-menu update, and WAVE/20000 (play_startup_sound, which only
-  //   the interactive window calls).
+  // - WAVE/20000 (play_startup_sound, which only the interactive window
+  //   calls). The bootstrap's fire-menu update is applied to the menu
+  //   below without a logged request.
   // WinMain's base palette, then its never-stored bootstrap tower
   // (its frame 0x09e5 selects the CLUT 1002->1001 transition).
   reset_original_palette_runtime(resources_, nullptr, palette_runtime_,
@@ -339,6 +602,9 @@ Session::Session(std::vector<std::byte> pack,
   const auto startup_bootstrap = make_original_new_tdt();
   reset_original_palette_runtime(resources_, &startup_bootstrap,
                                  palette_runtime_, coarse_tick_now());
+  const auto fire = original_fire_menu_op(
+      original_fire_crew_menu_enabled_after_rebuild(startup_bootstrap));
+  apply_menu_ops({&fire, 1U});
   // The Info window's first WM_PAINT, before any tower: the painter's
   // no-document defaults.
   info_raster_.width = kOriginalInfoWidth;
@@ -508,30 +774,115 @@ void Session::install_document(OriginalTdtDocument document) {
   present_requested_ = true;
   document_->header.view_x = static_cast<std::uint16_t>(viewport_.x);
   document_->header.view_y = static_cast<std::uint16_t>(viewport_.y);
+  // The transition's fire_menu_update step, on the menu only: the logged
+  // fire_menu request stays the idle pass's (digest unchanged).
+  const auto fire = original_fire_menu_op(
+      original_fire_crew_menu_enabled_after_rebuild(*document_));
+  apply_menu_ops({&fire, 1U});
   // The transition's last step (info_repaint, 1118:0000).
   paint_info();
 }
 
-void Session::new_tower() {
-  // begin_original_new_tower: 10d0:001d -> 086c keeps the prior
-  // view, so the fresh header's zero view words are replaced first.
-  auto document = make_original_new_tdt();
-  document.header.view_x = static_cast<std::uint16_t>(viewport_.x);
-  document.header.view_y = static_cast<std::uint16_t>(viewport_.y);
-  install_document(std::move(document));
-  log_line("new tower");
-}
-
-void Session::open_tower(const std::filesystem::path& path) {
-  // load_original_tower_from_path: an empty tower is installed
-  // and reset before disk I/O, carrying the process RNG through both.
+void Session::install_empty_document() {
   auto empty_document = make_original_new_tdt();
   carry_original_process_random_state(document_ ? &*document_ : nullptr,
                                       empty_document);
   document_ = std::move(empty_document);
   reset_simulation_state();
   reset_command_state();
+}
+
+void Session::remove_recent_file_items() {
+  // 10d0:003e/0238: GetSubMenu(menu, 1) is Options; a no-op for TOWER_MENU.
+  const auto* options = original_sub_menu(menu_, 1U);
+  apply_menu_ops(original_recent_file_removal_ops(
+      options ? options->size() : 0U));
+}
+
+std::optional<std::filesystem::path> Session::next_picked_file(bool save) {
+  const char* sheet = save ? "save as" : "open";
+  std::optional<std::filesystem::path> result;
+  int source = 2;  // 0 scripted, 1 picker, 2 none (cancel)
+  if (!picked_files_.empty()) {
+    result = std::move(picked_files_.front());
+    picked_files_.pop_front();
+    source = 0;
+  } else if (auto scripted =
+                 input_source_ ? input_source_->next_file_pick()
+                               : std::nullopt) {
+    result = std::move(*scripted);
+    source = 0;
+  } else if (file_picker_) {
+    result = file_picker_->pick(save);
+    source = 1;
+  }
+  log_request(RequestKind::picker, {save, result.has_value(), source});
+  tally(std::string("picker ") + sheet);
+  log_line(std::string("picker ") + sheet + " (" +
+           (source == 0 ? "scripted" : source == 1 ? "native" : "none") +
+           ") -> " + (result ? result->string() : std::string("cancel")));
+  return result;
+}
+
+bool Session::choose_menu_command(std::uint16_t command) {
+  const auto* item = find_original_menu_command(menu_, command);
+  const bool dispatched = item && !item->grayed();
+  log_request(RequestKind::menu, {command, dispatched, 0});
+  tally("menu " + std::to_string(command));
+  log_line("menu " + std::to_string(command) +
+           (item ? (dispatched ? "" : " (grayed: not sent)")
+                 : " (not in the menu: not sent)"));
+  if (dispatched) (void)dispatch_original_main_command(*command_host_, command);
+  return dispatched;
+}
+
+bool Session::accelerator(std::uint16_t virtual_key) {
+  for (const auto& entry : accelerators_) {
+    if ((entry.flags & kOriginalAcceleratorVirtualKey) == 0U ||
+        entry.key != virtual_key) {
+      continue;
+    }
+    const auto* item = find_original_menu_command(menu_, entry.command);
+    const bool dispatched = !item || !item->grayed();
+    log_request(RequestKind::menu, {entry.command, dispatched, 1});
+    tally("accelerator " + std::to_string(entry.command));
+    if (dispatched) {
+      (void)dispatch_original_main_command(*command_host_, entry.command);
+    }
+    return dispatched;
+  }
+  return false;
+}
+
+std::string Session::window_title() const {
+  const auto title = original_tower_window_title(tower_title_.wstring());
+  const auto utf8 = std::filesystem::path(title).u8string();
+  return std::string(utf8.begin(), utf8.end());
+}
+
+void Session::new_tower() {
+  // begin_original_new_tower: 10d0:001d -> 086c keeps the prior
+  // view, so the fresh header's zero view words are replaced first.
+  remove_recent_file_items();
+  auto document = make_original_new_tdt();
+  document.header.view_x = static_cast<std::uint16_t>(viewport_.x);
+  document.header.view_y = static_cast<std::uint16_t>(viewport_.y);
+  install_document(std::move(document));
+  tower_path_.clear();
+  tower_title_ = "untitled";
+  document_dirty_ = false;
+  log_line("new tower");
+}
+
+void Session::open_tower(const std::filesystem::path& path) {
+  // load_original_tower_from_path: an empty tower is installed
+  // and reset before disk I/O, carrying the process RNG through both.
+  remove_recent_file_items();
+  install_empty_document();
   install_document(load_original_tdt_file(path));
+  tower_path_ = path;
+  tower_title_ = path.filename();
+  document_dirty_ = false;
   log_line("opened " + path.string());
 }
 
@@ -676,6 +1027,9 @@ void Session::income_status(std::uint16_t code) {
 }
 
 void Session::log_fire_menu(bool enabled) {
+  // set_original_fire_menu_enabled: EnableMenuItem(0x9c48) on the menu.
+  const auto op = original_fire_menu_op(enabled);
+  apply_menu_ops({&op, 1U});
   log_request(RequestKind::fire_menu, {enabled});
   tally("fire menu");
   log_line(std::string("fire menu ") + (enabled ? "enabled" : "disabled"));
@@ -1265,6 +1619,13 @@ std::uint64_t Session::input_digest() const {
   hash.boolean(command_visible_);
   hash.integer(command_outer_height_);
   hash.boolean(document_dirty_);
+  hash.boolean(flags_.fast_mode_enabled);
+  hash.boolean(flags_.people_animation_enabled);
+  hash.boolean(flags_.effects_animation_enabled);
+  for (const bool category : sound_categories_) hash.boolean(category);
+  hash.text(tower_path_.string());
+  hash.text(tower_title_.string());
+  hash.boolean(main_closing_);
   return hash.value();
 }
 
@@ -1305,21 +1666,19 @@ ScenarioSummary Session::apply_scenario(std::string_view name) {
 
 bool Session::trigger_event(std::string_view name) {
   if (!document_) throw std::runtime_error("event needs a tower");
-  bool started{};
-  auto context = idle_pass_context();
+  std::uint16_t command{};
   if (name == "bomb") {
-    started = run_original_bomb_offer_boundary(context, *this);
+    command = kOriginalCommandBomb;
   } else if (name == "fire") {
-    started = run_original_fire_offer_boundary(context, *this);
+    command = kOriginalCommandFire;
   } else {
     throw std::runtime_error("unknown event: " + std::string(name));
   }
-  // mark_original_world_interaction_changed: the backing is stale.
-  if (started) {
-    main_backing_dirty_ = true;
-    present_requested_ = true;
-  }
-  return started;
+  // WM_COMMAND 9000/9002 (not a menu pick: the items were deleted at
+  // WM_CREATE), so nothing is logged beyond what the event itself logs.
+  command_host_->reset_offer();
+  (void)dispatch_original_main_command(*command_host_, command);
+  return command_host_->offer_started();
 }
 
 SessionDigest Session::state_digest() const {

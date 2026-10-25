@@ -12,6 +12,7 @@
 #include "original_find.hpp"
 #include "original_font_win32.hpp"
 #include "original_idle_pass.hpp"
+#include "original_main_command.hpp"
 #include "original_info_win32.hpp"
 #include "original_information_win32.hpp"
 #include "original_map.hpp"
@@ -24,6 +25,7 @@
 #include "original_tables.hpp"
 #include "original_tdt_file.hpp"
 #include "original_time.hpp"
+#include "original_tower_file.hpp"
 #include "original_ui_win32.hpp"
 #include "original_world_input.hpp"
 #include "original_world_win32.hpp"
@@ -848,8 +850,8 @@ void set_original_fire_menu_enabled(bool enabled) {
   if (HMENU menu = GetMenu(g_main_window)) {
     // 0x9c48 is the literal command ID. Win16 and Win32 both define zero as
     // MF_ENABLED and one as MF_GRAYED.
-    EnableMenuItem(menu, 0x9c48U,
-                   MF_BYCOMMAND | (enabled ? MF_ENABLED : MF_GRAYED));
+    const auto op = simtower::original_fire_menu_op(enabled);
+    simtower::apply_original_menu_ops(menu, {&op, 1U});
   }
 }
 
@@ -1353,12 +1355,17 @@ void consume_original_person_family_dispatch(
 }
 
 void remove_original_recent_file_items(HWND window) {
-  // 10d0:0046-0075 and 10d0:0240-026f remove positions 6 and 5 from the
-  // File submenu when the optional recent-file pair is present.
-  HMENU file = GetSubMenu(GetMenu(window), 1);
-  if (file && GetMenuItemCount(file) >= 6) {
-    DeleteMenu(file, 6, MF_BYPOSITION);
-    DeleteMenu(file, 5, MF_BYPOSITION);
+  // 10d0:0046-0075 and 10d0:0240-026f remove positions 6 and 5 from
+  // GetSubMenu(menu, 1) when it holds at least six items. Position 1 is
+  // Options (five items), not File, so this never deletes anything with the
+  // shipped TOWER_MENU; the binary does exactly this, so it is kept.
+  HMENU menu = GetMenu(window);
+  HMENU options = GetSubMenu(menu, 1);
+  if (options) {
+    const int count = GetMenuItemCount(options);
+    simtower::apply_original_menu_ops(
+        menu, simtower::original_recent_file_removal_ops(
+                  count < 0 ? 0U : static_cast<std::size_t>(count)));
   }
 }
 
@@ -1375,19 +1382,6 @@ void show_original_file_error(std::uint16_t string_index) {
       message, std::string_view{}, std::string_view{}, std::string_view{}};
   (void)simtower::show_original_alert(g_main_window, g_resources, 1000,
                                       substitutions);
-}
-
-std::uint16_t original_error_string_for_status(
-    simtower::OriginalTdtStatus status) {
-  // 10d0:06b3-06c9 selects only the explicit version alerts; every other
-  // parser failure uses STRL/1002 entry 2.
-  if (status == simtower::OriginalTdtStatus::version_too_new) {
-    return 4;
-  }
-  if (status == simtower::OriginalTdtStatus::version_too_old) {
-    return 5;
-  }
-  return 2;
 }
 
 void begin_original_new_tower(HWND window) {
@@ -1419,55 +1413,6 @@ void begin_original_new_tower(HWND window) {
   g_tower_file_title = L"untitled";
   g_tower_dirty = false;
   update_original_tower_title(window);
-}
-
-// Exact native disk-transaction boundary for 10d0:0777: optional replacement
-// confirmation, create/write/close through 10d0:0b3a's translated TDT codec,
-// failure cleanup, and document-identity/dirty-state commit after success.
-bool save_original_tower_to(HWND window, const std::filesystem::path& path,
-                            bool ask_before_replace) {
-  if (!g_tower_document) {
-    return false;
-  }
-  if (ask_before_replace && std::filesystem::exists(path)) {
-    MessageBeep(static_cast<UINT>(-1));
-    if (MessageBoxA(window, kReplaceExisting, "Save SimTower data file",
-                    MB_YESNO | MB_ICONEXCLAMATION) == IDNO) {
-      return false;
-    }
-  }
-  try {
-    const auto view = current_original_view(window);
-    g_tower_document->header.view_x = static_cast<std::uint16_t>(view.x);
-    g_tower_document->header.view_y = static_cast<std::uint16_t>(view.y);
-    simtower::save_original_tdt_file(path, *g_tower_document);
-  } catch (const simtower::OriginalTdtFileError& error) {
-    // 10d0:07e0/080e maps create and transfer failures to STRL/1002 entry 1.
-    // Only a post-create transfer failure enters 1000:2140 and deletes the
-    // partial target; an initial LCREAT failure has no owned file to remove.
-    if (simtower::original_failed_save_deletes_target(error.operation())) {
-      std::error_code ignored{};
-      (void)std::filesystem::remove(path, ignored);
-    }
-    show_original_file_error(1);
-    return false;
-  } catch (const simtower::OriginalTdtError&) {
-    // Native serialization precedes ofstream creation, while original 0777
-    // creates first and then lets 0b3a report the transfer error. Preserve the
-    // externally visible deletion performed by its 080e failure branch.
-    if (simtower::original_failed_save_deletes_target(
-            simtower::OriginalTdtFileOperation::write)) {
-      std::error_code ignored{};
-      (void)std::filesystem::remove(path, ignored);
-    }
-    show_original_file_error(1);
-    return false;
-  }
-  g_tower_path = path;
-  g_tower_file_title = path.filename().wstring();
-  g_tower_dirty = false;
-  update_original_tower_title(window);
-  return true;
 }
 
 constexpr wchar_t kOriginalCommonDialogProcProperty[] =
@@ -1686,107 +1631,98 @@ void apply_original_common_dialog_host(OPENFILENAMEW& dialog) {
   dialog.lpfnHook = original_common_dialog_host_hook;
 }
 
-bool save_original_tower_as(HWND window) {
-  for (;;) {
-    // 10d0:0401/0409 demotes the enabled palettes and restores Arrow before
-    // every common-dialog attempt, including retries after an invalid name.
+// Win32 host of the shared File transactions (original_tower_file.hpp).
+// The pickers keep the exact Win16 OPENFILENAME profile and the COMMDLG
+// host hook; every other hook performs the calls the native flow made
+// inline at that point.
+class Win32TowerFileHost final : public simtower::OriginalTowerFileHost {
+ public:
+  explicit Win32TowerFileHost(HWND window) : window_(window) {}
+
+  simtower::OriginalTdtDocument* document() override {
+    return g_tower_document ? &*g_tower_document : nullptr;
+  }
+  std::filesystem::path tower_path() override { return g_tower_path; }
+  std::filesystem::path tower_title() override { return g_tower_file_title; }
+  void commit_tower_identity(const std::filesystem::path& path,
+                             const std::filesystem::path& title) override {
+    g_tower_path = path;
+    g_tower_file_title = title.wstring();
+    g_tower_dirty = false;
+    update_original_tower_title(window_);
+  }
+  void store_view_in_header() override {
+    const auto view = current_original_view(window_);
+    g_tower_document->header.view_x = static_cast<std::uint16_t>(view.x);
+    g_tower_document->header.view_y = static_cast<std::uint16_t>(view.y);
+  }
+
+  void begin_file_dialog() override {
     apply_original_auxiliary_window_activation_state(false);
     SetCursor(resolve_original_cursor(0U));
-
-    constexpr auto file_dialog =
-        simtower::original_tdt_file_dialog_profile();
-    std::array<wchar_t, file_dialog.maximum_file_characters> selected{};
-    std::array<wchar_t,
-               file_dialog.maximum_file_title_characters + 1U> file_title{};
-    OPENFILENAMEW dialog{};
-    dialog.lStructSize = sizeof(dialog);
-    dialog.hwndOwner = window;
-    dialog.lpstrFilter = kTdtFilter;
-    dialog.nFilterIndex = file_dialog.filter_index;
-    dialog.lpstrFile = selected.data();
-    dialog.nMaxFile = static_cast<DWORD>(
-        file_dialog.maximum_file_characters);
-    dialog.lpstrFileTitle = file_title.data();
-    dialog.nMaxFileTitle = static_cast<DWORD>(
-        file_dialog.maximum_file_title_characters);
-    // 10d0:0462-046b points both Open and Save As at DS:3120, populated from
-    // [Paths] Save during 1128:02aa. The pointer remains non-null even when
-    // that fixed buffer contains the empty string.
-    dialog.lpstrInitialDir = g_original_save_directory.c_str();
-    dialog.lpstrTitle = kSaveTdtTitle;
-    dialog.Flags = file_dialog.flags;
-    apply_original_common_dialog_host(dialog);
-    dialog.lpstrDefExt = kTdtDefaultExtension;
-    // 10d0:049c intentionally calls GETOPENFILENAME for the Save As sheet.
-    if (!GetOpenFileNameW(&dialog)) {
-      apply_original_auxiliary_window_activation_state(true);
-      return false;
-    }
-
-    auto normalized = simtower::original_tdt_normalized_path(selected.data());
-    if (!simtower::original_tdt_basename_is_valid(normalized)) {
-      MessageBoxA(nullptr, kInvalidFilename, kSaveDialogTitle,
-                  MB_OK | MB_ICONEXCLAMATION);
-      continue;
-    }
-    const bool saved = save_original_tower_to(
-        window, normalized,
-        simtower::original_tdt_save_overwrite_prompt(true));
+  }
+  void end_file_dialog() override {
     apply_original_auxiliary_window_activation_state(true);
-    return saved;
   }
-}
+  std::optional<simtower::OriginalPickedTowerFile> pick_open_file() override {
+    // Exact native file-command boundary for 10d0:0122: the original
+    // 128/15-character buffers, flags, filter, caption and extension.
+    Sheet sheet(window_, kOpenTdtTitle);
+    if (!GetOpenFileNameW(&sheet.dialog)) return std::nullopt;
+    simtower::OriginalPickedTowerFile picked{};
+    picked.path = sheet.selected.data();
+    if (sheet.file_title[0] != L'\0') {
+      picked.file_title = sheet.file_title.data();
+    }
+    return picked;
+  }
+  std::optional<std::filesystem::path> pick_save_file() override {
+    Sheet sheet(window_, kSaveTdtTitle);
+    // 10d0:049c intentionally calls GETOPENFILENAME for the Save As sheet.
+    if (!GetOpenFileNameW(&sheet.dialog)) return std::nullopt;
+    return std::filesystem::path(sheet.selected.data());
+  }
 
-bool save_original_tower(HWND window) {
-  if (g_tower_path.empty() || g_tower_file_title == L"untitled") {
-    return save_original_tower_as(window);
+  bool confirm_replace(const std::filesystem::path&) override {
+    MessageBeep(static_cast<UINT>(-1));
+    return MessageBoxA(window_, kReplaceExisting, "Save SimTower data file",
+                       MB_YESNO | MB_ICONEXCLAMATION) != IDNO;
   }
-  // 10d0:0305 clears the overwrite-prompt flag for a normal Save.
-  return save_original_tower_to(
-      window, g_tower_path,
-      simtower::original_tdt_save_overwrite_prompt(false));
-}
+  void invalid_filename() override {
+    MessageBoxA(nullptr, kInvalidFilename, kSaveDialogTitle,
+                MB_OK | MB_ICONEXCLAMATION);
+  }
+  void file_error(std::uint16_t strl_index) override {
+    show_original_file_error(strl_index);
+  }
+  int transition_alert(std::uint16_t action_index) override {
+    if (g_audio) {
+      g_audio->stop_all(true);
+    }
+    const std::string action = simtower::original_strl_entry(
+        g_resources.find("STRL", 1001), action_index);
+    const std::string tower_name(g_tower_file_title.begin(),
+                                 g_tower_file_title.end());
+    const std::array<std::string_view, 4> substitutions = {
+        tower_name, action, std::string_view{}, std::string_view{}};
+    return simtower::show_original_alert(window_, g_resources, 1001,
+                                         substitutions);
+  }
 
-bool confirm_original_tower_transition(HWND window,
-                                       std::uint16_t action_index) {
-  if (!simtower::original_tower_transition_requires_confirmation(
-          g_tower_document ? &*g_tower_document : nullptr)) {
-    return true;
+  void remove_recent_file_items() override {
+    remove_original_recent_file_items(window_);
   }
-  if (g_audio) {
-    g_audio->stop_all(true);
+  void install_empty_document() override {
+    auto empty_document = simtower::make_original_new_tdt();
+    simtower::carry_original_process_random_state(
+        g_tower_document ? &*g_tower_document : nullptr, empty_document);
+    g_tower_document = std::move(empty_document);
+    reset_original_simulation_state();
+    reset_original_command_state();
+    g_world_input.lobby_drag = {};
   }
-  const std::string action = simtower::original_strl_entry(
-      g_resources.find("STRL", 1001), action_index);
-  const std::string tower_name(g_tower_file_title.begin(),
-                               g_tower_file_title.end());
-  const std::array<std::string_view, 4> substitutions = {
-      tower_name, action, std::string_view{}, std::string_view{}};
-  const int result = simtower::show_original_alert(
-      window, g_resources, 1001, substitutions);
-  if (result == 1) {
-    return save_original_tower(window);
-  }
-  return result == 2;
-}
-
-// Complete 10d0:0225/062a accepted-path transaction shared by the Open sheet
-// and 1128:00e5's startup command-line path. The loader resets the working
-// banks before touching disk, maps every failure to its original alert, then
-// 0225 falls back to a fresh tower rather than restoring the previous one.
-bool load_original_tower_from_path(HWND window,
-                                   const std::filesystem::path& selected,
-                                   std::wstring file_title) {
-  remove_original_recent_file_items(window);
-  auto empty_document = simtower::make_original_new_tdt();
-  simtower::carry_original_process_random_state(
-      g_tower_document ? &*g_tower_document : nullptr, empty_document);
-  g_tower_document = std::move(empty_document);
-  reset_original_simulation_state();
-  reset_original_command_state();
-  g_world_input.lobby_drag = {};
-  try {
-    auto document = simtower::load_original_tdt_file(selected);
+  void install_loaded_document(
+      simtower::OriginalTdtDocument document) override {
     simtower::carry_original_process_random_state(
         g_tower_document ? &*g_tower_document : nullptr, document);
     g_tower_document = std::move(document);
@@ -1794,75 +1730,67 @@ bool load_original_tower_from_path(HWND window,
     reset_original_command_state();
     refresh_original_rating_command(g_tower_document->header.rating, 0U);
     restore_original_derived_view_position(
-        window, g_tower_document->header.view_x,
+        window_, g_tower_document->header.view_x,
         g_tower_document->header.view_y);
     present_original_document_transition_synchronously();
     g_world_input.lobby_drag = {};
-    g_tower_path = selected;
-    g_tower_file_title = !file_title.empty()
-                             ? std::move(file_title)
-                             : g_tower_path.filename().wstring();
-    g_tower_dirty = false;
-    update_original_tower_title(window);
-    const auto clamped_view = current_original_view(window);
-    g_tower_document->header.view_x =
-        static_cast<std::uint16_t>(clamped_view.x);
-    g_tower_document->header.view_y =
-        static_cast<std::uint16_t>(clamped_view.y);
-    return true;
-  } catch (const simtower::OriginalTdtError& error) {
-    show_original_file_error(original_error_string_for_status(error.status()));
-  } catch (const simtower::OriginalTdtFileError&) {
-    // 10d0:0664 uses STRL/1002 entry 2 for an open failure.
-    show_original_file_error(2);
   }
-  begin_original_new_tower(window);
-  return false;
+  void begin_new_tower() override { begin_original_new_tower(window_); }
+
+ private:
+  // One COMMDLG sheet. 10d0:0462-046b points both Open and Save As at
+  // DS:3120, populated from [Paths] Save during 1128:02aa; the pointer stays
+  // non-null even when that fixed buffer holds the empty string.
+  struct Sheet {
+    static constexpr auto kProfile =
+        simtower::original_tdt_file_dialog_profile();
+    std::array<wchar_t, kProfile.maximum_file_characters> selected{};
+    std::array<wchar_t, kProfile.maximum_file_title_characters + 1U>
+        file_title{};
+    OPENFILENAMEW dialog{};
+
+    Sheet(HWND owner, const wchar_t* title) {
+      dialog.lStructSize = sizeof(dialog);
+      dialog.hwndOwner = owner;
+      dialog.lpstrFilter = kTdtFilter;
+      dialog.nFilterIndex = kProfile.filter_index;
+      dialog.lpstrFile = selected.data();
+      dialog.nMaxFile = static_cast<DWORD>(kProfile.maximum_file_characters);
+      dialog.lpstrFileTitle = file_title.data();
+      dialog.nMaxFileTitle =
+          static_cast<DWORD>(kProfile.maximum_file_title_characters);
+      dialog.lpstrInitialDir = g_original_save_directory.c_str();
+      dialog.lpstrTitle = title;
+      dialog.Flags = kProfile.flags;
+      apply_original_common_dialog_host(dialog);
+      dialog.lpstrDefExt = kTdtDefaultExtension;
+    }
+    Sheet(const Sheet&) = delete;
+    Sheet& operator=(const Sheet&) = delete;
+  };
+
+  HWND window_;
+};
+
+bool confirm_original_tower_transition(HWND window,
+                                       std::uint16_t action_index) {
+  Win32TowerFileHost host(window);
+  return simtower::confirm_original_tower_transition(host, action_index);
 }
 
-// Exact native file-command boundary for 10d0:0122. The Win32 common dialog
-// preserves the original 128/15-character buffers, flags, filter, caption and
-// extension; an accepted path enters 10d0:0225 above.
+// The 10d0:0225/062a accepted-path transaction shared by the Open sheet and
+// 1128:00e5's startup command-line path.
+bool load_original_tower_from_path(HWND window,
+                                   const std::filesystem::path& selected,
+                                   std::wstring file_title) {
+  Win32TowerFileHost host(window);
+  return simtower::load_original_tower_from_path(
+      host, selected, std::filesystem::path(std::move(file_title)));
+}
+
 bool open_original_tower(HWND window) {
-  if (!confirm_original_tower_transition(window, 2)) {
-    return false;
-  }
-  // 10d0:0143/014b demotes the enabled palettes and restores Arrow before
-  // entering COMMDLG; 0205 restores their application-active ordering on
-  // cancellation, load failure/fallback, and success alike.
-  apply_original_auxiliary_window_activation_state(false);
-  SetCursor(resolve_original_cursor(0U));
-  constexpr auto file_dialog =
-      simtower::original_tdt_file_dialog_profile();
-  std::array<wchar_t, file_dialog.maximum_file_characters> selected{};
-  std::array<wchar_t,
-             file_dialog.maximum_file_title_characters + 1U> file_title{};
-  OPENFILENAMEW dialog{};
-  dialog.lStructSize = sizeof(dialog);
-  dialog.hwndOwner = window;
-  dialog.lpstrFilter = kTdtFilter;
-  dialog.nFilterIndex = file_dialog.filter_index;
-  dialog.lpstrFile = selected.data();
-  dialog.nMaxFile = static_cast<DWORD>(
-      file_dialog.maximum_file_characters);
-  dialog.lpstrFileTitle = file_title.data();
-  dialog.nMaxFileTitle = static_cast<DWORD>(
-      file_dialog.maximum_file_title_characters);
-  dialog.lpstrInitialDir = g_original_save_directory.c_str();
-  dialog.lpstrTitle = kOpenTdtTitle;
-  dialog.Flags = file_dialog.flags;
-  apply_original_common_dialog_host(dialog);
-  dialog.lpstrDefExt = kTdtDefaultExtension;
-  if (!GetOpenFileNameW(&dialog)) {
-    apply_original_auxiliary_window_activation_state(true);
-    return false;
-  }
-  const bool loaded = load_original_tower_from_path(
-      window, selected.data(),
-      file_title[0] != L'\0' ? std::wstring(file_title.data())
-                              : std::wstring{});
-  apply_original_auxiliary_window_activation_state(true);
-  return loaded;
+  Win32TowerFileHost host(window);
+  return simtower::open_original_tower(host);
 }
 
 bool initialize_original_startup_memory() {
@@ -2135,56 +2063,12 @@ void apply_original_audio_menu_state(HMENU menu) {
   if (!menu || !g_audio) {
     return;
   }
-  constexpr std::array<UINT, 3> commands{40011U, 40012U, 40013U};
-  for (std::size_t category = 0; category < commands.size(); ++category) {
-    CheckMenuItem(menu, commands[category],
-                  MF_BYCOMMAND |
-                      (g_audio->category_enabled(category) ? MF_CHECKED
-                                                           : MF_UNCHECKED));
-    EnableMenuItem(menu, commands[category],
-                   MF_BYCOMMAND | (g_audio->sound_enabled() ? MF_ENABLED
-                                                            : MF_GRAYED));
-  }
-}
-
-void toggle_original_audio_category(HWND window, UINT command,
-                                    std::size_t category) {
-  if (!g_audio) {
-    return;
-  }
-  const bool was_enabled = g_audio->category_enabled(category);
-  // 1158:07c1/07fd/0839 flush every channel before disabling any category.
-  if (was_enabled) {
-    g_audio->stop_all(true);
-  }
-  g_audio->set_category_enabled(category, !was_enabled);
-  CheckMenuItem(GetMenu(window), command,
-                MF_BYCOMMAND | (!was_enabled ? MF_CHECKED : MF_UNCHECKED));
-}
-
-void toggle_original_menu_flag(HWND window, UINT command, bool& enabled) {
-  enabled = !enabled;
-  CheckMenuItem(GetMenu(window), command,
-                MF_BYCOMMAND | (enabled ? MF_CHECKED : MF_UNCHECKED));
-}
-
-void toggle_original_auxiliary_window(HWND owner, UINT command, HWND target,
-                                      bool& visible, HWND insert_after) {
-  const auto plan = simtower::original_auxiliary_visibility_plan(
-      simtower::OriginalAuxiliaryVisibilityTrigger::menu_command, visible);
-  visible = plan.visible;
-  if (plan.operation == simtower::OriginalAuxiliaryWindowOperation::show) {
-    // 1158:08b5-09a2 uses the literal flag word 0x43: preserve z-order
-    // target selection while showing without moving or sizing.
-    SetWindowPos(target, insert_after, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-  } else {
-    ShowWindow(target, SW_HIDE);
-  }
-  if (plan.update_menu_check) {
-    CheckMenuItem(GetMenu(owner), command,
-                  MF_BYCOMMAND | (visible ? MF_CHECKED : MF_UNCHECKED));
-  }
+  // CheckMenuItem then EnableMenuItem per command, 40011..40013.
+  simtower::apply_original_menu_ops(
+      menu, simtower::original_sound_menu_ops(
+                {g_audio->category_enabled(0), g_audio->category_enabled(1),
+                 g_audio->category_enabled(2)},
+                g_audio->sound_enabled()));
 }
 
 void apply_original_auxiliary_window_size_state(bool restore) {
@@ -7181,6 +7065,121 @@ LRESULT apply_original_main_shutdown_message(
   return static_cast<LRESULT>(plan.result);
 }
 
+// Win32 host of the shared WM_COMMAND dispatcher
+// (original_main_command.hpp). Each hook performs the calls the native
+// switch made inline for that command.
+class Win32MainCommandHost final : public simtower::OriginalMainCommandHost {
+ public:
+  explicit Win32MainCommandHost(HWND window)
+      : window_(window), tower_file_(window) {}
+
+  bool modal_input_locked() override {
+    return original_main_modal_input_locked();
+  }
+  int event_dialog(
+      const simtower::OriginalEventDialogRequest& request) override {
+    return run_original_event_dialog(request);
+  }
+  void exit_command() override {
+    (void)apply_original_main_shutdown_message(
+        window_, simtower::OriginalMainShutdownMessage::exit_command);
+  }
+  simtower::OriginalTowerFileHost& tower_file() override {
+    return tower_file_;
+  }
+  bool& command_flag(simtower::OriginalMainCommandFlag flag) override {
+    switch (flag) {
+      case simtower::OriginalMainCommandFlag::people_animation:
+        return g_people_animation_enabled;
+      case simtower::OriginalMainCommandFlag::effects_animation:
+        return g_effects_animation_enabled;
+      case simtower::OriginalMainCommandFlag::fast_mode:
+        break;
+    }
+    return g_fast_mode_enabled;
+  }
+  void apply_menu_op(const simtower::OriginalMenuOp& op) override {
+    simtower::apply_original_menu_ops(GetMenu(window_), {&op, 1U});
+  }
+  simtower::OriginalTdtDocument* document() override {
+    return g_tower_document ? &*g_tower_document : nullptr;
+  }
+  const simtower::OriginalPartTable& part() override { return g_part; }
+  bool consume_fire_crew_resolution(
+      const simtower::OriginalFireCrewResolution& resolution) override {
+    return consume_original_fire_crew_resolution(resolution);
+  }
+  void fire_crew_hired() override {
+    invalidate_original_main_surface();
+    InvalidateRect(g_info_window, nullptr, FALSE);
+  }
+  bool audio_available() override { return g_audio != nullptr; }
+  bool audio_category_enabled(std::size_t category) override {
+    return g_audio->category_enabled(category);
+  }
+  void set_audio_category_enabled(std::size_t category,
+                                  bool enabled) override {
+    g_audio->set_category_enabled(category, enabled);
+  }
+  void stop_all_audio(bool force) override { g_audio->stop_all(force); }
+  bool& auxiliary_visible(simtower::OriginalAuxiliaryWindow window) override {
+    switch (window) {
+      case simtower::OriginalAuxiliaryWindow::command:
+        return g_toolbar_visible;
+      case simtower::OriginalAuxiliaryWindow::info:
+        return g_info_visible;
+      case simtower::OriginalAuxiliaryWindow::map:
+        break;
+    }
+    return g_map_visible;
+  }
+  void show_auxiliary(
+      simtower::OriginalAuxiliaryWindow window,
+      simtower::OriginalAuxiliaryInsertAfter insert_after) override {
+    SetWindowPos(auxiliary_handle(window),
+                 insert_after == simtower::OriginalAuxiliaryInsertAfter::topmost
+                     ? HWND_TOPMOST
+                     : HWND_TOP,
+                 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  }
+  void hide_auxiliary(simtower::OriginalAuxiliaryWindow window) override {
+    ShowWindow(auxiliary_handle(window), SW_HIDE);
+  }
+  void finance_dialog() override { run_original_finance_dialog(); }
+  void about_dialog() override { (void)run_original_about_dialog(); }
+  void find_dialog(simtower::OriginalFindMode mode) override {
+    run_original_find_dialog(mode);
+  }
+  void help_contents() override { (void)run_original_help_contents(); }
+  bool bomb_offer() override { return run_original_bomb_offer_boundary(); }
+  bool fire_offer() override { return run_original_fire_offer_boundary(); }
+  void world_interaction_changed() override {
+    simtower::mark_original_world_interaction_changed(
+        original_world_input_host());
+  }
+  void mark_document_dirty() override { g_tower_dirty = true; }
+  void present_info_status() override { invalidate_original_info_status(); }
+  void present_main_direct() override {
+    present_original_main_backing_direct();
+  }
+
+ private:
+  static HWND auxiliary_handle(simtower::OriginalAuxiliaryWindow window) {
+    switch (window) {
+      case simtower::OriginalAuxiliaryWindow::command:
+        return g_command_window;
+      case simtower::OriginalAuxiliaryWindow::info:
+        return g_info_window;
+      case simtower::OriginalAuxiliaryWindow::map:
+        break;
+    }
+    return g_map_window;
+  }
+
+  HWND window_;
+  Win32TowerFileHost tower_file_;
+};
+
 // Native message boundary for MAINWNDPROC at 1158:0000.
 LRESULT CALLBACK main_window_proc(HWND window, UINT message,
                                   WPARAM wparam, LPARAM lparam) {
@@ -7189,21 +7188,11 @@ LRESULT CALLBACK main_window_proc(HWND window, UINT message,
   switch (message) {
     case WM_CREATE: {
       configure_original_main_host_chrome(window);
-      HMENU menu = GetMenu(window);
-      HMENU options = GetSubMenu(menu, 1);
-      if (options) {
-        // 1158:006d-0091 addresses Fast Mode by position in Options.
-        CheckMenuItem(options, 2U,
-                      MF_BYPOSITION |
-                          (g_fast_mode_enabled ? MF_CHECKED : MF_UNCHECKED));
-      }
-      HMENU help = GetSubMenu(menu, 3);
-      if (help) {
-        DeleteMenu(help, 9000, MF_BYCOMMAND);
-        DeleteMenu(help, 9001, MF_BYCOMMAND);
-        DeleteMenu(help, 9002, MF_BYCOMMAND);
-        DeleteMenu(help, 2, MF_BYPOSITION);
-      }
+      // 1158:006d-0091 addresses Fast Mode by position in Options, then
+      // Help drops the 9000..9002 debug items and their separator.
+      simtower::apply_original_menu_ops(
+          GetMenu(window),
+          simtower::original_main_create_menu_ops(g_fast_mode_enabled));
       return 0;
     }
     case WM_DESTROY:
@@ -7364,173 +7353,16 @@ LRESULT CALLBACK main_window_proc(HWND window, UINT message,
       limits->ptMaxSize = limits->ptMaxTrackSize;
       return 0;
     }
-    case WM_COMMAND:
-      // MAINWNDPROC 1158:046f consumes all application commands while the
-      // process-wide modal-manager latch at DS:24b8 is active.
-      if (original_main_modal_input_locked()) return 0;
-      // Exact 1158:06b9 27-entry application-command dispatcher. The native
-      // switch retains every public and hidden command target from that table.
-      switch (LOWORD(wparam)) {
-        case 3000U:
-        case 3001U:
-        case 3002U:
-          (void)run_original_event_dialog(
-              {static_cast<std::uint16_t>(LOWORD(wparam)), 0, 10000});
-          break;
-        case 40001U:
-          // 1158:071a uses 10d0:0604's confirmation/latch/audio transaction,
-          // then destroys Main without WM_CLOSE's DS:3258-clear tail.
-          (void)apply_original_main_shutdown_message(
-              window,
-              simtower::OriginalMainShutdownMessage::exit_command);
-          break;
-        case 40002U:
-          (void)save_original_tower_as(window);
-          break;
-        case 40003U:
-          (void)save_original_tower(window);
-          break;
-        case 40004U:
-          (void)open_original_tower(window);
-          break;
-        case 40005U:
-          if (confirm_original_tower_transition(window, 1)) {
-            begin_original_new_tower(window);
-          }
-          break;
-        case 40007U:
-          // 1158:0759 toggles Fast Mode at DS:de34.
-          toggle_original_menu_flag(window, 40007U, g_fast_mode_enabled);
-          break;
-        case 40008U:
-          // Exact 10e8:01e2 reconsideration path made available only after a
-          // scheduled fire-crew offer was declined.
-          if (g_tower_document &&
-              simtower::original_fire_crew_menu_offer_available(
-                  *g_tower_document)) {
-            const auto choice = static_cast<std::uint16_t>(
-                run_original_event_dialog(
-                    simtower::original_fire_crew_offer(g_part)));
-            const auto resolution = simtower::resolve_original_fire_crew_offer(
-                *g_tower_document, g_part, choice, false);
-            if (consume_original_fire_crew_resolution(resolution)) {
-              invalidate_original_main_surface();
-              InvalidateRect(g_info_window, nullptr, FALSE);
-            }
-          }
-          break;
-        case 40009U:
-          // 1158:0723 toggles People animation at DS:de30.
-          toggle_original_menu_flag(window, 40009U,
-                                    g_people_animation_enabled);
-          break;
-        case 40010U:
-          // 1158:073e toggles Effects animation at DS:de32.
-          toggle_original_menu_flag(window, 40010U,
-                                    g_effects_animation_enabled);
-          break;
-        case 40011U:
-          toggle_original_audio_category(window, 40011U, 0);
-          break;
-        case 40012U:
-          // The original command table associates 40012 with DS:de2c
-          // (Events), despite the MENU resource labelling it Background.
-          toggle_original_audio_category(window, 40012U, 1);
-          break;
-        case 40013U:
-          // Likewise 40013 controls DS:de2e (Background) in the binary.
-          toggle_original_audio_category(window, 40013U, 2);
-          break;
-        case 40014U:
-          // The command palette is the one auxiliary window promoted with
-          // HWND_TOPMOST by the original dispatcher.
-          toggle_original_auxiliary_window(window, 40014U, g_command_window,
-                                           g_toolbar_visible, HWND_TOPMOST);
-          break;
-        case 40015U:
-          toggle_original_auxiliary_window(window, 40015U, g_info_window,
-                                           g_info_visible, HWND_TOP);
-          break;
-        case 40016U:
-          toggle_original_auxiliary_window(window, 40016U, g_map_window,
-                                           g_map_visible, HWND_TOP);
-          break;
-        case 40017U:
-          // 1158:08fb -> 1060:0083 opens DIALOG/500's Finance modal.
-          run_original_finance_dialog();
-          break;
-        case 40018U:
-          // 1158:0912 -> 1010:049e opens the animated resource-backed About.
-          (void)run_original_about_dialog();
-          break;
-        case 40019U:
-          // 1158:0903 -> 10d8:0000(1): Find a saved named person.
-          run_original_find_dialog(simtower::OriginalFindMode::person);
-          break;
-        case 40020U:
-          // 1158:0907 -> 10d8:0000(0): Find a saved named tenant.
-          run_original_find_dialog(simtower::OriginalFindMode::tenant);
-          break;
-        case 40021U:
-          // 1158:091a: the menu item and F1 accelerator both request the
-          // supplied SIMTOWER.HLP contents through WinHelp command 3.
-          (void)run_original_help_contents();
-          break;
-        case 9000U:
-          // Hidden release-menu entry retained by the 27-way table.
-          if (run_original_bomb_offer_boundary()) {
-            simtower::mark_original_world_interaction_changed(
-                original_world_input_host());
-          }
-          break;
-        case 9001U: {
-          // Hidden Treasure command calls 1148:020f directly, bypassing the
-          // normal construction/span predicate.
-          if (!g_tower_document) break;
-          const auto treasure = simtower::award_original_rating_treasure(
-              *g_tower_document, g_part);
-          if (treasure.dialog.valid()) {
-            (void)run_original_event_dialog(treasure.dialog);
-          }
-          if (treasure.changed) {
-            g_tower_dirty = true;
-            // 1148:025d-026c presents DIALOG/3040 first, then 1178:076f
-            // credits and directly repaints Info. The b922 latch itself has
-            // no Main/Map presentation side effect.
-            if (treasure.treasure_awarded) {
-              invalidate_original_info_status();
-            }
-          }
-          break;
-        }
-        case 9002U:
-          // Hidden Fire command is the same 10e8:0029 boundary used by the
-          // scheduler.
-          if (run_original_fire_offer_boundary()) {
-            simtower::mark_original_world_interaction_changed(
-                original_world_input_host());
-          }
-          break;
-        case 9003U:
-          // 1158:0946 acquires the Main DC and calls 1158:0ba8 directly. Keep
-          // this out of WM_PAINT and preserve the retained backing pixels.
-          present_original_main_backing_direct();
-          break;
-        default: {
-          const auto command = LOWORD(wparam);
-          // 1158:0992 sends any non-table DIALOG id in 3000..4001 through
-          // 1068:0000 with argument zero and WAVE/10000.
-          if (simtower::original_main_command_route(command) ==
-              simtower::OriginalMainCommandRoute::
-                  generic_dialog_then_def_window_proc) {
-            (void)run_original_event_dialog({command, 0, 10000});
-          }
-          // 1158:09b1 calls DefWindowProc for every ID outside the literal
-          // command table, including IDs in the generic dialog range.
-          return DefWindowProcW(window, message, wparam, lparam);
-        }
+    case WM_COMMAND: {
+      // MAINWNDPROC 1158:046f/06b9: the shared dispatcher consumes the
+      // command (returning 0) or asks for DefWindowProc (1158:09b1).
+      Win32MainCommandHost host(window);
+      if (simtower::dispatch_original_main_command(host, LOWORD(wparam)) ==
+          simtower::OriginalMainCommandResult::def_window_proc) {
+        return DefWindowProcW(window, message, wparam, lparam);
       }
       return 0;
+    }
     case WM_HSCROLL:
       if (original_main_modal_input_locked()) return 0;
       // Both original scroll branches invalidate before decoding the request,

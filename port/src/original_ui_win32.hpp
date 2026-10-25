@@ -2,6 +2,7 @@
 
 // Win32 menu, accelerator, icon, cursor, and GDI helpers for the portable
 // UI rules in original_ui.hpp.
+#include "original_menu.hpp"
 #include "original_ui.hpp"
 
 #include <windows.h>
@@ -18,6 +19,11 @@ namespace simtower {
 [[nodiscard]] HMENU create_original_menu(std::span<const std::byte> resource);
 [[nodiscard]] HACCEL create_original_accelerators(
     std::span<const std::byte> resource);
+// Replays a portable menu op list (original_menu.hpp) through USER:
+// GetSubMenu along op.path, then CheckMenuItem / EnableMenuItem / DeleteMenu
+// with MF_BYPOSITION or MF_BYCOMMAND. A missing sub-menu skips the op.
+void apply_original_menu_ops(HMENU menu,
+                             std::span<const OriginalMenuOp> ops);
 [[nodiscard]] HICON create_original_icon(const OriginalResources& resources,
                                           std::string_view group_name);
 

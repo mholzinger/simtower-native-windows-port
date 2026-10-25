@@ -20,11 +20,14 @@
 #include "original_command_palette.hpp"
 #include "original_idle_pass.hpp"
 #include "original_info.hpp"
+#include "original_main_command.hpp"
+#include "original_menu.hpp"
 #include "original_people.hpp"
 #include "original_resources.hpp"
 #include "original_simulation.hpp"
 #include "original_tables.hpp"
 #include "original_tdt.hpp"
+#include "original_tower_file.hpp"
 #include "original_ui.hpp"
 #include "original_world.hpp"
 #include "original_world_input.hpp"
@@ -33,6 +36,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <initializer_list>
@@ -105,6 +109,39 @@ class InputSource {
   virtual std::optional<InputEvent> next_modal_event() = 0;
   // The modal's overlay changed (the window host re-presents it).
   virtual void modal_changed() {}
+  // The result of an Open / Save As sheet that is opening now, when this
+  // source supplies one (the script player reads a following "pick-file"
+  // line); the outer nullopt means it has none.
+  virtual std::optional<std::optional<std::filesystem::path>>
+  next_file_pick() {
+    return std::nullopt;
+  }
+};
+
+// The native Open and Save As pickers (the window host's
+// SDL_ShowOpenFileDialog / SDL_ShowSaveFileDialog). Headless runs install
+// none: a scripted "pick-file" result is used instead, and without one the
+// sheet is cancelled, so no dialog ever opens there.
+class FilePicker {
+ public:
+  virtual ~FilePicker() = default;
+  // nullopt is a cancel.
+  virtual std::optional<std::filesystem::path> pick(bool save) = 0;
+};
+
+// What the menu bar shows: the open drop-down (bar index, -1 for none), its
+// highlighted row, and an open cascade (Options > Animation / Sound) with
+// its highlighted row. Presentation only; the window's menu loop and the
+// "menu-show" script command set it.
+struct MenuView {
+  int bar{-1};
+  int item{-1};
+  bool cascade_open{};
+  int cascade_item{-1};
+  // The bar title is highlighted without a drop-down (keyboard Alt/F10).
+  bool title_only{};
+
+  friend bool operator==(const MenuView&, const MenuView&) = default;
 };
 
 // Counts of host requests that were logged instead of performed.
@@ -128,6 +165,10 @@ struct SessionDigest {
 class Session : private OriginalIdlePassHost {
   class WorldInputHost;
   friend class WorldInputHost;
+  class MainCommandHost;
+  friend class MainCommandHost;
+  class TowerFileHost;
+  friend class TowerFileHost;
 
  public:
   // clock_ms replaces GetTickCount: every Win32 read maps to one call.
@@ -166,8 +207,39 @@ class Session : private OriginalIdlePassHost {
   // origin is kept, as 10d0:086c leaves DS:b3f0/b3f2 untouched.
   void new_tower();
   // Win32 Open path: load_original_tower_from_path. Throws
-  // OriginalTdtError / OriginalTdtFileError on failure.
+  // OriginalTdtError / OriginalTdtFileError on failure. Used for --open
+  // (1128:00e5's command-line path); the File menu runs the shared
+  // original_tower_file.hpp transactions instead.
   void open_tower(const std::filesystem::path& path);
+
+  // ---- Menu and WM_COMMAND (original_menu.hpp, original_main_command.hpp)
+  // TOWER_MENU as Main's HMENU would hold it now: parsed from the pack,
+  // then every CheckMenuItem/EnableMenuItem/DeleteMenu site applied.
+  [[nodiscard]] const OriginalMenuItems& menu() const { return menu_; }
+  // A menu pick: USER sends WM_COMMAND only for an enabled item of the live
+  // menu, so anything else is logged and dropped. Returns whether the
+  // command was dispatched.
+  bool choose_menu_command(std::uint16_t command);
+  // TranslateAccelerator against TOWER_MENU's table (F1 -> 40021) for a
+  // Win16 virtual key; a grayed menu item suppresses the command. Returns
+  // whether a command was dispatched.
+  bool accelerator(std::uint16_t virtual_key);
+  // The Open / Save As sheets: a queued scripted result first, then the
+  // input source's (a script's next "pick-file" line), then the installed
+  // picker, else a cancel.
+  void set_file_picker(FilePicker* picker) { file_picker_ = picker; }
+  void queue_picked_file(std::optional<std::filesystem::path> path) {
+    picked_files_.push_back(std::move(path));
+  }
+  [[nodiscard]] std::size_t queued_picked_files() const {
+    return picked_files_.size();
+  }
+  // File > Exit destroyed Main (original_main_shutdown_plan).
+  [[nodiscard]] bool quit_requested() const { return quit_requested_; }
+  // "SimTower - <title>" (original_tower_window_title), UTF-8.
+  [[nodiscard]] std::string window_title() const;
+  [[nodiscard]] const MenuView& menu_view() const { return menu_view_; }
+  void set_menu_view(const MenuView& view) { menu_view_ = view; }
 
   // One empty-queue idle pass (run_original_idle_simulation).
   // Returns true when the main raster changed and should be presented.
@@ -257,9 +329,9 @@ class Session : private OriginalIdlePassHost {
   // Test-only: stages a deterministic tower (test_scenario.hpp) on the live
   // document after New, through the portable construction functions only.
   ScenarioSummary apply_scenario(std::string_view name);
-  // Test-only: runs a hidden menu event command between idle passes, as
-  // main_window_proc's WM_COMMAND does: "bomb" is 9000 (10c8:006e), "fire"
-  // is 9002 (10e8:0029). Returns whether the event started.
+  // Test-only: runs a hidden menu event command between idle passes
+  // through the shared WM_COMMAND dispatcher: "bomb" is 9000 (10c8:006e),
+  // "fire" is 9002 (10e8:0029). Returns whether the event started.
   bool trigger_event(std::string_view name);
   // Hashes every piece of state the idle pass can mutate. Read-only.
   [[nodiscard]] SessionDigest state_digest() const;
@@ -279,6 +351,14 @@ class Session : private OriginalIdlePassHost {
   void reset_simulation_state();
   void reset_command_state();
   void install_document(OriginalTdtDocument document);
+  // 10d0:0225 before disk I/O: a fresh tower carrying the process RNG.
+  void install_empty_document();
+  void apply_menu_ops(std::span<const OriginalMenuOp> ops) {
+    apply_original_menu_ops(menu_, ops);
+  }
+  void remove_recent_file_items();
+  // The Open / Save As sheet result (see queue_picked_file).
+  std::optional<std::filesystem::path> next_picked_file(bool save);
 
   // Mirrors of the native_main.cpp host helpers of the same purpose.
   void rebuild_main(OriginalMainSurfacePass pass,
@@ -347,6 +427,7 @@ class Session : private OriginalIdlePassHost {
       std::span<const OriginalEventSoundRequest> requests) override;
   void stop_all_audio(bool force) override;
   void checkpoint(OriginalIdleCheckpoint) override;
+  // Applied to the menu and logged.
   void fire_menu_enabled(bool enabled) override { log_fire_menu(enabled); }
   void idle_palette_changed() override;
   void rating_promoted_before_dialog(std::uint16_t rating) override;
@@ -392,6 +473,12 @@ class Session : private OriginalIdlePassHost {
     selector,
     panel,
     view,
+    menu,
+    picker,
+    file,
+    help,
+    command_dialog,
+    shutdown,
   };
   void log_request(RequestKind kind,
                    std::initializer_list<std::int64_t> fields);
@@ -426,6 +513,22 @@ class Session : private OriginalIdlePassHost {
   // (original_world_input.hpp), including the mutable TABL rating copies.
   OriginalWorldInputState world_input_{};
   std::unique_ptr<WorldInputHost> world_host_;
+  std::unique_ptr<MainCommandHost> command_host_;
+  std::unique_ptr<TowerFileHost> file_host_;
+  // Main's menu and accelerator table (WM_CREATE and every later op).
+  OriginalMenuItems menu_{};
+  std::vector<OriginalAccelerator> accelerators_{};
+  MenuView menu_view_{};
+  // DS:de2a/de2c/de2e. Kept here as well, so the Sound items toggle even
+  // without an audio runtime (headless runs have none).
+  std::array<bool, 3> sound_categories_{true, true, true};
+  // Document identity (g_tower_path / g_tower_file_title).
+  std::filesystem::path tower_path_{};
+  std::filesystem::path tower_title_{"untitled"};
+  bool main_closing_{};  // DS:31c6
+  bool quit_requested_{};
+  FilePicker* file_picker_{};
+  std::deque<std::optional<std::filesystem::path>> picked_files_{};
   InputSource* input_source_{};
   bool left_button_down_{};
   // Last pointer position in Main client coordinates, sampled into
