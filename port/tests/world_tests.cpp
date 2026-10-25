@@ -904,8 +904,23 @@ int main(int argc, char** argv) {
     }
   }
 
-  // The repeated city strip is opaque at 3905..3959; y=3960 remains the
-  // white tail of the initialized sky surface.
+  // 1048:03a3 copies strip rows 0..359 (BITMAP/857) to world y 0, 360 and
+  // 720; the source rect set at 03c2-03d0 never changes.
+  {
+    for (const int band : {360, 720}) {
+      const auto raster = simtower::render_original_world(
+          resources, nullptr, 0, band + 100, 32, 8);
+      for (int y = 0; y < raster.height; ++y) {
+        for (int x = 0; x < raster.width; ++x) {
+          assert(raster.at(x, y) == indexed_palette_pixel(
+              resources.find("BITMAP", 857), base_palette, x, 100 + y));
+        }
+      }
+    }
+  }
+
+  // The repeated city strip is opaque at 3905..3959. Below it, the ninth
+  // 1048:0000 strip load (k=-1, BITMAP/849) fills the underground.
   {
     const auto skyline = simtower::render_original_world(
         resources, nullptr, 95, 3905, 4, 55);
@@ -916,10 +931,17 @@ int main(int argc, char** argv) {
             (95 + x) % 96, y));
       }
     }
-    const auto below = simtower::render_original_world(
-        resources, nullptr, 0, 3960, 8, 8);
-    for (const auto pixel : below.pixels) {
-      assert(pixel == 0x00ffffffU);
+    for (const int top : {3960, 4300}) {
+      const auto below = simtower::render_original_world(
+          resources, nullptr, 0, top, 8, 8);
+      for (int y = 0; y < below.height; ++y) {
+        for (int x = 0; x < below.width; ++x) {
+          assert(below.at(x, y) == indexed_palette_pixel(
+              resources.find("BITMAP", 849), base_palette, x,
+              top - 3960 + y));
+          assert(below.at(x, y) != 0x00ffffffU);
+        }
+      }
     }
   }
 

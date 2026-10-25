@@ -1031,6 +1031,16 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
     // the active construction tool and does not present or invalidate Map.
     refresh_original_rating_command(rating, 1U);
   }
+  void cathedral_rating_promoted() override {
+    // UI half of the Cathedral's rating-six promotion 1140:00a8 after its
+    // modal: 1140:010d(1)'s Command layout refresh, then the 1118:0044 Info
+    // repaint.
+    if (!g_tower_document) return;
+    refresh_original_rating_command(g_tower_document->header.rating, 1U);
+    g_tower_dirty = true;
+    InvalidateRect(g_info_window, nullptr, FALSE);
+    UpdateWindow(g_info_window);
+  }
 
   void map_cadence_refresh() override {
     InvalidateRect(g_map_window, nullptr, FALSE);
