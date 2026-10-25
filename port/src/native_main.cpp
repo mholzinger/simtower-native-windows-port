@@ -19,6 +19,7 @@
 #include "original_resources.hpp"
 #include "original_simulation.hpp"
 #include "original_startup.hpp"
+#include "original_startup_data.hpp"
 #include "original_tables.hpp"
 #include "original_tdt_file.hpp"
 #include "original_time.hpp"
@@ -9802,91 +9803,14 @@ void show_original_windows() {
 }
 
 void validate_original_startup_data() {
-  // 1128:0ba3 invokes 11a0:134c's floor-offset precompute and 11f8:033a's
-  // world/facility sheet pack. Native transforms and embedded resource views
-  // perform the same work directly, so validation touches their inputs here.
-  for (const auto action : simtower::original_startup_precompute_plan()) {
-    switch (action) {
-      case simtower::OriginalStartupPrecomputeAction::precompute_floor_offsets:
-        for (std::int32_t floor = 0; floor < 60; ++floor) {
-          (void)simtower::original_precomputed_floor_offset(floor, 1);
-        }
-        break;
-      case simtower::OriginalStartupPrecomputeAction::
-          pack_world_and_facility_sheets:
-        // Native rendering samples the immutable embedded DIBs directly; the
-        // validation pass below opens those same sheet-pack inputs in this
-        // recovered second phase.
-        break;
-    }
-  }
-  // Exact 1178:000c loads construction, rent-income, and maintenance tables
-  // from YEN/1000, YEN/1001, and YEN/1002 respectively.
-  g_part = simtower::original_part_table(g_resources.find("PART", 1000));
-  g_construction_costs =
-      simtower::original_yen_table(g_resources.find("YEN", 1000));
-  g_rent_income =
-      simtower::original_yen_table(g_resources.find("YEN", 1001));
-  g_maintenance_costs =
-      simtower::original_yen_table(g_resources.find("YEN", 1002));
-  // 1140:0005 initializes rating one and loads TABL/1001; preload all six
-  // immutable native rating states so promotion only changes the active view.
-  for (int rating = 1001; rating <= 1006; ++rating) {
-    (void)simtower::original_word_table(g_resources.find("TABL", rating));
-    g_command_ratings[static_cast<std::size_t>(rating - 1001)] =
-        simtower::original_command_rating_state(
-            g_resources, static_cast<std::uint16_t>(rating - 1000));
-  }
-  for (int bitmap = 600; bitmap <= 606; ++bitmap) {
-    (void)simtower::original_dib_view(g_resources.find("BITMAP", bitmap));
-  }
-  (void)simtower::original_dib_view(g_resources.find("BITMAP", 320));
-  (void)simtower::original_dib_view(g_resources.find("BITMAP", 352));
-  for (int bitmap = 850; bitmap <= 857; ++bitmap) {
-    (void)simtower::original_dib_view(g_resources.find("BITMAP", bitmap));
-  }
-  (void)simtower::original_dib_view(g_resources.find("BITMAP", 905));
-  for (int bitmap = 400; bitmap <= 408; ++bitmap) {
-    (void)simtower::original_dib_view(g_resources.find("BITMAP", bitmap));
-  }
-  for (int bitmap = 410; bitmap <= 411; ++bitmap) {
-    (void)simtower::original_dib_view(g_resources.find("BITMAP", bitmap));
-  }
-  for (int bitmap = 20256; bitmap <= 20265; ++bitmap) {
-    (void)simtower::original_dib_view(g_resources.find("BITMAP", bitmap));
-  }
-  (void)simtower::parse_original_dialog(g_resources.find("DIALOG", 124));
-  (void)simtower::parse_original_dialog(g_resources.find("DIALOG", 400));
-  (void)simtower::parse_original_dtmp(g_resources.find("DTMP", 400));
-  for (int dialog = 730; dialog <= 732; ++dialog) {
-    (void)simtower::parse_original_dialog(
-        g_resources.find("DIALOG", dialog));
-    (void)simtower::parse_original_dtmp(g_resources.find("DTMP", dialog));
-  }
-  for (int dialog = 748; dialog <= 764; ++dialog) {
-    (void)simtower::parse_original_dialog(
-        g_resources.find("DIALOG", dialog));
-    (void)simtower::parse_original_dtmp(g_resources.find("DTMP", dialog));
-  }
-  for (const int strings : {420, 710, 712, 713, 714, 715, 716}) {
-    if (g_resources.find("STRL", strings).empty()) {
-      throw std::runtime_error(
-          "Original Facility Information strings are missing");
-    }
-  }
-  for (int dialog = 3030; dialog <= 3034; ++dialog) {
-    (void)simtower::parse_original_dialog(
-        g_resources.find("DIALOG", dialog));
-    (void)simtower::parse_original_dtmp(g_resources.find("DTMP", dialog));
-  }
-  (void)simtower::parse_original_dialog(g_resources.find("DIALOG", 3040));
-  (void)simtower::parse_original_dtmp(g_resources.find("DTMP", 3040));
-  if (g_resources.find("CLUT", 1000).size() < 2048U ||
-      g_resources.find("CGPK", 2536).size() < 123U * 288U ||
-      g_resources.find("CGPK", 2600).size() < 82U * 288U ||
-      g_resources.find("CGPK", 2664).size() < 41U * 288U) {
-    throw std::runtime_error("Original world graphics resources are truncated");
-  }
+  // The portable startup loader (original_startup_data.cpp) is shared with
+  // the SDL3 frontend so both hosts fail fast on the same pack defects.
+  auto data = simtower::load_original_startup_data(g_resources);
+  g_part = std::move(data.part);
+  g_construction_costs = std::move(data.construction_costs);
+  g_rent_income = std::move(data.rent_income);
+  g_maintenance_costs = std::move(data.maintenance_costs);
+  g_command_ratings = std::move(data.command_ratings);
 }
 
 }  // namespace
