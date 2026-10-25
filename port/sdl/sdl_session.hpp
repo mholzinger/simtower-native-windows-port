@@ -261,9 +261,39 @@ class Session : private OriginalIdlePassHost {
     window_iconic_ = iconic;
   }
   // 1128:00ce-00da: WAVE/20000 once at priority 1, before New/Open. Only
-  // the interactive window calls it; headless runs start with the first
-  // idle-pass request.
+  // run_startup calls it; headless runs without --startup start with the
+  // first idle-pass request.
   void play_startup_sound();
+
+  // ---- Startup (WinMain, 1128:0042-0223) ----
+  struct StartupCallbacks {
+    // Present the window now (the splash's synchronous UpdateWindow).
+    std::function<void()> present;
+    // One step of the 180-tick splash wait: time passes (the window pumps
+    // its events, a headless run moves its virtual clock). false ends the
+    // startup (the window was closed).
+    std::function<bool()> wait;
+  };
+  // The interactive window's (and --startup's) startup, with every window
+  // but the splash hidden until it ends: the BITMAP/128 splash for at least
+  // 180 coarse ticks, BITMAP/256, WAVE/20000, then either the command-line
+  // tower (1128:00e5: load_original_tower_from_path, New after a failure)
+  // or New / Load (DIALOG/10000) and apply_original_startup_choice: Load
+  // runs the File > Open transaction (the picker, then New when nothing
+  // was loaded). Then the 1128:01d9-0223 show sequence. Returns false when
+  // the process ends instead (Quit, or a wait that returned false): no
+  // tower is installed then. The dialog runs when the input source drives
+  // it; otherwise, or when it gives no answer, the choice is New Tower.
+  bool run_startup(const StartupCallbacks& callbacks,
+                   const std::optional<std::filesystem::path>& command_line);
+  // The splash bitmap while it is shown (1010:0018), else nullopt.
+  [[nodiscard]] std::optional<int> startup_splash() const {
+    return startup_splash_;
+  }
+  // Main and the palettes stay hidden until the show sequence.
+  [[nodiscard]] bool startup_windows_hidden() const {
+    return startup_hidden_;
+  }
   [[nodiscard]] const OriginalResources& resources() const {
     return resources_;
   }
@@ -584,6 +614,12 @@ class Session : private OriginalIdlePassHost {
   bool run_find_dialog(OriginalFindMode mode);
   // run_original_finance_dialog (1060:0083); false when not driven.
   bool run_finance_dialog();
+  // 1018:0000: DIALOG/10000 through NEWORLOADDLOGFILTER (the shared
+  // OriginalNewLoadDialogController); the result, New Tower (1) when not
+  // driven or not answered.
+  int run_startup_dialog();
+  class StartupChoiceHost;
+  friend class StartupChoiceHost;
   class FindHost;
   friend class FindHost;
   class RenameHost;
@@ -732,6 +768,8 @@ class Session : private OriginalIdlePassHost {
     help,
     command_dialog,
     shutdown,
+    // Only a startup run (the window, --startup) logs it.
+    startup,
   };
   void log_request(RequestKind kind,
                    std::initializer_list<std::int64_t> fields);
@@ -779,6 +817,8 @@ class Session : private OriginalIdlePassHost {
   std::filesystem::path tower_path_{};
   std::filesystem::path tower_title_{"untitled"};
   bool main_closing_{};  // DS:31c6
+  std::optional<int> startup_splash_{};
+  bool startup_hidden_{};
   bool quit_requested_{};
   FilePicker* file_picker_{};
   std::deque<std::optional<std::filesystem::path>> picked_files_{};

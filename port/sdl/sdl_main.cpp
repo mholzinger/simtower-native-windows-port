@@ -17,6 +17,17 @@
 //                [--event bomb|fire@PASS ...]
 //                [--input-script FILE] [--headless-window FILE.bmp]
 //                [--direct-build TYPE,FLOOR,LEFT[,VARIANT][,shift]@PASS ...]
+//                [--startup]
+//
+// Startup: the window starts like WinMain (Session::run_startup): the
+// BITMAP/128 then BITMAP/256 splash, WAVE/20000, then New / Load (DIALOG
+// 10000: New Tower, Quit, Load Saved Tower with the native Open picker),
+// or with --open that tower instead of the dialog. Headless runs skip it
+// and start on New (or --open), unless --startup is given: the splash
+// wait then moves the virtual clock, and an --input-script drives New /
+// Load with "expect-dialog startup" as its first line (undriven, it is
+// New Tower). --startup does not select headless mode by itself and
+// cannot be combined with --scenario.
 //
 // Sound: the interactive window plays sound by default (--no-sound turns
 // it off); it also plays the startup WAVE/20000. Headless runs keep sound
@@ -176,6 +187,8 @@ struct Options {
   std::optional<std::filesystem::path> headless_window{};
   // --direct-build SPEC@PASS: Session::direct_build before that pass.
   std::vector<std::pair<simtower::DirectBuild, int>> direct_builds{};
+  // --startup: a headless run starts through Session::run_startup too.
+  bool startup{false};
 
   [[nodiscard]] bool headless() const {
     return headless_frame || headless_window || state_digest ||
@@ -199,6 +212,7 @@ struct Options {
       " [--trace-requests] [--event bomb|fire@PASS ...]"
       " [--input-script FILE] [--headless-window FILE.bmp]"
       " [--direct-build TYPE,FLOOR,LEFT[,VARIANT][,shift]@PASS ...]"
+      " [--startup]"
       "\n--input-script exits 2 on a script error, 3 on a failed expect-*"
       " (see sdl_input_script.hpp)");
 }
@@ -312,12 +326,17 @@ Options parse_options(int argc, char** argv) {
       if (at == std::string::npos) usage_error("bad --direct-build: " + text);
       options.direct_builds.emplace_back(parse_direct_build(text.substr(0, at)),
                                          parse_count(text.substr(at + 1)));
+    } else if (argument == "--startup") {
+      options.startup = true;
     } else if (argument == "--view") {
       const auto [x, y] = parse_pair(value(index), ',');
       options.view = simtower::OriginalWorldPoint{x, y};
     } else {
       usage_error("unknown option: " + std::string(argument));
     }
+  }
+  if (options.startup && options.scenario != "none") {
+    usage_error("--startup starts on New / Load, not on a --scenario");
   }
   if (options.audio_capture && options.sound == false) {
     usage_error("--audio-capture needs sound; drop --no-sound");
@@ -373,8 +392,8 @@ std::vector<std::byte> read_file(const std::filesystem::path& path) {
   return bytes;
 }
 
-// New, or Open with the Win32 host's fall-back to New on a load failure
-// (load_original_tower_from_path).
+// A headless run without --startup: New, or Open with the Win32 host's
+// fall-back to New on a load failure (load_original_tower_from_path).
 void start_tower(simtower::sdl::Session& session, const Options& options) {
   if (options.view) session.restore_view(options.view->x, options.view->y);
   if (options.open) {
@@ -573,23 +592,6 @@ int run_headless(const Options& options) {
                                   .trace_requests = options.trace_requests},
                                  audio_device);
   session.resize(options.width, options.height);
-  start_tower(session, options);
-  if (options.scenario != "none") {
-    if (options.open) usage_error("--scenario builds on New, not --open");
-    const auto summary = session.apply_scenario(options.scenario);
-    std::string built;
-    for (const auto& [type, count] : summary.built_by_type) {
-      built += " " + simtower::scenario_type_name(type) + "=" +
-               std::to_string(count);
-    }
-    std::fprintf(stderr,
-                 "simtower_sdl: scenario %s built:%s; extra cars %zu, shaft"
-                 " extensions %zu, rating dialogs %zu, balance %d\n",
-                 options.scenario.c_str(), built.c_str(),
-                 summary.elevator_cars, summary.shaft_extensions,
-                 summary.rating_dialogs,
-                 static_cast<int>(summary.balance_after));
-  }
   // The "input" field is added only with a script, so the regression oracle
   // (no script) prints exactly what it printed before input existed.
   const bool scripted = options.input_script.has_value();
@@ -611,6 +613,78 @@ int run_headless(const Options& options) {
   int completed = 0;
   // A "dialog-hold" without FILE wrote --headless-window already.
   bool window_held = false;
+  const auto hold_dialog = [&](const std::string& path,
+                               const std::string& where) {
+    std::filesystem::path target = path;
+    if (target.empty()) {
+      if (!options.headless_window) {
+        throw simtower::sdl::ScriptFailure(
+            2, where + ": dialog-hold needs FILE or --headless-window");
+      }
+      target = *options.headless_window;
+      window_held = true;
+    }
+    // No session.present() here: it may rebuild the backing, which is
+    // digest state. The frame shows the backing as the dialog opened.
+    const auto raster = simtower::sdl::compose_window(session);
+    if (!write_bmp(raster, target)) {
+      throw std::runtime_error("could not write " + target.string() + ": " +
+                               SDL_GetError());
+    }
+    std::fprintf(stderr, "simtower_sdl: wrote %s (%dx%d, dialog held)\n",
+                 target.string().c_str(), raster.width, raster.height);
+  };
+  // Each "pass N" runs passes until N have run; the commands after it run
+  // between pass N and pass N+1 on a fixed virtual clock.
+  // validate_pass_order makes every target reachable in order.
+  std::optional<simtower::sdl::ScriptPlayer> player;
+  const auto make_player = [&]() {
+    auto commands = simtower::sdl::parse_input_script(*options.input_script);
+    simtower::sdl::validate_pass_order(commands, options.passes);
+    player.emplace(std::move(commands), session,
+                   [&] { print_digest(completed); }, hold_dialog);
+  };
+  if (options.startup) {
+    // WinMain's startup on the virtual clock: the splash wait advances it
+    // by one coarse tick (1208:05e6) per step. The script, made here, can
+    // drive New / Load before its first pass.
+    if (options.view) session.restore_view(options.view->x, options.view->y);
+    if (scripted) {
+      make_player();
+      session.set_input_source(&*player);
+    }
+    constexpr std::uint32_t kSplashWaitStepMs = 16U;
+    const bool started = session.run_startup(
+        {.present = [] {},
+         .wait =
+             [&clock_ms] {
+               clock_ms += kSplashWaitStepMs;
+               return true;
+             }},
+        options.open);
+    session.set_input_source(nullptr);
+    // Quit (logged by the session): 1128:0005 fails, no tower exists and
+    // no pass runs.
+    if (!started) return 0;
+  } else {
+    start_tower(session, options);
+  }
+  if (options.scenario != "none") {
+    if (options.open) usage_error("--scenario builds on New, not --open");
+    const auto summary = session.apply_scenario(options.scenario);
+    std::string built;
+    for (const auto& [type, count] : summary.built_by_type) {
+      built += " " + simtower::scenario_type_name(type) + "=" +
+               std::to_string(count);
+    }
+    std::fprintf(stderr,
+                 "simtower_sdl: scenario %s built:%s; extra cars %zu, shaft"
+                 " extensions %zu, rating dialogs %zu, balance %d\n",
+                 options.scenario.c_str(), built.c_str(),
+                 summary.elevator_cars, summary.shaft_extensions,
+                 summary.rating_dialogs,
+                 static_cast<int>(summary.balance_after));
+  }
   const auto run_pass = [&]() {
     const int pass = completed;
     for (const auto& [build, at_pass] : options.direct_builds) {
@@ -636,37 +710,9 @@ int run_headless(const Options& options) {
     }
   };
   if (scripted) {
-    // Each "pass N" runs passes until N have run; the commands after it run
-    // between pass N and pass N+1 on a fixed virtual clock.
-    // validate_pass_order makes every target reachable in order.
-    auto commands = simtower::sdl::parse_input_script(*options.input_script);
-    simtower::sdl::validate_pass_order(commands, options.passes);
-    const auto hold_dialog = [&](const std::string& path,
-                                 const std::string& where) {
-      std::filesystem::path target = path;
-      if (target.empty()) {
-        if (!options.headless_window) {
-          throw simtower::sdl::ScriptFailure(
-              2, where + ": dialog-hold needs FILE or --headless-window");
-        }
-        target = *options.headless_window;
-        window_held = true;
-      }
-      // No session.present() here: it may rebuild the backing, which is
-      // digest state. The frame shows the backing as the dialog opened.
-      const auto raster = simtower::sdl::compose_window(session);
-      if (!write_bmp(raster, target)) {
-        throw std::runtime_error("could not write " + target.string() +
-                                 ": " + SDL_GetError());
-      }
-      std::fprintf(stderr, "simtower_sdl: wrote %s (%dx%d, dialog held)\n",
-                   target.string().c_str(), raster.width, raster.height);
-    };
-    simtower::sdl::ScriptPlayer player(std::move(commands), session,
-                                       [&] { print_digest(completed); },
-                                       hold_dialog);
-    session.set_input_source(&player);
-    while (const auto* pass = player.run_until_pass()) {
+    if (!player) make_player();
+    session.set_input_source(&*player);
+    while (const auto* pass = player->run_until_pass()) {
       while (completed < static_cast<int>(pass->value) &&
              !session.quit_requested()) {
         run_pass();
@@ -1486,9 +1532,38 @@ int run_window(const Options& options) {
   session.set_input_source(&modal);
   SdlFilePicker picker(window, session);
   session.set_file_picker(&picker);
-  // WinMain plays WAVE/20000 right before the new/load startup path.
-  session.play_startup_sound();
-  start_tower(session, options);
+  // WinMain's startup: the splash, WAVE/20000, then New / Load (or the
+  // --open tower) through the window's dialog runtime and picker.
+  if (options.view) session.restore_view(options.view->x, options.view->y);
+  const auto present = [&] {
+    window.present(simtower::sdl::compose_window(session));
+    window.set_cursor(session.cursor_id());
+  };
+  const bool started = session.run_startup(
+      {.present = present,
+       .wait =
+           [&] {
+             // 1128:007f-00a0 is a busy loop; only a quit, a resize and
+             // an expose are taken here so the window stays responsive.
+             SDL_Event event{};
+             while (SDL_PollEvent(&event)) {
+               if (event.type == SDL_EVENT_QUIT) return false;
+               if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+                 resize_session(event, session);
+                 present();
+               } else if (event.type == SDL_EVENT_WINDOW_EXPOSED) {
+                 present();
+               }
+             }
+             SDL_Delay(10);
+             return true;
+           }},
+      options.open);
+  if (!started || modal.quit_requested() || picker.quit_requested()) {
+    session.set_file_picker(nullptr);
+    session.set_input_source(nullptr);
+    return 0;
+  }
   WindowActivation activation = initial_activation(window.flags());
   LoneAlt lone_alt;
   window.set_title(session.window_title());
