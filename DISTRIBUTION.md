@@ -5,7 +5,8 @@ only. They do not contain:
 
 - the original SimTower executable or disk image;
 - extracted or repacked graphics, audio, dialogs, tables, or other resources;
-- `SIMTOWER.HLP`;
+- `SIMTOWER.HLP`, or the HTML pages and images converted from it (the
+  SDL build writes them to `help/` in the build tree);
 - save-game fixtures copied from third parties; or
 - a self-contained executable embedding any of the above.
 

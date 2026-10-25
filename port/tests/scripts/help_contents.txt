@@ -1,0 +1,15 @@
+# Help > Contents and F1 (40021) open the converted help's contents page.
+# A headless run never opens a browser: the request is only logged with
+# its file URL. An empty stand-in page replaces the converted help.
+# args: --scenario none --passes 3 --help-dir help-stand-in
+# make-file: help-stand-in/contents.html
+# expect-stderr: help contents requested \(SIMTOWER.HLP, WinHelp command 3\)
+# expect-stderr: file:///.*/help-stand-in/contents.html \(not opened: headless
+# reject-stderr: \(opened\)
+pass 1
+expect-help none
+menu 40021
+expect-help contents.html
+key f1
+expect-help contents.html
+pass 3
