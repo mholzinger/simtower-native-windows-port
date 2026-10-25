@@ -112,6 +112,13 @@ void consume_original_cathedral_ceremony(
     const OriginalCathedralArrivalResult& ceremony) {
   host.focus(ceremony.effect_floor,
              static_cast<std::int16_t>(ceremony.effect_x));
+  // 1040:0322: 1140:00a8 runs before 11c8:0135/0167. Its headless 1148:003d
+  // half already ran; the host presents the modal and the UI refresh.
+  if (ceremony.rating_dialog.valid()) {
+    (void)host.event_dialog(ceremony.rating_dialog,
+                            OriginalIdleDialog::rating);
+    host.cathedral_rating_promoted();
+  }
   if (ceremony.stop_both_audio_channels) host.stop_all_audio(true);
   if (ceremony.wave_resource != 0) {
     host.play_sound(ceremony.wave_resource, ceremony.wave_repeat,

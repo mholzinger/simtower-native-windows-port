@@ -1109,6 +1109,13 @@ void update_original_parking_drag(const OriginalWorldInputContext& ctx,
         post_placement.floor + 1);
     state.parking_drag.ramp = ramp_next;
   }
+  // 11f8:07d8 clears DS:3216 when 240d/25a2 return zero (0de4-0e09), so the
+  // next helper call re-anchors at the then-current pointer (240d 242a,
+  // 25a2 25b9). A success instead counts the step (0e02).
+  if (!completion.returned_success) {
+    state.parking_drag.parking.initialized = false;
+    state.parking_drag.ramp.initialized = false;
+  }
 }
 
 void finish_original_construction_drag(const OriginalWorldInputContext& ctx,
