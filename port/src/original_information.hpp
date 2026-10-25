@@ -570,6 +570,21 @@ struct OriginalMovieChoiceResult {
     int view_x,
     int view_y) noexcept;
 
+// The target select_original_magnifier_target builds for a hit on car
+// `car` of shaft `shaft` (1100:0e86: DIALOG 761 for elevator type 0, else
+// 762), without a click: floor is the car's floor (record byte 0). Nullopt
+// for an unused shaft or a car out of range or not in service (byte 15
+// zero, which the hit test skips).
+[[nodiscard]] std::optional<OriginalMagnifierTarget>
+original_elevator_car_information_target(const OriginalTdtDocument& document,
+                                         std::size_t shaft,
+                                         std::size_t car) noexcept;
+// The same for Stair / Escalator `index` (1100:11da: DIALOG 761): floor is
+// its base floor. Nullopt for an index out of range or an unused record.
+[[nodiscard]] std::optional<OriginalMagnifierTarget>
+original_vertical_transport_information_target(
+    const OriginalTdtDocument& document, std::size_t index) noexcept;
+
 // Exact two text fields and live passenger portraits painted by
 // 1100:1b53/1cbb/327f/3431/35b7 into DIALOG 761/762.
 // Elevator text is STRL/400[type+1] and "passengers / capacity"; vertical
@@ -689,6 +704,12 @@ enum class OriginalPersonInformationContext : std::uint8_t {
     std::int16_t floor,
     std::size_t tenant_index,
     std::uint8_t rent_rate) noexcept;
+// The rent rate set_original_facility_rent_rate writes (tenant byte 16,
+// the combo's selection); nullopt for no such tenant.
+[[nodiscard]] std::optional<std::uint8_t> get_original_facility_rent_rate(
+    const OriginalTdtDocument& document,
+    std::int16_t floor,
+    std::size_t tenant_index) noexcept;
 
 // Exact DIALOG/731 transaction at 1100:4138 plus 1180:0de9. Costs are the
 // original internal money units (displayed dollars are scaled by 100).

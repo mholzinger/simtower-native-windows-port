@@ -60,6 +60,17 @@ class OriginalCanvasDrawContext final : public OriginalDrawContext {
   void draw_text_single_line(std::string_view text,
                              const OriginalRect& rect) override;
   [[nodiscard]] int text_extent_cx(std::string_view text) override;
+  // COLORONCOLOR as nearest-neighbour sampling: destination pixel (x, y)
+  // reads source (left + (x - dleft) * sw / dw, top + (y - dtop) * sh / dh).
+  void stretch_pixels(std::span<const std::uint32_t> pixels,
+                      int width,
+                      int height,
+                      const OriginalRect& source,
+                      const OriginalRect& destination) override;
+  // The same nearest-neighbour sampling over the DIB's top-left pixels.
+  void draw_dib_region_scaled(std::span<const std::byte> resource,
+                              const OriginalRect& source,
+                              const OriginalRect& destination) override;
 
   // Current position (GetCurrentPositionEx), for tests.
   [[nodiscard]] int current_x() const noexcept { return state_.cp_x; }

@@ -358,6 +358,55 @@ DialogWindow make_rename_dialog(const OriginalResources& resources,
       descriptor, true);
 }
 
+namespace {
+
+// Presses on no control reach the procedure as WM_LBUTTONDOWN, moves as
+// WM_MOUSEMOVE (the Facility and Transport Information filters).
+void forward_pointer_signals(DialogDescriptor& descriptor) {
+  descriptor.unhandled_pointer =
+      [](const DialogPointer& pointer, int x,
+         int y) -> std::optional<DialogSignal> {
+    if (pointer.kind != DialogPointer::Kind::down) return std::nullopt;
+    DialogSignal signal{DialogSignal::Kind::button_down};
+    signal.x = x;
+    signal.y = y;
+    return signal;
+  };
+  descriptor.mouse_move = [](const DialogPointer& /*pointer*/, int x,
+                             int y) -> std::optional<DialogSignal> {
+    DialogSignal signal{DialogSignal::Kind::mouse_move};
+    signal.x = x;
+    signal.y = y;
+    return signal;
+  };
+}
+
+}  // namespace
+
+DialogWindow make_information_dialog(const OriginalResources& resources,
+                                     InformationDialogKind kind,
+                                     std::uint16_t dialog_id,
+                                     const OriginalDtmp& dtmp,
+                                     DialogDescriptor::Painter client) {
+  DialogDescriptor descriptor{};
+  // WM_CTLCOLORSTATIC: the palette-nearest 0xCCCCCC brush (Facility
+  // 1100:09ad, Person 1100:020b, Transport 1100:0fde / 1316; DS:31ae);
+  // every other subtype NULL_BRUSH, which leaves the buttons' face. The
+  // Facility combo's CTLCOLOREDIT / CTLCOLORLISTBOX NULL_BRUSH is not
+  // reproduced: the Win32 port leaves them white too.
+  descriptor.static_background = kOriginalDialogStaticBackgroundRgb;
+  descriptor.paint_client = std::move(client);
+  // WM_LBUTTONDOWN and WM_MOUSEMOVE (Facility 1100:0d5a / 0e54, Transport
+  // 1100:113a / 13fc and 1071 / 13a9); PEPLEINFODLOGFILTER handles neither.
+  if (kind != InformationDialogKind::person) {
+    forward_pointer_signals(descriptor);
+  }
+  return make_dtmp_dialog(
+      resources, information_dialog_label(kind, dialog_id),
+      parse_original_dialog(resources.find("DIALOG", dialog_id)), dtmp,
+      std::move(descriptor), true);
+}
+
 DialogWindow make_movie_dialog(const OriginalResources& resources) {
   const auto launcher = original_information_launcher_contract(
       OriginalInformationLauncherKind::movie_choice);

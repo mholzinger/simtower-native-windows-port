@@ -566,6 +566,16 @@ class RecordingDrawContext final : public simtower::OriginalDrawContext {
     calls.push_back("extent " + std::string(text));
     return 20;
   }
+  void stretch_pixels(std::span<const std::uint32_t>, int, int,
+                      const simtower::OriginalRect& source,
+                      const simtower::OriginalRect& destination) override {
+    calls.push_back("stretch " + rect(source) + " " + rect(destination));
+  }
+  void draw_dib_region_scaled(
+      std::span<const std::byte>, const simtower::OriginalRect& source,
+      const simtower::OriginalRect& destination) override {
+    calls.push_back("scaled " + rect(source) + " " + rect(destination));
+  }
 
  private:
   static std::string point(int x, int y) {

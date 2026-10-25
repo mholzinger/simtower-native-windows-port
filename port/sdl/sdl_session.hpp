@@ -24,6 +24,7 @@
 #include "original_find.hpp"
 #include "original_idle_pass.hpp"
 #include "original_info.hpp"
+#include "original_information.hpp"
 #include "original_main_command.hpp"
 #include "original_menu.hpp"
 #include "original_people.hpp"
@@ -389,10 +390,33 @@ class Session : private OriginalIdlePassHost {
   // open them, through the dialog runtime when the input source drives
   // them, with the callers' result handling (a rename that changed a name,
   // or any New Movie answer but Cancel, dirties the document). Undriven,
-  // they are logged and answered Cancel. Those windows are not ported yet:
-  // today only the scripts' "open-dialog" test shortcut calls these.
+  // they are logged and answered Cancel. Facility Information opens Rename
+  // Tenant and New Movie, Person Information opens Rename Person, and the
+  // scripts' "open-dialog" test shortcut also calls these.
   bool run_rename_dialog(const OriginalRenameTarget& target);
   bool run_movie_dialog(std::size_t linked_record_index);
+  // run_original_facility_information_dialog (1100:03ac) for a Magnifier
+  // hit on a facility (and the scripts' "open-dialog facility" shortcut):
+  // the logged request and tally, the 11c8:03fb sound (it consumes the
+  // shared RNG whenever sound is enabled, driven or not, as on Win32), then
+  // DIALOG/DTMP 748-760 through the dialog runtime when the input source
+  // drives it.
+  void open_facility_information(std::int16_t floor, std::size_t tenant_index);
+  // run_original_person_information_dialog (1100:0000) for a Magnifier hit
+  // on a waiting person, a portrait in Facility Information (and the
+  // scripts' "open-dialog person" shortcut): the logged request and tally,
+  // DIALOG/DTMP 763 / 764 through the dialog runtime when the input source
+  // drives it, then 1100:00f3's Find exit latch (DS:77c0), driven or not.
+  // Returns whether a name changed.
+  bool open_person_information(std::size_t person_index,
+                               OriginalPersonInformationContext context);
+  // run_original_transport_information_dialog (1100:0e86 / 11da) for a
+  // Magnifier hit on an elevator car or a stair / escalator (and the
+  // scripts' "open-dialog transport-car / transport-stair" shortcut): the
+  // logged request and tally, then DIALOG/DTMP 761 / 762 through the
+  // dialog runtime when the input source drives it. A portrait opens
+  // Person Information (DS:b3a6 = 1) over it.
+  void open_transport_information(const OriginalMagnifierTarget& target);
   // The Find marker (DS:77b4..77c0).
   [[nodiscard]] const OriginalFindMarkerState& find_marker() const {
     return find_marker_;
@@ -564,6 +588,16 @@ class Session : private OriginalIdlePassHost {
   friend class FindHost;
   class RenameHost;
   friend class RenameHost;
+  template <class Interface>
+  class InformationHost;
+  template <class>
+  friend class InformationHost;
+  class FacilityHost;
+  friend class FacilityHost;
+  class PersonHost;
+  friend class PersonHost;
+  class TransportHost;
+  friend class TransportHost;
   // The dialog modal loop: input from input_source_, signals to procedure,
   // which returns the EndDialog result to close (nullopt: no answer) and
   // acts on the open dialog through ops.

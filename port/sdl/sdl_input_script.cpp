@@ -241,12 +241,20 @@ std::vector<ScriptCommand> parse_input_script(
         return fail(
             "expect-dialog takes event ID, alert ID, about, box replace, "
             "box invalid-filename, finance, find person, find tenant, "
-            "rename person, rename tenant, movie or elevator popup");
+            "rename person, rename tenant, movie, elevator popup, "
+            "facility ID, person ID or transport ID");
       };
       const std::string rest =
           words.size() == 3 ? words[1] + " " + words[2] : std::string{};
       if (words.size() == 2 && words[1] == "about") {
         command.text = kAboutDialogLabel;
+      } else if (const auto kind = words.size() == 3
+                                       ? parse_information_dialog_kind(words[1])
+                                       : std::nullopt) {
+        const auto id = parse_integer(words[2], where);
+        if (id < 0 || id > 0xFFFF) throw fail("dialog id must be 0..65535");
+        command.text = information_dialog_label(
+            *kind, static_cast<std::uint16_t>(id));
       } else if (words.size() == 2 &&
                  (words[1] == kFinanceDialogLabel ||
                   words[1] == kMovieDialogLabel)) {
@@ -340,11 +348,27 @@ std::vector<ScriptCommand> parse_input_script(
       const auto usage = [&]() {
         return fail(
             "open-dialog takes rename-person PERSON, rename-tenant FLOOR "
-            "TENANT or movie RECORD");
+            "TENANT, movie RECORD, facility FLOOR TENANT, person PERSON "
+            "[main|transport|facility], transport-car SHAFT CAR or "
+            "transport-stair INDEX");
       };
       if (words.size() < 3) throw usage();
       command.text = words[1];
-      for (std::size_t index = 2; index < words.size(); ++index) {
+      // person's context: 0 main (DS:b3a6 = 0), 1 transport, 2 facility.
+      std::size_t numbers_end = words.size();
+      if (command.text == "person" && words.size() == 4) {
+        if (words[3] == "main") {
+          command.value = 0;
+        } else if (words[3] == "transport") {
+          command.value = 1;
+        } else if (words[3] == "facility") {
+          command.value = 2;
+        } else {
+          throw usage();
+        }
+        numbers_end = 3U;
+      }
+      for (std::size_t index = 2; index < numbers_end; ++index) {
         const auto value = parse_integer(words[index], where);
         if (value < -32768 || value > 0x7FFFFFFF) throw usage();
         command.numbers.push_back(static_cast<int>(value));
@@ -353,8 +377,16 @@ std::vector<ScriptCommand> parse_input_script(
              command.numbers[0] >= 0) ||
             (command.text == "rename-tenant" && command.numbers.size() == 2U &&
              command.numbers[1] >= 0) ||
+            (command.text == "facility" && command.numbers.size() == 2U &&
+             command.numbers[1] >= 0) ||
             (command.text == "movie" && command.numbers.size() == 1U &&
-             command.numbers[0] >= 0))) {
+             command.numbers[0] >= 0) ||
+            (command.text == "person" && command.numbers.size() == 1U &&
+             command.numbers[0] >= 0) ||
+            (command.text == "transport-car" && command.numbers.size() == 2U &&
+             command.numbers[0] >= 0 && command.numbers[1] >= 0) ||
+            (command.text == "transport-stair" &&
+             command.numbers.size() == 1U && command.numbers[0] >= 0))) {
         throw usage();
       }
     } else if (verb == "open-elevator-control") {
@@ -412,6 +444,22 @@ std::vector<ScriptCommand> parse_input_script(
         throw fail("expect-isolation takes on or off");
       }
       command.value = words[1] == "on" ? 1 : 0;
+    } else if (verb == "expect-rent") {
+      command.op = ScriptOp::expect_rent;
+      if (words.size() != 4) throw fail("expect-rent takes FLOOR TENANT RATE");
+      command.numbers = {static_cast<int>(parse_integer(words[1], where)),
+                         static_cast<int>(parse_integer(words[2], where))};
+      command.value = parse_integer(words[3], where);
+      if (command.numbers[0] < 0 || command.numbers[0] >= 120 ||
+          command.numbers[1] < 0 || command.value < 0 || command.value > 3) {
+        throw fail("expect-rent takes FLOOR 0..119, TENANT >= 0, RATE 0..3");
+      }
+    } else if (verb == "expect-find-latch") {
+      command.op = ScriptOp::expect_find_latch;
+      single_value();
+      if (command.value != 0 && command.value != 1) {
+        throw fail("expect-find-latch takes 0 or 1");
+      }
     } else if (verb == "expect-idle-passes") {
       command.op = ScriptOp::expect_idle_passes;
       single_value();
@@ -610,6 +658,29 @@ std::optional<DialogInput> ScriptPlayer::next_dialog_input(
         const auto dialogs = session_.dialogs();
         const auto id = static_cast<std::uint16_t>(command.value);
         const int row = command.numbers[0];
+        const auto* target = dialogs.empty() ? nullptr
+                                             : dialogs.back()->control(id);
+        if (target && target->kind == DialogControlKind::combo_box) {
+          // A drop-down combo: click the field (drops the list), then the
+          // row of the dropped list.
+          const auto field = dialogs.back()->combo_field_point(id);
+          const auto point = dialogs.back()->combo_item_point(id, row);
+          if (!field || !point || command.numbers[1] != 0) {
+            throw ScriptFailure(2, command.where + ": dialog-list " +
+                                       std::to_string(id) + " " +
+                                       std::to_string(row) +
+                                       ": no such row of a visible, enabled "
+                                       "combo box (or \"double\")");
+          }
+          for (const auto& at : {*field, *point}) {
+            DialogInput input{};
+            input.pointer = {InputKind::down, at.first, at.second, 0U};
+            pending_dialog_.push_back(input);
+            input.pointer.kind = InputKind::up;
+            pending_dialog_.push_back(input);
+          }
+          break;
+        }
         const auto point = dialogs.empty()
                                ? std::nullopt
                                : dialogs.back()->list_item_point(id, row);
@@ -809,8 +880,8 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
       check_expectation(command);
       break;
     case ScriptOp::open_dialog:
-      // Test shortcut: Person / Facility Information are not ported, so
-      // the script opens their child dialogs directly.
+      // Test shortcut: the child dialogs Person / Facility Information open,
+      // or Facility / Person Information as a Magnifier hit opens them.
       if (command.text == "rename-person") {
         OriginalRenameTarget target{};
         target.person = true;
@@ -822,6 +893,35 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
         target.floor = static_cast<std::int16_t>(command.numbers[0]);
         target.tenant_index = static_cast<std::size_t>(command.numbers[1]);
         (void)session_.run_rename_dialog(target);
+      } else if (command.text == "facility") {
+        session_.open_facility_information(
+            static_cast<std::int16_t>(command.numbers[0]),
+            static_cast<std::size_t>(command.numbers[1]));
+      } else if (command.text == "person") {
+        (void)session_.open_person_information(
+            static_cast<std::size_t>(command.numbers[0]),
+            static_cast<OriginalPersonInformationContext>(command.value));
+      } else if (command.text == "transport-car" ||
+                 command.text == "transport-stair") {
+        // The target a Magnifier hit on that car or stair / escalator
+        // builds (select_original_magnifier_target).
+        const auto* document = session_.document();
+        const bool car = command.text == "transport-car";
+        const auto target =
+            !document ? std::nullopt
+            : car     ? original_elevator_car_information_target(
+                            *document,
+                            static_cast<std::size_t>(command.numbers[0]),
+                            static_cast<std::size_t>(command.numbers[1]))
+                      : original_vertical_transport_information_target(
+                            *document,
+                            static_cast<std::size_t>(command.numbers[0]));
+        if (!target) {
+          throw ScriptFailure(2, command.where +
+                                     (car ? ": no such car in service"
+                                          : ": no such stair / escalator"));
+        }
+        session_.open_transport_information(*target);
       } else {
         (void)session_.run_movie_dialog(
             static_cast<std::size_t>(command.numbers[0]));
@@ -916,6 +1016,8 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
     case ScriptOp::expect_waiting:
     case ScriptOp::expect_isolation:
     case ScriptOp::expect_idle_passes:
+    case ScriptOp::expect_rent:
+    case ScriptOp::expect_find_latch:
       check_expectation(command);
       break;
     case ScriptOp::hold:
@@ -1071,6 +1173,22 @@ void ScriptPlayer::check_expectation(const ScriptCommand& command) const {
       actual = static_cast<std::int64_t>(session_.idle_passes());
       what = "idle passes";
       break;
+    case ScriptOp::expect_find_latch:
+      actual = session_.find_marker().phase != 0U ? 1 : 0;
+      what = "find latch";
+      break;
+    case ScriptOp::expect_rent: {
+      const auto* document = session_.document();
+      const auto rate =
+          document ? get_original_facility_rent_rate(
+                         *document, static_cast<std::int16_t>(command.numbers[0]),
+                         static_cast<std::size_t>(command.numbers[1]))
+                   : std::nullopt;
+      if (!rate) throw ScriptFailure(2, command.where + ": no such tenant");
+      actual = *rate;
+      what = "rent rate";
+      break;
+    }
     case ScriptOp::expect_title:
       if (session_.window_title() != command.text) {
         throw ScriptFailure(3, command.where + ": expected title '" +

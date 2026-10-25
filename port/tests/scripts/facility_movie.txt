@@ -1,0 +1,21 @@
+# The movie theater's New Movie button (control 13 of DIALOG 758, 1100:40d5)
+# opens New Movie (731) over it: Cancel (Esc) changes nothing, the classic
+# choice changes the record and the refreshed dialog shows it.
+# args: --scenario full --passes 3
+# held: facility_movie.bmp
+# expect-stderr: dialog movie record [0-9]+ -> 0
+# expect-stderr: dialog movie record [0-9]+ -> 1 \(changed\)
+# expect-stderr: dialog facility 758 floor 9 tenant 1 -> 1 \(changed\)
+pass 1
+set-balance 50000000
+open-dialog facility 9 1
+expect-dialog facility 758
+dialog-click 13
+expect-dialog movie
+dialog-key esc
+dialog-click 13
+expect-dialog movie
+dialog-click 3
+dialog-hold facility_movie.bmp
+dialog-click 1
+pass 3

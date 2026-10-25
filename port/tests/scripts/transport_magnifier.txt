@@ -1,0 +1,39 @@
+# The original path to Transport Information: the Magnifier (Command cell
+# at 182,228) after a Map click on the lobby. A click on shaft 0's car at
+# floor 1 (Main 440,410) selects elevator_car_information (10a0:04b2 ->
+# 1100:0e86): DIALOG 762 for this shaft type. ELVINFODLOGFILTER handles
+# only IDOK: Esc's IDCANCEL and a press on empty panel space do nothing,
+# Enter (the default OK) closes with 1. A click on the escalator (570,400)
+# and on the stairs (570,230) select vertical_transport_information
+# (10c0:05cd -> 1100:11da): DIALOG 761, ESCINFODLOGFILTER. Undriven (the
+# last click, no expect-dialog) it is only logged.
+# args: --scenario busy --passes 51
+# held: ti_magnifier_car.bmp
+# held: ti_magnifier_stairs.bmp
+# expect-stderr: dialog transport 762 car 0/0 -> 1, "Standard Elevator" 0 / 21, 0 portraits
+# expect-stderr: dialog transport 761 stair 0 -> 1, "Escalator" 0, 0 portraits
+# expect-stderr: dialog transport 761 stair 2 -> 1, "Stairs" 0, 0 portraits
+# expect-stderr: transport information 4
+# reject-stderr: elevator control
+# reject-stderr: person information
+pass 50
+click 70 290
+click-command 182 228
+expect-mode 2
+click 440 410
+expect-dialog transport 762
+dialog-hold ti_magnifier_car.bmp
+dialog-key esc
+dialog-at 200 120
+dialog-at 2 2
+dialog-key enter
+click 570 400
+expect-dialog transport 761
+dialog-click 1
+click 570 230
+expect-dialog transport 761
+dialog-hold ti_magnifier_stairs.bmp
+dialog-key esc
+dialog-click 1
+click 440 410
+pass 51

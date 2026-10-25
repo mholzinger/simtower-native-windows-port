@@ -61,6 +61,23 @@ class OriginalGdiDrawContext final : public OriginalDrawContext {
   void draw_text_single_line(std::string_view text,
                              const OriginalRect& rect) override;
   [[nodiscard]] int text_extent_cx(std::string_view text) override;
+  // stretch_pixels and draw_dib_region_scaled complete the interface for
+  // the portable Information painters; no Win32 procedure paints through
+  // them yet (they keep their own GDI painters, see
+  // original_*_information_controller.hpp), so they have no Win32 caller
+  // or test. FOLLOW-UP (the gate for moving Win32 onto the portable
+  // painters): a Wine DIB memcmp test of each portable Information painter
+  // over this context against a frozen copy of its GDI painter, as
+  // dialog_chrome_parity_tests does for the chrome. Until then the two
+  // painters are checked only for arguments and text origins.
+  void stretch_pixels(std::span<const std::uint32_t> pixels,
+                      int width,
+                      int height,
+                      const OriginalRect& source,
+                      const OriginalRect& destination) override;
+  void draw_dib_region_scaled(std::span<const std::byte> resource,
+                              const OriginalRect& source,
+                              const OriginalRect& destination) override;
 
  private:
   struct SelectedPen {

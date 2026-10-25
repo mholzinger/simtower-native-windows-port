@@ -51,7 +51,8 @@
 //   expect-dialog event ID | alert ID | about | box replace |
 //                 box invalid-filename | finance | find person |
 //                 find tenant | rename person | rename tenant | movie |
-//                 elevator popup
+//                 elevator popup | facility ID | person ID |
+//                 transport ID
 //                          the dialog that is opening now (see Dialogs);
 //                          exit 3 if another one opens, or none is open
 //   dialog-click ID        press and release the center of push button ID
@@ -76,7 +77,11 @@
 //   dialog-list ID INDEX [double]
 //                          press and release on row INDEX of list box ID
 //                          (twice for "double": LBN_DBLCLK); exit 2 unless
-//                          that row is visible
+//                          that row is visible. On a drop-down combo box:
+//                          a click on its field drops the list, then a
+//                          click on row INDEX selects it (CBN_SELCHANGE
+//                          when it changed) and closes it ("double" is
+//                          refused)
 //   dialog-at X Y [right]  press and release the left (or right) button at
 //                          client point X,Y of that dialog
 //   dialog-wait MS         MS milliseconds pass on the dialog clock; its
@@ -128,11 +133,32 @@
 //   hold [FILE]            write the composed window now (as dialog-hold,
 //                          outside dialogs too)
 //   open-dialog rename-person PERSON | rename-tenant FLOOR TENANT |
-//               movie RECORD
+//               movie RECORD | facility FLOOR TENANT |
+//               person PERSON [main|transport|facility] |
+//               transport-car SHAFT CAR | transport-stair INDEX
 //                          TEST SHORTCUT, not original input: opens the
 //                          Rename or New Movie dialog that Person / Facility
-//                          Information would open (those windows are not
-//                          ported yet), with the launcher's result handling
+//                          Information would open, Facility Information on
+//                          tenant TENANT of raw floor FLOOR as a Magnifier
+//                          hit would ("tool inspect" + a click on the
+//                          facility is the original path), or Person
+//                          Information on person PERSON as the Magnifier
+//                          (main, the default), Transport or Facility
+//                          Information (a portrait click) would open it
+//                          (DS:b3a6), with the launcher's result handling
+//                          (the Find exit latch included), or Transport
+//                          Information on car CAR of used shaft SHAFT
+//                          (elevator type 0, express, 761; every other
+//                          type 762) or on used
+//                          stair / escalator INDEX (761) as a Magnifier hit
+//                          on it would (exit 2 for an unused one)
+//   expect-rent FLOOR TENANT RATE
+//                          tenant TENANT of raw floor FLOOR has rent / price
+//                          rate RATE (record byte 16, 0..3); exit 3
+//                          otherwise
+//   expect-find-latch 0|1  the Find exit latch DS:77c0 (Person Information
+//                          sets it on closing over the Find marker's
+//                          person; the Magnifier's tail consumes it)
 //
 // pick-file, expect-title and expect-saved take the rest of the line, but
 // '#' still starts a comment there, so PATH and TEXT cannot contain '#'.
@@ -231,6 +257,8 @@ enum class ScriptOp : std::uint8_t {
   expect_waiting,
   expect_isolation,
   expect_idle_passes,
+  expect_rent,
+  expect_find_latch,
   hold,
 };
 

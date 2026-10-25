@@ -8,6 +8,10 @@
 #include "original_construction.hpp"
 #include "original_dialog_model.hpp"
 #include "original_draw_canvas.hpp"
+#include "original_facility_information_controller.hpp"
+#include "original_information_paint.hpp"
+#include "original_person_information_controller.hpp"
+#include "original_transport_information_controller.hpp"
 #include "original_resources.generated.hpp"
 #include "original_tables.hpp"
 #include "original_startup_data.hpp"
@@ -96,7 +100,7 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
   // SIMTOWER.INI BeepOnly (DS:de28) has no SDL profile yet: off.
   bool beep_only() override { return false; }
   bool modal_input_locked() override { return s_.modal_depth_ != 0; }
-  // DS:77c0 (only Person Information sets it, not ported yet).
+  // DS:77c0 (only Person Information's exit sets it).
   bool find_exit_latch_set() override { return s_.find_marker_.phase != 0U; }
   void reset_find_marker() override {
     reset_original_find_marker(s_.find_marker_);
@@ -265,25 +269,15 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
     s_.open_elevator_control(elevator_index, pointer_x, pointer_y);
   }
   void transport_information(const OriginalMagnifierTarget& target) override {
-    ++s_.host_requests_.dialogs;
-    s_.log_request(RequestKind::info_dialog,
-                   {static_cast<int>(target.kind), target.dialog_id});
-    s_.tally("transport information");
+    s_.open_transport_information(target);
   }
   void facility_information(std::int16_t floor,
                             std::size_t tenant_index) override {
-    ++s_.host_requests_.dialogs;
-    s_.log_request(RequestKind::info_dialog,
-                   {-1, floor, static_cast<std::int64_t>(tenant_index)});
-    s_.tally("facility information");
-    log_line("facility information floor " + std::to_string(floor) +
-             " tenant " + std::to_string(tenant_index));
+    s_.open_facility_information(floor, tenant_index);
   }
   void person_information(std::size_t person_index) override {
-    ++s_.host_requests_.dialogs;
-    s_.log_request(RequestKind::info_dialog,
-                   {-2, static_cast<std::int64_t>(person_index)});
-    s_.tally("person information");
+    (void)s_.open_person_information(
+        person_index, OriginalPersonInformationContext::main_world);
   }
   OriginalWorldPoint command_outer_origin() override {
     return {s_.layout_.command_outer.x, s_.layout_.command_outer.y};
@@ -1427,6 +1421,255 @@ class Session::RenameHost final : public OriginalRenameDialogHost {
  private:
   Session& s_;
 };
+
+// What the three Information dialogs share (OriginalInformationHostBase):
+// the document, its tables, the resources, the dirty flag and the cursor.
+// DS:31a4 and TOPMOST have no SDL counterpart: a nested modal is drawn
+// over the information dialog and takes the input until it closes.
+template <class Interface>
+class Session::InformationHost : public Interface {
+ public:
+  explicit InformationHost(Session& session) : s_(session) {}
+  OriginalTdtDocument* document() override {
+    return s_.document_ ? &*s_.document_ : nullptr;
+  }
+  const OriginalPartTable& part() override { return s_.part_; }
+  const OriginalResources& resources() override { return s_.resources_; }
+  void mark_document_dirty() override {
+    s_.document_dirty_ = true;
+    s_.present_requested_ = true;
+  }
+  void set_cursor(std::uint16_t cursor_id) override {
+    s_.cursor_id_ = cursor_id;
+  }
+
+ protected:
+  Session& s_;
+};
+
+// TENANTINFODLOGFILTER's world: Rename Tenant, New Movie and Person
+// Information.
+class Session::FacilityHost final
+    : public InformationHost<OriginalFacilityInformationHost> {
+ public:
+  using InformationHost::InformationHost;
+  bool rename_tenant(std::int16_t floor, std::size_t tenant_index) override {
+    OriginalRenameTarget target{};
+    target.person = false;
+    target.floor = floor;
+    target.tenant_index = tenant_index;
+    return s_.run_rename_dialog(target);
+  }
+  bool choose_movie(std::size_t linked_record_index) override {
+    return s_.run_movie_dialog(linked_record_index);
+  }
+  bool person_information(std::size_t person_index) override {
+    return s_.open_person_information(
+        person_index, OriginalPersonInformationContext::facility_dialog);
+  }
+};
+
+// PEPLEINFODLOGFILTER's world: Rename Person.
+class Session::PersonHost final
+    : public InformationHost<OriginalPersonInformationHost> {
+ public:
+  using InformationHost::InformationHost;
+  bool rename_person(std::size_t person_index) override {
+    OriginalRenameTarget target{};
+    target.person = true;
+    target.person_index = person_index;
+    return s_.run_rename_dialog(target);
+  }
+};
+
+// ELVINFODLOGFILTER / ESCINFODLOGFILTER's world: Person Information
+// (DS:b3a6 = 1).
+class Session::TransportHost final
+    : public InformationHost<OriginalTransportInformationHost> {
+ public:
+  using InformationHost::InformationHost;
+  bool person_information(std::size_t person_index) override {
+    return s_.open_person_information(
+        person_index, OriginalPersonInformationContext::transport_dialog);
+  }
+};
+
+namespace {
+
+const char* person_context_name(OriginalPersonInformationContext context) {
+  switch (context) {
+    case OriginalPersonInformationContext::main_world: return "main";
+    case OriginalPersonInformationContext::transport_dialog:
+      return "transport";
+    case OriginalPersonInformationContext::facility_dialog:
+      return "facility";
+  }
+  return "?";
+}
+
+}  // namespace
+
+bool Session::open_person_information(
+    std::size_t person_index, OriginalPersonInformationContext context) {
+  ++host_requests_.dialogs;
+  log_request(RequestKind::info_dialog,
+              {-2, static_cast<std::int64_t>(person_index)});
+  tally("person information");
+  log_line("person information " + std::to_string(person_index) + " (from " +
+           person_context_name(context) + ")");
+  if (!document_) return false;
+  auto information = original_person_information(
+      resources_, *document_, part_, person_index, context);
+  if (!information.valid) return false;
+  const auto dialog_id = information.dialog_id;
+  OriginalPersonInformationController controller(
+      person_index, context, std::move(information),
+      parse_original_dtmp(resources_.find("DTMP", dialog_id)));
+  std::optional<int> result{};
+  bool driven = false;
+  if (input_source_) {
+    auto modal = make_information_dialog(
+        resources_, InformationDialogKind::person, dialog_id,
+        controller.dtmp(),
+        [&controller](OriginalDrawContext& draw, OriginalCanvasFont& /*font*/,
+                      const DialogWindow& shown,
+                      const OriginalResources& pack) {
+          paint_original_person_information(
+              draw, pack, controller.dtmp(), controller.information(),
+              {0, 0, shown.client_width(), shown.client_height()},
+              [&](std::uint16_t id) { return shown.control(id) != nullptr; });
+        });
+    if (drives(modal)) {
+      driven = true;
+      // WM_INITDIALOG; its TRUE return lets the dialog manager focus OK.
+      if (controller.initial_focus(modal)) modal.focus_first_tab_stop();
+      PersonHost host(*this);
+      result = run_dialog_modal(
+          modal, [&](const DialogSignal& signal, OriginalDialogOps& ops) {
+            return controller.signal(signal, ops, host).result;
+          });
+    }
+  }
+  // 1100:00f3-0107, after DialogBoxParam whatever it returned.
+  const bool latched =
+      apply_original_person_information_exit(find_marker_, person_index);
+  log_line("dialog person " + std::to_string(dialog_id) + " person " +
+           std::to_string(person_index) + " -> " +
+           (driven ? (result ? std::to_string(*result) : std::string("open"))
+                   : std::string("not driven")) +
+           (controller.changed() ? " (changed)" : "") +
+           (latched ? ", find latch set" : "") + ", name \"" +
+           controller.information().display_name + "\"");
+  return controller.changed();
+}
+
+void Session::open_facility_information(std::int16_t floor,
+                                        std::size_t tenant_index) {
+  ++host_requests_.dialogs;
+  log_request(RequestKind::info_dialog,
+              {-1, floor, static_cast<std::int64_t>(tenant_index)});
+  tally("facility information");
+  log_line("facility information floor " + std::to_string(floor) +
+           " tenant " + std::to_string(tenant_index));
+  if (!document_) return;
+  auto information = original_facility_information(
+      resources_, *document_, part_, floor, tenant_index);
+  if (!information.valid) return;
+  // run_original_facility_information_dialog's order is the information,
+  // the world snapshot, the 11c8:03fb sound, then the modal. The snapshot
+  // only reads the document, so here it is rendered after the sound and
+  // only for a driven dialog; the state order is the same.
+  if (const auto resource = select_original_facility_sound(
+          *document_, audio_ && audio_->sound_enabled(), floor,
+          tenant_index)) {
+    play_audio(*resource, 0U, 1U);
+  }
+  if (!input_source_) return;
+  const auto dialog_id = information.dialog_id;
+  OriginalFacilityInformationController controller(
+      floor, tenant_index, std::move(information),
+      parse_original_dtmp(resources_.find("DTMP", dialog_id)));
+  OriginalWorldRaster preview{};
+  auto modal = make_information_dialog(
+      resources_, InformationDialogKind::facility, dialog_id,
+      controller.dtmp(),
+      [&controller, &preview](OriginalDrawContext& context,
+                              OriginalCanvasFont& /*font*/,
+                              const DialogWindow& shown,
+                              const OriginalResources& pack) {
+        paint_original_facility_information(
+            context, pack, controller.dtmp(), controller.information(),
+            preview, {0, 0, shown.client_width(), shown.client_height()},
+            [&](std::uint16_t id) { return shown.control(id) != nullptr; });
+      });
+  if (!drives(modal)) return;
+  preview = render_original_facility_preview(
+      resources_, *document_, controller.information(), viewport_.width,
+      viewport_.height,
+      palette_runtime_.initialized ? &palette_runtime_.colors : nullptr);
+  // WM_INITDIALOG; its TRUE return lets the dialog manager focus OK.
+  controller.initialize(modal);
+  if (controller.initial_focus(modal)) modal.focus_first_tab_stop();
+  FacilityHost host(*this);
+  const auto result = run_dialog_modal(
+      modal, [&](const DialogSignal& signal, OriginalDialogOps& ops) {
+        return controller.signal(signal, ops, host).result;
+      });
+  const auto& shown = controller.information();
+  log_line("dialog facility " + std::to_string(dialog_id) + " floor " +
+           std::to_string(floor) + " tenant " + std::to_string(tenant_index) +
+           " -> " + (result ? std::to_string(*result) : std::string("open")) +
+           (controller.changed() ? " (changed)" : "") +
+           (shown.rent_control_visible
+                ? ", rate " + std::to_string(shown.selected_rent_rate)
+                : std::string{}));
+}
+
+void Session::open_transport_information(
+    const OriginalMagnifierTarget& target) {
+  ++host_requests_.dialogs;
+  log_request(RequestKind::info_dialog,
+              {static_cast<int>(target.kind), target.dialog_id});
+  tally("transport information");
+  if (!document_ || !input_source_) return;
+  auto text =
+      original_transport_information_text(resources_, *document_, target);
+  if (!text.valid || target.dialog_id == 0U) return;
+  OriginalTransportInformationController controller(
+      target, std::move(text),
+      parse_original_dtmp(resources_.find("DTMP", target.dialog_id)));
+  auto modal = make_information_dialog(
+      resources_, InformationDialogKind::transport, target.dialog_id,
+      controller.dtmp(),
+      [&controller](OriginalDrawContext& context,
+                    OriginalCanvasFont& /*font*/, const DialogWindow& shown,
+                    const OriginalResources& pack) {
+        paint_original_transport_information(
+            context, pack, controller.dtmp(), controller.text(),
+            {0, 0, shown.client_width(), shown.client_height()},
+            [&](std::uint16_t id) { return shown.control(id) != nullptr; });
+      });
+  if (!drives(modal)) return;
+  // WM_INITDIALOG; its TRUE return lets the dialog manager focus OK.
+  if (controller.initial_focus(modal)) modal.focus_first_tab_stop();
+  TransportHost host(*this);
+  const auto result = run_dialog_modal(
+      modal, [&](const DialogSignal& signal, OriginalDialogOps& ops) {
+        return controller.signal(signal, ops, host).result;
+      });
+  const bool car =
+      target.kind == OriginalMagnifierTargetKind::elevator_car_information;
+  log_line("dialog transport " + std::to_string(target.dialog_id) +
+           (car ? " car " + std::to_string(target.elevator_index) + "/" +
+                      std::to_string(target.elevator_car_index)
+                : " stair " +
+                      std::to_string(target.vertical_transport_index)) +
+           " -> " + (result ? std::to_string(*result) : std::string("open")) +
+           (controller.changed() ? " (changed)" : "") + ", \"" +
+           controller.text().primary + "\" " + controller.text().secondary +
+           ", " + std::to_string(controller.text().person_sprites.size()) +
+           " portraits");
+}
 
 bool Session::run_find_dialog(OriginalFindMode mode) {
   if (!document_ || !input_source_) return false;

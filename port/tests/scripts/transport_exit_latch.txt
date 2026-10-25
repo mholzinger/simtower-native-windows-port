@@ -1,0 +1,38 @@
+# The Find exit latch DS:77c0 through Transport Information: rider 2403
+# of shaft 0's car 0 is named and found with Find Person (the marker is on
+# it); a press on its portrait opens Person Information (DS:b3a6 = 1),
+# whose exit (1100:00f3-0107) sets the latch while the transport dialog is
+# still open. A press on another rider does not set it.
+# args: --scenario busy --passes 301
+# expect-stderr: dialog find person: focused floor
+# expect-stderr: dialog person 763 person 2419 -> 1, name "Mother with Baby"
+# expect-stderr: dialog person 763 person 2403 -> 1, find latch set, name "Zed"
+# expect-stderr: dialog transport 762 car 0/0 -> 1, "Standard Elevator" 6 / 21, 6 portraits
+pass 300
+open-dialog person 2403
+expect-dialog person 763
+dialog-click 4
+expect-dialog rename person
+dialog-type Zed
+dialog-click 1
+dialog-click 1
+menu 40019
+expect-dialog find person
+dialog-list 5 0
+dialog-click 4
+expect-find-latch 0
+open-dialog transport-car 0 0
+expect-dialog transport 762
+dialog-at 30 120
+expect-dialog person 763
+dialog-click 1
+dialog-click 1
+expect-find-latch 0
+open-dialog transport-car 0 0
+expect-dialog transport 762
+dialog-at 22 120
+expect-dialog person 763
+dialog-click 1
+dialog-click 1
+expect-find-latch 1
+pass 301

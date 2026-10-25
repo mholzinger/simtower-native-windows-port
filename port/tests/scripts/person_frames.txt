@@ -1,0 +1,68 @@
+# Review frames of Person Information on the busy tower after 300 passes:
+# the person waiting at shaft 0 by the Magnifier (DS:b3a6 = 0, live wait
+# as stress) and as a Transport Information passenger (b3a6 = 1), a man,
+# a woman with a kid, a mother with a baby, a child and a salesman (763),
+# security and a housekeeper (764: no meters, statics 10 and 12 hidden),
+# and a portrait clicked in an office's Facility Information (b3a6 = 2,
+# nested over it).
+# args: --scenario busy --passes 301
+# held: pi_waiting.bmp
+# held: pi_transport.bmp
+# held: pi_man.bmp
+# held: pi_woman_kid.bmp
+# held: pi_mother_baby.bmp
+# held: pi_child.bmp
+# held: pi_salesman.bmp
+# held: pi_security.bmp
+# held: pi_housekeeper.bmp
+# held: pi_from_facility.bmp
+# expect-stderr: dialog person 763 person 1645 -> 1, name "Salesman"
+# expect-stderr: dialog person 764 person 1584 -> 1, name "Security"
+# expect-stderr: person information [0-9]+ \(from facility\)
+pass 300
+click 70 290
+click-command 182 228
+click 408 405
+expect-dialog person 763
+dialog-hold pi_waiting.bmp
+dialog-click 1
+open-dialog person 1645 transport
+expect-dialog person 763
+dialog-hold pi_transport.bmp
+dialog-click 1
+open-dialog person 0
+expect-dialog person 763
+dialog-hold pi_man.bmp
+dialog-click 1
+open-dialog person 5
+expect-dialog person 763
+dialog-hold pi_woman_kid.bmp
+dialog-click 1
+open-dialog person 7
+expect-dialog person 763
+dialog-hold pi_mother_baby.bmp
+dialog-click 1
+open-dialog person 2354
+expect-dialog person 763
+dialog-hold pi_child.bmp
+dialog-click 1
+open-dialog person 1602
+expect-dialog person 763
+dialog-hold pi_salesman.bmp
+dialog-click 1
+open-dialog person 1584
+expect-dialog person 764
+dialog-hold pi_security.bmp
+dialog-click 1
+open-dialog person 1590 main
+expect-dialog person 764
+dialog-hold pi_housekeeper.bmp
+dialog-click 1
+open-dialog facility 13 4
+expect-dialog facility 748
+dialog-at 44 134
+expect-dialog person 763
+dialog-hold pi_from_facility.bmp
+dialog-click 1
+dialog-click 1
+pass 301

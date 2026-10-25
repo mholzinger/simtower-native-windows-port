@@ -17,14 +17,18 @@
 // procedure, e.g. ABOUTDLGPROC's close on any key or click). The ported
 // dialogs are descriptors in sdl_dialog_descriptors.hpp: the event
 // dialogs, the message boxes, About, Find Person / Tenant, Rename Person /
-// Tenant, New Movie, Finance, the modeless Elevator Control panel and its
-// ELVPOPUP.
+// Tenant, New Movie, Finance, Facility / Person / Transport Information,
+// the modeless Elevator Control panel and its ELVPOPUP.
 //
 // Session::run_dialog_modal feeds a DialogWindow input and passes the
 // signals it produces (WM_COMMAND, WM_TIMER, pointer and key messages the
 // manager does not consume, the About close) to a procedure that mirrors
-// the Win32 dialog procedure (for Find, Rename, New Movie, Finance and
-// ELVPOPUP, the shared controller of original_dialog_controllers.hpp or
+// the Win32 dialog procedure (for Find, Rename, New Movie, Finance,
+// Facility / Person / Transport Information and ELVPOPUP, the shared
+// controller of original_dialog_controllers.hpp,
+// original_facility_information_controller.hpp,
+// original_person_information_controller.hpp,
+// original_transport_information_controller.hpp or
 // original_elevator_control_controller.hpp that the Win32 host runs too;
 // the Elevator Control panel's controller runs modeless, below). The
 // procedure acts on the dialog only through OriginalDialogOps
@@ -280,6 +284,17 @@ struct DialogDescriptor {
 // invalid-filename" (the literal File MessageBoxes) or "about".
 [[nodiscard]] std::string event_dialog_label(std::uint16_t dialog_id);
 [[nodiscard]] std::string alert_dialog_label(int alert_id);
+// The three Information dialogs: Facility (DIALOG/DTMP 748-760), Person
+// (763 / 764) and Transport (761 / 762).
+enum class InformationDialogKind : std::uint8_t { facility, person, transport };
+// "facility", "person" or "transport".
+[[nodiscard]] const char* information_dialog_kind_name(
+    InformationDialogKind kind);
+[[nodiscard]] std::optional<InformationDialogKind>
+parse_information_dialog_kind(std::string_view name);
+// "facility ID", "person ID" or "transport ID".
+[[nodiscard]] std::string information_dialog_label(InformationDialogKind kind,
+                                                   std::uint16_t dialog_id);
 inline constexpr char kAboutDialogLabel[] = "about";
 inline constexpr char kReplaceBoxLabel[] = "box replace";
 inline constexpr char kInvalidFilenameBoxLabel[] = "box invalid-filename";
@@ -383,6 +398,13 @@ class DialogWindow final : public OriginalDialogOps {
   // Window-coordinate center of list item `index` of list box id when it is
   // a visible row (scripts' "dialog-list"); nullopt otherwise.
   [[nodiscard]] std::optional<std::pair<int, int>> list_item_point(
+      std::uint16_t id, int index) const;
+  // A visible, enabled drop-down combo box id: the window-coordinate
+  // center of its field, and of row `index` of its dropped list (whether
+  // or not it is dropped now; nullopt when the row does not fit).
+  [[nodiscard]] std::optional<std::pair<int, int>> combo_field_point(
+      std::uint16_t id) const;
+  [[nodiscard]] std::optional<std::pair<int, int>> combo_item_point(
       std::uint16_t id, int index) const;
   // The dialog clock (milliseconds since it opened): double clicks and the
   // caret blink use it, never the session clock.

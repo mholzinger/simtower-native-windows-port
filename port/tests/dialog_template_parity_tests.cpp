@@ -4,6 +4,11 @@
 // to DialogBoxIndirectParamW must be identical. The legacy_* functions are
 // frozen copies of the old inline code; do not change them.
 //
+// Also: Facility Information's rent / price control 13 in DIALOG 748-753
+// (groups 0..5) is a real ComboBox once the native template is created,
+// the class Win32DialogOps (native_main.cpp) looks up to send CB_* rather
+// than LB_* to it (the controller's tests record ops, not messages).
+//
 // Exit 77 (skipped) without the resource pack.
 
 #include "original_about.hpp"
@@ -100,6 +105,36 @@ bool same_bytes(const std::vector<std::byte>& a,
          (a.empty() || std::memcmp(a.data(), b.data(), a.size()) == 0);
 }
 
+INT_PTR CALLBACK inert_dialog_proc(HWND, UINT, WPARAM, LPARAM) {
+  return FALSE;
+}
+
+// Creates DIALOG dialog_id hidden (WS_VISIBLE cleared: no window is shown)
+// and returns the window class of its item `id` ("" when missing).
+std::wstring created_item_class(const simtower::OriginalResources& resources,
+                                std::uint16_t dialog_id, int id) {
+  auto native = simtower::build_native_dialog_template(
+      simtower::parse_original_dialog(resources.find("DIALOG", dialog_id)));
+  DWORD style{};
+  std::memcpy(&style, native.data(), sizeof(style));
+  style &= ~static_cast<DWORD>(WS_VISIBLE);
+  std::memcpy(native.data(), &style, sizeof(style));
+  HWND dialog = CreateDialogIndirectParamW(
+      GetModuleHandleW(nullptr),
+      reinterpret_cast<const DLGTEMPLATE*>(native.data()), nullptr,
+      inert_dialog_proc, 0);
+  assert(dialog != nullptr);
+  assert(!IsWindowVisible(dialog));
+  std::wstring name;
+  if (HWND child = GetDlgItem(dialog, id)) {
+    wchar_t buffer[32]{};
+    const int length = GetClassNameW(child, buffer, 32);
+    name.assign(buffer, length > 0 ? static_cast<std::size_t>(length) : 0U);
+  }
+  DestroyWindow(dialog);
+  return name;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -150,7 +185,15 @@ int main(int argc, char** argv) {
   assert(legacy.lines == about.lines);
   assert(same_dtmp(legacy.chrome, about.chrome));
 
-  std::printf("dialog template parity: %d event templates and About\n",
+  // Facility Information rent groups 0..5 (DIALOG 0x2ec + group).
+  for (std::uint16_t group = 0U; group <= 5U; ++group) {
+    const auto dialog_id = static_cast<std::uint16_t>(0x2ecU + group);
+    assert(lstrcmpiW(created_item_class(resources, dialog_id, 13).c_str(),
+                     L"ComboBox") == 0);
+  }
+
+  std::printf("dialog template parity: %d event templates and About; "
+              "facility combo 13 is a ComboBox in DIALOG 748-753\n",
               compared);
   return 0;
 }

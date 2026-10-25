@@ -1,0 +1,24 @@
+# The original path to Person Information: the Magnifier (Command cell at
+# 182,228) and a click on a person waiting at shaft 0 on floor 1 (Main
+# 408,405 after the Map click) select the waiting-person target
+# (1058:0000 -> 10a8:0aae -> 1100:0000), which opens DIALOG 763 with
+# DS:b3a6 = 0. PEPLEINFODLOGFILTER handles no mouse or key message: Esc's
+# IDCANCEL and a press on no control do nothing; OK closes with 1.
+# Undriven (the second click, no expect-dialog) it is only logged.
+# args: --scenario busy --passes 301
+# expect-stderr: person information 1645 \(from main\)
+# expect-stderr: dialog person 763 person 1645 -> 1, name "Salesman"
+# expect-stderr: dialog person 763 person 1645 -> not driven
+# reject-stderr: facility information
+pass 300
+click 70 290
+click-command 182 228
+expect-mode 2
+click 408 405
+expect-dialog person 763
+dialog-key esc
+dialog-at 2 2
+dialog-key enter
+expect-find-latch 0
+click 408 405
+pass 301

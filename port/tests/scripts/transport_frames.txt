@@ -1,0 +1,47 @@
+# Review frames of Transport Information on the busy tower (the Magnifier
+# path's frames are in transport_magnifier.txt): shaft 0's cars at pass
+# 300 with 6, 21 (a full car) and no riders (762), the escalator and the
+# stairs (761, two strip panels, items 4 and 9), Person Information opened
+# from a car's portrait (b3a6 = 1, nested over it), and the escalator at
+# pass 980 with seven riders.
+# args: --scenario busy --passes 981
+# held: ti_car_6.bmp
+# held: ti_car_full.bmp
+# held: ti_car_empty.bmp
+# held: ti_escalator_empty.bmp
+# held: ti_stairs.bmp
+# held: ti_person_from_car.bmp
+# held: ti_escalator_riders.bmp
+# expect-stderr: dialog transport 762 car 0/1 -> 1, "Standard Elevator" 21 / 21, 21 portraits
+# expect-stderr: dialog transport 761 stair 0 -> 1, "Escalator" 7, 7 portraits
+pass 300
+open-dialog transport-car 0 0
+expect-dialog transport 762
+dialog-hold ti_car_6.bmp
+dialog-at 22 120
+expect-dialog person 763
+dialog-hold ti_person_from_car.bmp
+dialog-click 1
+dialog-click 1
+open-dialog transport-car 0 1
+expect-dialog transport 762
+dialog-hold ti_car_full.bmp
+dialog-click 1
+open-dialog transport-car 0 2
+expect-dialog transport 762
+dialog-hold ti_car_empty.bmp
+dialog-click 1
+open-dialog transport-stair 0
+expect-dialog transport 761
+dialog-hold ti_escalator_empty.bmp
+dialog-click 1
+open-dialog transport-stair 2
+expect-dialog transport 761
+dialog-hold ti_stairs.bmp
+dialog-click 1
+pass 980
+open-dialog transport-stair 0
+expect-dialog transport 761
+dialog-hold ti_escalator_riders.bmp
+dialog-click 1
+pass 981

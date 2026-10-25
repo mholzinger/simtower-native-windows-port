@@ -62,9 +62,25 @@
 //   the procedure's hover band through the hover_mode accessor the
 //   session passes in.
 //
+// - Facility Information (DIALOG/DTMP 748-760, TENANTINFODLOGFILTER): the
+//   chrome, preview, meters, portraits and texts of
+//   paint_original_facility_information (the session's painter), the
+//   rent / price combo, Rename and New Movie placed by the DTMP; the
+//   procedure is the shared OriginalFacilityInformationController.
+//
+// - Person Information (DIALOG/DTMP 763 / 764, PEPLEINFODLOGFILTER): the
+//   chrome, portrait, texts and meters of paint_original_person_information
+//   (the session's painter), OK and Rename placed by the DTMP; the
+//   procedure is the shared OriginalPersonInformationController.
+//
+// - Transport Information (DIALOG/DTMP 761 / 762, ELVINFODLOGFILTER and
+//   ESCINFODLOGFILTER): the chrome, the two text lines and the portrait
+//   strip of paint_original_transport_information (the session's
+//   painter), OK placed by the DTMP; the procedure is the shared
+//   OriginalTransportInformationController.
+//
 // Deferred (they keep their logged or auto-answered SDL behavior for a
-// later step): facility and person information, transport information
-// (elevator/escalator magnifier), the Command selector's own window chrome,
+// later step): the Command selector's own window chrome,
 // the startup (New/Load) dialog and the splash. Each becomes another
 // descriptor.
 
@@ -72,6 +88,7 @@
 
 #include "original_dialog_controllers.hpp"
 #include "original_dialog_model.hpp"
+#include "original_dtmp.hpp"
 #include "original_finance.hpp"
 #include "original_find.hpp"
 #include "original_resources.hpp"
@@ -148,6 +165,31 @@ inline constexpr int kCaptionFrameHeight = 18;
 [[nodiscard]] DialogWindow make_elevator_popup_dialog(
     const OriginalResources& resources, int x, int y,
     std::function<std::int16_t()> hover_mode);
+
+// An Information dialog (DIALOG/DTMP dialog_id), named
+// information_dialog_label(kind, dialog_id): no caption (style
+// 0x92000040), the DTMP-sized client, statics (and the Facility combo) in
+// the template's 10-point font (13 pixels) on the 0xCCCCCC
+// WM_CTLCOLORSTATIC brush, the combo's own edit / list in COLOR_WINDOW
+// white (as on Win32); client paints the whole client (the session's
+// paint_original_facility / person / transport_information over its
+// controller); dtmp is the controller's already parsed DTMP/dialog_id. Esc
+// sends IDCANCEL, which none of the procedures handles.
+// - facility (748-760, TENANTINFODLOGFILTER) and transport (elevator type
+//   0 (express) -> 761, every other type -> 762, stairs / escalator 761;
+//   ELVINFODLOGFILTER / ESCINFODLOGFILTER): presses on no control reach
+//   the procedure as WM_LBUTTONDOWN, moves as WM_MOUSEMOVE.
+// - person (763 / 764, PEPLEINFODLOGFILTER) handles no mouse or key
+//   message: presses on no control and moves reach nothing. TEMP: its
+//   SetCapture(dialog) (1100:0145) is not reproduced, the children take
+//   clicks (the open question of Rename Person 730, make_rename_dialog in
+//   the .cpp).
+[[nodiscard]] DialogWindow make_information_dialog(
+    const OriginalResources& resources,
+    InformationDialogKind kind,
+    std::uint16_t dialog_id,
+    const OriginalDtmp& dtmp,
+    DialogDescriptor::Painter client);
 
 // paint_state() != 0 draws the OK surface pressed (BITMAP/501).
 [[nodiscard]] DialogWindow make_finance_dialog(

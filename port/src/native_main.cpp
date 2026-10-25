@@ -12,16 +12,20 @@
 #include "original_dtmp_runtime_win32.hpp"
 #include "original_elevator_control.hpp"
 #include "original_elevator_control_controller.hpp"
+#include "original_facility_information_controller.hpp"
 #include "original_finance.hpp"
 #include "original_find.hpp"
 #include "original_font_win32.hpp"
 #include "original_idle_pass.hpp"
 #include "original_info_win32.hpp"
+#include "original_information_paint.hpp"
 #include "original_information_win32.hpp"
 #include "original_main_command.hpp"
 #include "original_map.hpp"
 #include "original_palette_frame_win32.hpp"
 #include "original_people.hpp"
+#include "original_person_information_controller.hpp"
+#include "original_transport_information_controller.hpp"
 #include "original_resources.hpp"
 #include "original_simulation.hpp"
 #include "original_startup.hpp"
@@ -2442,19 +2446,10 @@ int run_original_startup_dialog() {
 
 struct OriginalEventDialogContext {
   simtower::OriginalDtmp dtmp{};
-  struct TextOverlay {
-    std::size_t rectangle_index{};
-    std::string text{};
-  };
-  std::array<TextOverlay, 2> text_overlays{};
-  std::size_t text_overlay_count{};
-  std::vector<simtower::OriginalFacilityPersonSprite> person_sprites{};
-  std::optional<simtower::OriginalMagnifierTarget> transport_target{};
   std::int32_t argument{};
   bool use_ahotta_filter{};
   bool timer_fired{};
-  // From OriginalEventDialogModel for the event dialogs; the transport
-  // filters only read static_background_rgb (the same gray_cc).
+  // From OriginalEventDialogModel.
   std::uint16_t timer_id{simtower::kOriginalEventDialogTimerId};
   std::uint32_t timer_ms{simtower::kOriginalEventDialogTimerMs};
   std::int16_t ctlcolor_font_pixels{
@@ -2498,9 +2493,23 @@ std::string original_wide_to_cp1252(std::wstring_view text) {
   return result;
 }
 
-void paint_original_information_text(HDC dc,
-                                     const OriginalEventDialogContext& context) {
-  if (context.text_overlay_count == 0U) return;
+// The DWLP_USER context of ELVINFODLOGFILTER / ESCINFODLOGFILTER: the
+// shared controller (its text, strip and DTMP are what the painter reads)
+// and the GDI objects the procedure owns.
+struct OriginalTransportDialogContext {
+  simtower::OriginalTransportInformationController controller;
+  HBRUSH static_background{};
+  HFONT control_font{};
+};
+
+// 1100:1b53 / 1cbb's two lines: STRL/400 at DTMP rectangle 3 and the
+// count at rectangle 6, each + (8, 1) (11e0:008d, 1208:0cf5).
+void paint_original_information_text(
+    HDC dc, const OriginalTransportDialogContext& context) {
+  const auto& text = context.controller.text();
+  const auto& dtmp = context.controller.dtmp();
+  const std::array<std::pair<std::size_t, const std::string*>, 2>
+      text_overlays{{{2U, &text.primary}, {5U, &text.secondary}}};
   HFONT temporary_font = nullptr;
   HFONT font = context.control_font;
   if (!font) {
@@ -2513,11 +2522,10 @@ void paint_original_information_text(HDC dc,
   HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
   const auto old_align = SetTextAlign(dc, TA_UPDATECP);
   const auto old_background = SetBkMode(dc, TRANSPARENT);
-  for (std::size_t index = 0U; index < context.text_overlay_count; ++index) {
-    const auto& overlay = context.text_overlays[index];
-    if (overlay.rectangle_index >= context.dtmp.rectangles.size()) continue;
-    const auto& rectangle = context.dtmp.rectangles[overlay.rectangle_index];
-    const auto wide = original_cp1252_to_wide(overlay.text);
+  for (const auto& [rectangle_index, overlay_text] : text_overlays) {
+    if (rectangle_index >= dtmp.rectangles.size()) continue;
+    const auto& rectangle = dtmp.rectangles[rectangle_index];
+    const auto wide = original_cp1252_to_wide(*overlay_text);
     const auto origin = simtower::original_relative_gdi_position(
         static_cast<std::int16_t>(rectangle.left),
         static_cast<std::int16_t>(rectangle.top), 8, 1);
@@ -2535,8 +2543,8 @@ void paint_original_information_text(HDC dc,
 }
 
 void paint_original_information_sprites(
-    HDC dc, const OriginalEventDialogContext& context) {
-  for (const auto& sprite : context.person_sprites) {
+    HDC dc, const OriginalTransportDialogContext& context) {
+  for (const auto& sprite : context.controller.text().person_sprites) {
     simtower::draw_original_dib_region_scaled(
         dc, g_resources.find("BITMAP", sprite.bitmap_id),
         sprite.destination_x, sprite.destination_y,
@@ -2571,9 +2579,42 @@ void close_original_event_dialog(
   }
 }
 
-// Native translation of exported AHOTTADLOGFILTER at 1068:00a1. The same
-// painter is also reused for the simpler transport-information boundaries;
-// those contexts deliberately leave use_ahotta_filter false.
+// WM_CTLCOLORSTATIC of AHOTTADLOGFILTER and the transport-information
+// filters: the 13-pixel font, TRANSPARENT, the realized palette, then the
+// gray_cc static brush (created once, nearest palette colour) returned.
+HBRUSH original_gray_static_brush(HDC dc, HFONT font, HBRUSH& brush,
+                                  std::uint32_t rgb) {
+  const auto background = simtower::original_facility_control_background(true);
+  if (font) SelectObject(dc, font);
+  SetBkMode(dc, TRANSPARENT);
+  if (g_logical_palette) {
+    SelectPalette(dc, g_logical_palette, FALSE);
+    RealizePalette(dc);
+  }
+  if (background == simtower::OriginalFacilityControlBackground::gray_cc &&
+      !brush) {
+    COLORREF color = simtower::original_rgb_to_colorref(rgb);
+    if (g_logical_palette) {
+      color = PALETTEINDEX(GetNearestPaletteIndex(g_logical_palette, color));
+    }
+    brush = CreateSolidBrush(color);
+  }
+  return brush;
+}
+
+// WM_LBUTTONDOWN / WM_MOUSEMOVE as a controller signal: the client point
+// from LOWORD / HIWORD of lParam.
+simtower::OriginalDialogSignal original_pointer_signal(
+    simtower::OriginalDialogSignal::Kind kind, LPARAM lparam) {
+  simtower::OriginalDialogSignal signal{kind};
+  signal.x = static_cast<std::int16_t>(LOWORD(lparam));
+  signal.y = static_cast<std::int16_t>(HIWORD(lparam));
+  return signal;
+}
+
+// Native translation of exported AHOTTADLOGFILTER at 1068:00a1. The
+// transport-information filters have their own procedure
+// (transport_information_dialog_proc).
 INT_PTR CALLBACK event_dialog_proc(HWND dialog, UINT message,
                                    WPARAM wparam, LPARAM lparam) {
   if (message == WM_INITDIALOG) {
@@ -2591,27 +2632,14 @@ INT_PTR CALLBACK event_dialog_proc(HWND dialog, UINT message,
       context->control_font =
           make_original_dialog_font(context->ctlcolor_font_pixels);
       SetTimer(dialog, context->timer_id, context->timer_ms, nullptr);
-    } else if (context->transport_target) {
-      // ELVINFODLOGFILTER 1100:0faf and ESCINFODLOGFILTER 1100:12e7
-      // select the shared 13-pixel Arial font for their painted text and
-      // static controls.
-      context->control_font = make_original_dialog_font(13);
     }
     position_original_dialog(dialog);
     HDC dc = GetDC(dialog);
     if (dc) {
-      if (context->transport_target && g_logical_palette) {
-        // 1100:0f85-0f97 / 12bd-12cf realize the active CLUT before the
-        // first resource-backed information presentation.
-        SelectPalette(dc, g_logical_palette, FALSE);
-        RealizePalette(dc);
-      }
       SetTextAlign(dc, TA_UPDATECP);
       SetBkMode(dc, TRANSPARENT);
       simtower::paint_original_dialog_chrome(dialog, dc, context->dtmp);
       simtower::render_original_dtmp(dialog, dc, context->dtmp, g_resources);
-      paint_original_information_text(dc, *context);
-      paint_original_information_sprites(dc, *context);
       ReleaseDC(dialog, dc);
     }
     const auto focus_plan =
@@ -2629,60 +2657,20 @@ INT_PTR CALLBACK event_dialog_proc(HWND dialog, UINT message,
       PAINTSTRUCT paint{};
       HDC dc = BeginPaint(dialog, &paint);
       if (dc && context) {
-        if (context->transport_target && g_logical_palette) {
-          // Exact paint-time palette realization at 1100:10aa-10bc and
-          // 1100:1483-1495.
-          SelectPalette(dc, g_logical_palette, FALSE);
-          RealizePalette(dc);
-        }
         SetTextAlign(dc, TA_UPDATECP);
         SetBkMode(dc, TRANSPARENT);
         simtower::paint_original_dialog_chrome(dialog, dc, context->dtmp);
-        paint_original_information_text(dc, *context);
-        paint_original_information_sprites(dc, *context);
       }
       EndPaint(dialog, &paint);
       return TRUE;
     }
     case WM_ACTIVATE:
-      if (context && context->transport_target) {
-        const auto plan = simtower::original_information_activation_plan(
-            LOWORD(wparam) != WA_INACTIVE,
-            g_original_active_modal_window != nullptr,
-            g_original_active_modal_window == dialog);
-        if (plan.activate_nested_modal) {
-          // 1100:1053-106e / 138b-13a6 keep a nested information dialog as
-          // the active modal target instead of allowing its parent to steal
-          // activation.
-          SetActiveWindow(g_original_active_modal_window);
-        }
-        return plan.consume ? TRUE : FALSE;
-      }
       return FALSE;
     case WM_CTLCOLORSTATIC:
-      if (context &&
-          (context->use_ahotta_filter || context->transport_target)) {
-        const auto background =
-            simtower::original_facility_control_background(true);
-        HDC dc = reinterpret_cast<HDC>(wparam);
-        if (context->control_font) SelectObject(dc, context->control_font);
-        SetBkMode(dc, TRANSPARENT);
-        if (g_logical_palette) {
-          SelectPalette(dc, g_logical_palette, FALSE);
-          RealizePalette(dc);
-        }
-        if (background ==
-                simtower::OriginalFacilityControlBackground::gray_cc &&
-            !context->static_background) {
-          COLORREF color = simtower::original_rgb_to_colorref(
-              context->static_background_rgb);
-          if (g_logical_palette) {
-            color = PALETTEINDEX(GetNearestPaletteIndex(g_logical_palette,
-                                                       color));
-          }
-          context->static_background = CreateSolidBrush(color);
-        }
-        return reinterpret_cast<INT_PTR>(context->static_background);
+      if (context && context->use_ahotta_filter) {
+        return reinterpret_cast<INT_PTR>(original_gray_static_brush(
+            reinterpret_cast<HDC>(wparam), context->control_font,
+            context->static_background, context->static_background_rgb));
       }
       return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
     case WM_CTLCOLORBTN:
@@ -2693,69 +2681,6 @@ INT_PTR CALLBACK event_dialog_proc(HWND dialog, UINT message,
       // Win16 WM_CTLCOLOR subtype six is static; every other subtype returns
       // stock object 5 (NULL_BRUSH) without changing the background mode.
       return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
-    case WM_LBUTTONDOWN:
-      if (context && context->transport_target) {
-        const auto click_plan =
-            simtower::original_transport_information_click_plan(
-                context->transport_target->kind);
-        if (!click_plan.consume) break;
-
-        HDC dc = GetDC(dialog);
-        if (dc && g_logical_palette) {
-          if (click_plan.select_palette) {
-            SelectPalette(dc, g_logical_palette, FALSE);
-          }
-          if (click_plan.realize_palette) RealizePalette(dc);
-        }
-
-        std::optional<std::size_t> person{};
-        if (g_tower_document) {
-          person = simtower::original_information_person_sprite_hit(
-              context->person_sprites,
-              static_cast<std::int16_t>(LOWORD(lparam)),
-              static_cast<std::int16_t>(HIWORD(lparam)));
-        }
-        if (person) {
-          bool changed = false;
-          (void)run_original_person_information_dialog(
-              dialog, *person, &changed,
-              simtower::OriginalPersonInformationContext::transport_dialog);
-          const auto refreshed =
-              simtower::original_transport_information_text(
-                  g_resources, *g_tower_document,
-                  *context->transport_target);
-          context->text_overlays[0].text = refreshed.primary;
-          context->text_overlays[1].text = refreshed.secondary;
-          context->person_sprites = refreshed.person_sprites;
-          InvalidateRect(dialog, nullptr, FALSE);
-          UpdateWindow(dialog);
-        }
-        if (dc) ReleaseDC(dialog, dc);
-
-        // Both original filters perform these restorations after every click,
-        // including empty panel space (1100:118e-11a8 / 145a-14e9).
-        if (click_plan.restore_topmost) {
-          SetWindowPos(dialog, HWND_TOPMOST, 0, 0, 0, 0,
-                       SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW);
-        }
-        if (click_plan.restore_modal_target) {
-          g_original_active_modal_window = dialog;
-        }
-        return TRUE;
-      }
-      break;
-    case WM_MOUSEMOVE:
-      if (context && context->transport_target) {
-        // Exact 1100:5043 information-panel cursor selection.
-        const bool portrait_panel =
-            simtower::original_information_portrait_panel_hit(
-                context->dtmp,
-                static_cast<std::int16_t>(LOWORD(lparam)),
-                static_cast<std::int16_t>(HIWORD(lparam)));
-        SetCursor(resolve_original_cursor(portrait_panel ? 1003U : 0U));
-        return TRUE;
-      }
-      break;
     case WM_TIMER:
       if (context && context->use_ahotta_filter) {
         // 1068:0380 kills the identifier supplied by WM_TIMER rather than
@@ -2771,14 +2696,6 @@ INT_PTR CALLBACK event_dialog_proc(HWND dialog, UINT message,
         const auto command = static_cast<std::uint16_t>(LOWORD(wparam));
         if (command == 1U || command == 2U) {
           close_original_event_dialog(dialog, *context, command);
-          return TRUE;
-        }
-      } else {
-        // ELVINFODLOGFILTER 1100:1113 and ESCINFODLOGFILTER 1100:13d5
-        // recognize only the IDOK command and always return dialog result 1.
-        if (LOWORD(wparam) == 1U) {
-          g_original_active_modal_window = nullptr;
-          EndDialog(dialog, 1);
           return TRUE;
         }
       }
@@ -2969,6 +2886,8 @@ class Win32DialogOps final : public simtower::OriginalDialogOps {
  private:
   // The child's window class decides LB_* vs CB_*; a missing child or any
   // other class keeps LB_*, the message set the adapter always sent.
+  // Facility Information's rent combo 13 relies on it (CB_* in DIALOG
+  // 748-753; dialog_template_parity_tests asserts the class under Wine).
   [[nodiscard]] bool is_combo_box(std::uint16_t id) const {
     std::array<wchar_t, 16> name{};
     const HWND child = GetDlgItem(dialog_, id);
@@ -3422,13 +3341,11 @@ void open_original_elevator_control(std::size_t elevator_index,
   g_elevator_control_window = dialog;
 }
 
+// The DWLP_USER context of PEPLEINFODLOGFILTER: the shared controller (its
+// information and DTMP are what the painter reads) and the GDI objects the
+// procedure owns.
 struct OriginalPersonDialogContext {
-  simtower::OriginalDtmp dtmp{};
-  std::size_t person_index{};
-  simtower::OriginalPersonInformationContext source_context{
-      simtower::OriginalPersonInformationContext::main_world};
-  simtower::OriginalPersonInformation information{};
-  bool changed{};
+  simtower::OriginalPersonInformationController controller;
   HBRUSH control_background{};
   HFONT control_font{};
 };
@@ -3443,11 +3360,11 @@ struct OriginalPersonRenameDialogContext {
 const simtower::OriginalDtmpRect* original_person_rectangle(
     const OriginalPersonDialogContext& context,
     std::size_t one_based_index) {
-  if (one_based_index == 0U ||
-      one_based_index > context.dtmp.rectangles.size()) {
+  const auto& dtmp = context.controller.dtmp();
+  if (one_based_index == 0U || one_based_index > dtmp.rectangles.size()) {
     return nullptr;
   }
-  return &context.dtmp.rectangles[one_based_index - 1U];
+  return &dtmp.rectangles[one_based_index - 1U];
 }
 
 void paint_original_person_text(HDC dc,
@@ -3524,28 +3441,30 @@ void paint_original_person_meter(
 void paint_original_person_dialog(HWND dialog,
                                   HDC dc,
                                   const OriginalPersonDialogContext& context) {
-  simtower::paint_original_dialog_chrome(dialog, dc, context.dtmp);
-  if (!context.information.valid) return;
+  simtower::paint_original_dialog_chrome(dialog, dc,
+                                         context.controller.dtmp());
+  const auto& information = context.controller.information();
+  if (!information.valid) return;
 
   const auto* portrait = original_person_rectangle(context, 2U);
   if (portrait && portrait->left != 0 && portrait->bottom != 0 &&
-      context.information.portrait_frame >= 0) {
+      information.portrait_frame >= 0) {
     int bitmap_id = 700;
-    if (context.information.portrait_variant ==
+    if (information.portrait_variant ==
         simtower::OriginalPersonPortraitVariant::named) {
       bitmap_id = 702;
-    } else if (context.information.portrait_variant ==
+    } else if (information.portrait_variant ==
                simtower::OriginalPersonPortraitVariant::vip) {
       bitmap_id = 703;
     }
-    const int source_width = context.information.portrait_frame >= 6 ? 16 : 8;
+    const int source_width = information.portrait_frame >= 6 ? 16 : 8;
     int destination_x = static_cast<int>(portrait->left) + 20;
     if (source_width == 16) destination_x -= 8;
     simtower::draw_original_dib_region_scaled(
         dc, g_resources.find("BITMAP", bitmap_id),
         destination_x, static_cast<int>(portrait->top) + 2,
         source_width * 2, 47,
-        context.information.portrait_frame * 8, 0,
+        information.portrait_frame * 8, 0,
         source_width, 24);
   }
 
@@ -3560,13 +3479,13 @@ void paint_original_person_dialog(HWND dialog,
   HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
   paint_original_person_text(
       dc, original_person_rectangle(context, 3U), 4, 4,
-      context.information.display_name);
+      information.display_name);
   paint_original_person_text(
       dc, original_person_rectangle(context, 5U), 4, 3,
-      context.information.origin_text);
+      information.origin_text);
   paint_original_person_text(
       dc, original_person_rectangle(context, 7U), 4, 3,
-      context.information.activity_text);
+      information.activity_text);
   if (font) {
     SelectObject(dc, old_font);
   }
@@ -3575,10 +3494,10 @@ void paint_original_person_dialog(HWND dialog,
 
   paint_original_person_meter(
       dc, original_person_rectangle(context, 6U),
-      context.information.evaluation, true, true);
+      information.evaluation, true, true);
   paint_original_person_meter(
       dc, original_person_rectangle(context, 8U),
-      context.information.stress, false, false);
+      information.stress, false, false);
 }
 
 void paint_original_rename_dialog(HWND dialog,
@@ -3777,6 +3696,53 @@ bool run_original_person_rename_dialog(std::size_t person_index) {
   return context.changed;
 }
 
+// What the three Information dialogs' Win32 hosts share
+// (OriginalInformationHostBase) over the native globals: the document, its
+// tables, the resources, the dirty flag with the title, and SetCursor.
+template <class Interface>
+class Win32InformationHost : public Interface {
+ public:
+  explicit Win32InformationHost(HWND dialog) : dialog_(dialog) {}
+  simtower::OriginalTdtDocument* document() override {
+    return g_tower_document ? &*g_tower_document : nullptr;
+  }
+  const simtower::OriginalPartTable& part() override { return g_part; }
+  const simtower::OriginalResources& resources() override {
+    return g_resources;
+  }
+  void mark_document_dirty() override {
+    g_tower_dirty = true;
+    update_original_tower_title(g_main_window);
+  }
+  void set_cursor(std::uint16_t cursor_id) override {
+    SetCursor(resolve_original_cursor(cursor_id));
+  }
+
+ protected:
+  HWND dialog_{};
+};
+
+// The Win32 host of the shared PEPLEINFODLOGFILTER controller: the calls
+// the procedure's Rename branch made inline before it shared the
+// controller.
+class Win32PersonInformationHost final
+    : public Win32InformationHost<simtower::OriginalPersonInformationHost> {
+ public:
+  using Win32InformationHost::Win32InformationHost;
+  bool rename_person(std::size_t person_index) override {
+    // 1100:032e clears DS:31a4 while Rename Person owns the modal slot,
+    // then 0344 republishes the Person panel after the child returns.
+    g_original_active_modal_window = nullptr;
+    const bool renamed = run_original_person_rename_dialog(person_index);
+    g_original_active_modal_window = dialog_;
+    // 1100:0344-0359 always restores the Person panel as a visible
+    // topmost window after the nested Rename dialog returns.
+    SetWindowPos(dialog_, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW);
+    return renamed;
+  }
+};
+
 // Native message boundary for PEPLEINFODLOGFILTER at 1100:0116.
 INT_PTR CALLBACK person_information_dialog_proc(HWND dialog, UINT message,
                                                 WPARAM wparam,
@@ -3788,11 +3754,10 @@ INT_PTR CALLBACK person_information_dialog_proc(HWND dialog, UINT message,
     const auto capture_plan =
         simtower::original_person_information_capture_plan();
     if (capture_plan.capture_on_initialization) SetCapture(dialog);
-    simtower::configure_original_dtmp_window(dialog, context->dtmp,
-                                             g_resources,
-                                             g_logical_palette);
-    simtower::render_original_dtmp(dialog, nullptr, context->dtmp,
-                                   g_resources);
+    simtower::configure_original_dtmp_window(
+        dialog, context->controller.dtmp(), g_resources, g_logical_palette);
+    simtower::render_original_dtmp(dialog, nullptr,
+                                   context->controller.dtmp(), g_resources);
     // PEPLEINFODLOGFILTER 1100:0168-017b clears Win16 GCL_HCURSOR and then
     // selects the stock arrow as the current pointer.
     SetClassLongPtrW(dialog, GCLP_HCURSOR, 0);
@@ -3809,12 +3774,8 @@ INT_PTR CALLBACK person_information_dialog_proc(HWND dialog, UINT message,
       paint_original_person_dialog(dialog, dc, *context);
       ReleaseDC(dialog, dc);
     }
-    const auto focus_plan =
-        simtower::original_painted_dialog_initialization_focus_plan();
-    if (focus_plan.set_explicit_focus) {
-      SetFocus(GetDlgItem(dialog, 1));
-    }
-    return focus_plan.consume ? TRUE : FALSE;
+    Win32DialogOps ops(dialog);
+    return context->controller.initial_focus(ops) ? TRUE : FALSE;
   }
 
   auto* context = reinterpret_cast<OriginalPersonDialogContext*>(
@@ -3879,42 +3840,31 @@ INT_PTR CALLBACK person_information_dialog_proc(HWND dialog, UINT message,
       }
       return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
     }
-    case WM_COMMAND:
+    case WM_COMMAND: {
       if (!context) break;
-      if (LOWORD(wparam) == 1U) {
+      // PEPLEINFODLOGFILTER 1100:02fe-0387: 1 closes, 4 renames (with a
+      // tower), anything else is not handled.
+      Win32DialogOps ops(dialog);
+      Win32PersonInformationHost host(dialog);
+      bool handled = false;
+      const auto outcome = context->controller.signal(
+          simtower::OriginalDialogSignal{
+              simtower::OriginalDialogSignal::Kind::command,
+              static_cast<std::uint16_t>(LOWORD(wparam)),
+              static_cast<std::uint16_t>(HIWORD(wparam))},
+          ops, host, &handled);
+      if (outcome.result) {
         g_original_active_modal_window = nullptr;
         if (simtower::original_person_information_capture_plan()
                 .release_before_close &&
             GetCapture() == dialog) {
           ReleaseCapture();
         }
-        EndDialog(dialog, 1);
-        return TRUE;
+        EndDialog(dialog, *outcome.result);
       }
-      if (LOWORD(wparam) == 4U && g_tower_document) {
-        // 1100:032e clears DS:31a4 while Rename Person owns the modal slot,
-        // then 0344 republishes the Person panel after the child returns.
-        g_original_active_modal_window = nullptr;
-        const bool renamed = run_original_person_rename_dialog(
-            context->person_index);
-        g_original_active_modal_window = dialog;
-        // 1100:0344-0359 always restores the Person panel as a visible
-        // topmost window after the nested Rename dialog returns.
-        SetWindowPos(dialog, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW);
-        if (renamed) {
-          context->changed = true;
-          g_tower_dirty = true;
-          update_original_tower_title(g_main_window);
-        }
-        context->information = simtower::original_person_information(
-            g_resources, *g_tower_document, g_part,
-            context->person_index, context->source_context);
-        InvalidateRect(dialog, nullptr, FALSE);
-        UpdateWindow(dialog);
-        return TRUE;
-      }
+      if (handled) return TRUE;
       break;
+    }
   }
   return FALSE;
 }
@@ -3927,13 +3877,15 @@ int run_original_person_information_dialog(HWND owner,
   auto information = simtower::original_person_information(
       g_resources, *g_tower_document, g_part, person_index, source_context);
   if (!information.valid) return 0;
+  const auto dialog_id = information.dialog_id;
   const auto original = simtower::parse_original_dialog(
-      g_resources.find("DIALOG", information.dialog_id));
+      g_resources.find("DIALOG", dialog_id));
   const auto native = simtower::build_native_dialog_template(original);
   OriginalPersonDialogContext context{
-      simtower::parse_original_dtmp(
-          g_resources.find("DTMP", information.dialog_id)),
-      person_index, source_context, std::move(information)};
+      simtower::OriginalPersonInformationController(
+          person_index, source_context, std::move(information),
+          simtower::parse_original_dtmp(
+              g_resources.find("DTMP", dialog_id)))};
   const int result = static_cast<int>(run_original_modal_dialog(
       g_instance, reinterpret_cast<const DLGTEMPLATE*>(native.data()),
       owner, person_information_dialog_proc,
@@ -3942,21 +3894,18 @@ int run_original_person_information_dialog(HWND owner,
   // 1100:00f3-0107 rechecks 10e0:0cc9 after DialogBox returns. Only an active
   // Find marker for this same person sets DS:77c0; 1058:019f consumes it after
   // the main-world magnifier dispatch returns.
-  if (simtower::original_person_information_sets_find_exit_latch(
-          g_find_marker, person_index)) {
-    g_find_marker.phase = 1U;
-  }
-  if (changed) *changed = context.changed;
+  (void)simtower::apply_original_person_information_exit(g_find_marker,
+                                                         person_index);
+  if (changed) *changed = context.controller.changed();
   return result;
 }
 
+// The DWLP_USER context of TENANTINFODLOGFILTER: the shared controller
+// (its information and DTMP are what the painter reads) and the GDI objects
+// the procedure owns.
 struct OriginalFacilityDialogContext {
-  simtower::OriginalDtmp dtmp{};
-  std::int16_t floor{-1};
-  std::size_t tenant_index{};
-  simtower::OriginalFacilityInformation information{};
+  simtower::OriginalFacilityInformationController controller;
   simtower::OriginalWorldRaster preview_raster{};
-  bool changed{};
   HBRUSH static_background{};
   HFONT control_font{};
 };
@@ -3980,11 +3929,11 @@ struct OriginalMovieChoiceDialogContext {
 const simtower::OriginalDtmpRect* original_facility_rectangle(
     const OriginalFacilityDialogContext& context,
     std::size_t one_based_index) {
-  if (one_based_index == 0U ||
-      one_based_index > context.dtmp.rectangles.size()) {
+  const auto& dtmp = context.controller.dtmp();
+  if (one_based_index == 0U || one_based_index > dtmp.rectangles.size()) {
     return nullptr;
   }
-  return &context.dtmp.rectangles[one_based_index - 1U];
+  return &dtmp.rectangles[one_based_index - 1U];
 }
 
 void draw_original_facility_preview(
@@ -3995,31 +3944,34 @@ void draw_original_facility_preview(
   // scale-and-center geometry. Direct world rasterization replaces the
   // original temporary WinG surface and WinGStretchBlt presentation step.
   const auto* source = original_facility_rectangle(context, 2U);
-  if (!source || !context.information.preview.valid()) {
+  const auto& information = context.controller.information();
+  if (!source || !information.preview.valid()) {
     return;
   }
   const RECT container{source->left, source->top, source->right,
                        source->bottom};
   simtower::draw_original_facility_preview(
-      dc, context.preview_raster, context.information.preview, container);
+      dc, context.preview_raster, information.preview, container);
 }
 
 void paint_original_facility_dialog(
     HWND dialog,
     HDC dc,
     const OriginalFacilityDialogContext& context) {
-  simtower::paint_original_dialog_chrome(dialog, dc, context.dtmp);
-  if (!context.information.valid) return;
+  const auto& information = context.controller.information();
+  simtower::paint_original_dialog_chrome(dialog, dc,
+                                         context.controller.dtmp());
+  if (!information.valid) return;
   draw_original_facility_preview(dc, context);
 
   paint_original_person_meter(
       dc, original_facility_rectangle(context, 6U),
-      context.information.evaluation, true, true);
+      information.evaluation, true, true);
   paint_original_person_meter(
       dc, original_facility_rectangle(context, 6U),
-      context.information.commercial_meter, false, false);
+      information.commercial_meter, false, false);
 
-  for (const auto& sprite : context.information.person_sprites) {
+  for (const auto& sprite : information.person_sprites) {
     simtower::draw_original_dib_region_scaled(
         dc, g_resources.find("BITMAP", sprite.bitmap_id),
         sprite.destination_x, sprite.destination_y,
@@ -4038,40 +3990,40 @@ void paint_original_facility_dialog(
   HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
   paint_original_person_text(
       dc, original_facility_rectangle(context, 3U), 4, 4,
-      context.information.display_name);
+      information.display_name);
   paint_original_person_text(
       dc, original_facility_rectangle(context, 5U), 4, 3,
-      context.information.occupancy_text);
+      information.occupancy_text);
   paint_original_person_text(
       dc, original_facility_rectangle(context, 9U), 4, 3,
-      context.information.age_text);
+      information.age_text);
   paint_original_person_text(
       dc, original_facility_rectangle(context, 5U), 4, 3,
-      context.information.movie_length_text);
+      information.movie_length_text);
   paint_original_person_text(
       dc, original_facility_rectangle(context, 6U), 4, 3,
-      context.information.movie_title);
+      information.movie_title);
   paint_original_person_text(
       dc, original_facility_rectangle(context, 10U), 4, 3,
-      context.information.movie_income_text);
+      information.movie_income_text);
   paint_original_person_text(
       dc, original_facility_rectangle(context, 6U), 4, 3,
-      context.information.commercial_value_text);
+      information.commercial_value_text);
   paint_original_person_text(
       dc, original_facility_rectangle(context, 9U), 4, 3,
-      context.information.yesterday_profit_text);
+      information.yesterday_profit_text);
   // Exact 1108:08e4 presentation boundary: STRL/711 advisory text is emitted
   // at the 11e0:0049/1100:1760-176c item-8 base point plus DS:b3a7 * 16,
   // with the shared three-line counter already enforced by
   // build_original_facility_advisories().
   for (std::size_t line = 0U;
-       line < context.information.advisory_line_count;
+       line < information.advisory_line_count;
        ++line) {
     const auto offset =
         simtower::original_facility_advisory_text_offset(line);
     paint_original_person_text(
         dc, original_facility_rectangle(context, 8U), offset.x, offset.y,
-        context.information.advisory_lines[line]);
+        information.advisory_lines[line]);
   }
   if (font) {
     SelectObject(dc, old_font);
@@ -4342,23 +4294,35 @@ bool run_original_movie_choice_dialog(HWND owner,
   return dialog_result != 0;
 }
 
-void refresh_original_facility_dialog(
-    HWND dialog,
-    OriginalFacilityDialogContext& context) {
-  if (!g_tower_document) return;
-  context.information = simtower::original_facility_information(
-      g_resources, *g_tower_document, g_part,
-      context.floor, context.tenant_index);
-  if (context.information.rent_control_visible) {
-    SendDlgItemMessageW(
-        dialog, 13, CB_SETCURSEL,
-        context.information.selected_rent_rate, 0);
-    EnableWindow(GetDlgItem(dialog, 13),
-                 context.information.rent_control_enabled);
+// The Win32 host of the shared TENANTINFODLOGFILTER controller: each
+// call the procedure made inline before it shared the controller.
+class Win32FacilityInformationHost final
+    : public Win32InformationHost<simtower::OriginalFacilityInformationHost> {
+ public:
+  using Win32InformationHost::Win32InformationHost;
+  bool rename_tenant(std::int16_t floor, std::size_t tenant_index) override {
+    // TENANTINFODLOGFILTER 1100:0b4e clears DS:31a4 for the nested Rename
+    // Tenant modal, then republishes itself at 0b62.
+    g_original_active_modal_window = nullptr;
+    const bool renamed = run_original_tenant_rename_dialog(floor, tenant_index);
+    // 1100:0b62-0b78 restores the Facility panel after Rename, including a
+    // cancelled rename.
+    g_original_active_modal_window = dialog_;
+    SetWindowPos(dialog_, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW);
+    return renamed;
   }
-  InvalidateRect(dialog, nullptr, FALSE);
-  UpdateWindow(dialog);
-}
+  bool choose_movie(std::size_t linked_record_index) override {
+    return run_original_movie_choice_dialog(dialog_, linked_record_index);
+  }
+  bool person_information(std::size_t person_index) override {
+    bool changed = false;
+    (void)run_original_person_information_dialog(
+        dialog_, person_index, &changed,
+        simtower::OriginalPersonInformationContext::facility_dialog);
+    return changed;
+  }
+};
 
 // Native message boundary for TENANTINFODLOGFILTER at 1100:085b.
 INT_PTR CALLBACK facility_information_dialog_proc(HWND dialog, UINT message,
@@ -4369,21 +4333,12 @@ INT_PTR CALLBACK facility_information_dialog_proc(HWND dialog, UINT message,
     SetWindowLongPtrW(dialog, DWLP_USER,
                       reinterpret_cast<LONG_PTR>(context));
     simtower::configure_original_dtmp_window(
-        dialog, context->dtmp, g_resources, g_logical_palette);
+        dialog, context->controller.dtmp(), g_resources, g_logical_palette);
     simtower::render_original_dtmp(
-        dialog, nullptr, context->dtmp, g_resources);
-    if (context->information.rent_control_visible) {
-      for (const auto& choice : context->information.rent_choices) {
-        const auto wide = original_cp1252_to_wide(choice);
-        SendDlgItemMessageW(
-            dialog, 13, CB_ADDSTRING, 0,
-            reinterpret_cast<LPARAM>(wide.c_str()));
-      }
-      SendDlgItemMessageW(
-          dialog, 13, CB_SETCURSEL,
-          context->information.selected_rent_rate, 0);
-      EnableWindow(GetDlgItem(dialog, 13),
-                   context->information.rent_control_enabled);
+        dialog, nullptr, context->controller.dtmp(), g_resources);
+    {
+      Win32DialogOps ops(dialog);
+      context->controller.initialize(ops);
     }
     // TENANTINFODLOGFILTER 1100:08bd-08d0 clears Win16 GCL_HCURSOR and
     // selects the stock arrow as the current pointer.
@@ -4407,12 +4362,8 @@ INT_PTR CALLBACK facility_information_dialog_proc(HWND dialog, UINT message,
       paint_original_facility_dialog(dialog, dc, *context);
       ReleaseDC(dialog, dc);
     }
-    const auto focus_plan =
-        simtower::original_painted_dialog_initialization_focus_plan();
-    if (focus_plan.set_explicit_focus) {
-      SetFocus(GetDlgItem(dialog, 1));
-    }
-    return focus_plan.consume ? TRUE : FALSE;
+    Win32DialogOps ops(dialog);
+    return context->controller.initial_focus(ops) ? TRUE : FALSE;
   }
 
   auto* context = reinterpret_cast<OriginalFacilityDialogContext*>(
@@ -4453,21 +4404,14 @@ INT_PTR CALLBACK facility_information_dialog_proc(HWND dialog, UINT message,
           }
           if (click_plan.realize_palette) RealizePalette(dc);
         }
-
-        std::optional<std::size_t> person{};
-        if (g_tower_document) {
-          person = simtower::original_information_person_sprite_hit(
-              context->information.person_sprites,
-              static_cast<std::int16_t>(LOWORD(lparam)),
-              static_cast<std::int16_t>(HIWORD(lparam)));
-        }
-        if (person) {
-          bool changed = false;
-          (void)run_original_person_information_dialog(
-              dialog, *person, &changed,
-              simtower::OriginalPersonInformationContext::facility_dialog);
-          context->changed = context->changed || changed;
-          refresh_original_facility_dialog(dialog, *context);
+        {
+          // The portrait hit, Person Information and the refresh.
+          Win32DialogOps ops(dialog);
+          Win32FacilityInformationHost host(dialog);
+          (void)context->controller.signal(
+              original_pointer_signal(
+                  simtower::OriginalDialogSignal::Kind::button_down, lparam),
+              ops, host);
         }
         if (dc) ReleaseDC(dialog, dc);
 
@@ -4485,17 +4429,12 @@ INT_PTR CALLBACK facility_information_dialog_proc(HWND dialog, UINT message,
       break;
     case WM_MOUSEMOVE:
       if (context) {
-        // TENANTINFODLOGFILTER uses 1100:5043 (items 4/9) only for dialog
-        // groups 9..11; every other group uses 1100:4fba (item 4 only).
-        const bool include_item_9 =
-            context->information.dialog_group >= 9U &&
-            context->information.dialog_group <= 11U;
-        const bool portrait_panel =
-            simtower::original_information_portrait_panel_hit(
-                context->dtmp,
-                static_cast<std::int16_t>(LOWORD(lparam)),
-                static_cast<std::int16_t>(HIWORD(lparam)), include_item_9);
-        SetCursor(resolve_original_cursor(portrait_panel ? 1003U : 0U));
+        Win32DialogOps ops(dialog);
+        Win32FacilityInformationHost host(dialog);
+        (void)context->controller.signal(
+            original_pointer_signal(
+                simtower::OriginalDialogSignal::Kind::mouse_move, lparam),
+            ops, host);
         return TRUE;
       }
       break;
@@ -4524,69 +4463,22 @@ INT_PTR CALLBACK facility_information_dialog_proc(HWND dialog, UINT message,
       return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
     case WM_COMMAND:
       if (context) {
-        using CommandAction =
-            simtower::OriginalFacilityInformationCommandAction;
-        const auto command =
-            simtower::original_facility_information_command_plan(
+        // TENANTINFODLOGFILTER 1100:0b11-0d57 consumes every WM_COMMAND
+        // (original_facility_information_command_plan's consume).
+        Win32DialogOps ops(dialog);
+        Win32FacilityInformationHost host(dialog);
+        bool handled = false;
+        const auto outcome = context->controller.signal(
+            simtower::OriginalDialogSignal{
+                simtower::OriginalDialogSignal::Kind::command,
                 static_cast<std::uint16_t>(LOWORD(wparam)),
-                static_cast<std::uint16_t>(HIWORD(wparam)),
-                context->information.dialog_group);
-        switch (command.action) {
-          case CommandAction::close:
-            g_original_active_modal_window = nullptr;
-            EndDialog(dialog, 1);
-            return TRUE;
-          case CommandAction::rename:
-            if (g_tower_document) {
-              // TENANTINFODLOGFILTER 1100:0b4e clears DS:31a4 for the nested
-              // Rename Tenant modal, then republishes itself at 0b62.
-              g_original_active_modal_window = nullptr;
-              const bool renamed = run_original_tenant_rename_dialog(
-                  context->floor, context->tenant_index);
-              // 1100:0b62-0b78 restores the Facility panel after Rename,
-              // including a cancelled rename.
-              g_original_active_modal_window = dialog;
-              SetWindowPos(dialog, HWND_TOPMOST, 0, 0, 0, 0,
-                           SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW);
-              if (renamed) {
-                context->changed = true;
-                g_tower_dirty = true;
-                update_original_tower_title(g_main_window);
-              }
-              refresh_original_facility_dialog(dialog, *context);
-            }
-            return command.consume ? TRUE : FALSE;
-          case CommandAction::change_rent:
-            if (g_tower_document) {
-              const auto selection = SendDlgItemMessageW(
-                  dialog, 13, CB_GETCURSEL, 0, 0);
-              if (selection >= 0 && selection <= 3 &&
-                  simtower::set_original_facility_rent_rate(
-                      *g_tower_document, g_part,
-                      context->floor, context->tenant_index,
-                      static_cast<std::uint8_t>(selection))) {
-                context->changed = true;
-                g_tower_dirty = true;
-                update_original_tower_title(g_main_window);
-                refresh_original_facility_dialog(dialog, *context);
-              }
-            }
-            return command.consume ? TRUE : FALSE;
-          case CommandAction::choose_movie:
-            if (g_tower_document &&
-                context->information.linked_record_index !=
-                    simtower::OriginalMagnifierTarget::kNoIndex &&
-                run_original_movie_choice_dialog(
-                    dialog, context->information.linked_record_index)) {
-              context->changed = true;
-              g_tower_dirty = true;
-              update_original_tower_title(g_main_window);
-              refresh_original_facility_dialog(dialog, *context);
-            }
-            return command.consume ? TRUE : FALSE;
-          case CommandAction::none:
-            return command.consume ? TRUE : FALSE;
+                static_cast<std::uint16_t>(HIWORD(wparam))},
+            ops, host, &handled);
+        if (outcome.result) {
+          g_original_active_modal_window = nullptr;
+          EndDialog(dialog, *outcome.result);
         }
+        if (handled) return TRUE;
       }
       break;
   }
@@ -4605,33 +4497,21 @@ int run_original_facility_information_dialog(
   const auto original = simtower::parse_original_dialog(
       g_resources.find("DIALOG", information.dialog_id));
   const auto native = simtower::build_native_dialog_template(original);
-  OriginalFacilityDialogContext context{
-      simtower::parse_original_dtmp(
-          g_resources.find("DTMP", information.dialog_id)),
-      floor, tenant_index, std::move(information)};
-  const auto& preview = context.information.preview;
-  if (preview.valid()) {
-    RECT main_client{};
-    if (g_main_window) GetClientRect(g_main_window, &main_client);
-    const auto visible_cells = static_cast<std::int16_t>(
-        (std::max(0L, main_client.right) + 7L) / 8L + 1L);
-    const auto visible_floors = static_cast<std::int16_t>(
-        (std::max(0L, main_client.bottom - main_client.top) + 35L) / 36L +
-        1L);
-    const auto backing =
-        simtower::original_facility_preview_backing_counts(
-            *g_tower_document, floor, tenant_index,
-            visible_cells, visible_floors);
-    context.preview_raster = simtower::render_original_world(
-        g_resources, &*g_tower_document,
-        preview.view_x, preview.view_y,
-        std::max(preview.width,
-                 static_cast<int>(backing.visible_cells) * 8),
-        std::max(preview.height,
-                 static_cast<int>(backing.visible_floors) * 36),
-        std::span<const simtower::OriginalElevatorTransferVisual>{},
-        g_palette_runtime.initialized ? &g_palette_runtime.colors : nullptr);
+  auto dtmp = simtower::parse_original_dtmp(
+      g_resources.find("DTMP", information.dialog_id));
+  RECT main_client{};
+  if (information.preview.valid() && g_main_window) {
+    GetClientRect(g_main_window, &main_client);
   }
+  auto preview_raster = simtower::render_original_facility_preview(
+      g_resources, *g_tower_document, information,
+      static_cast<int>(main_client.right),
+      static_cast<int>(main_client.bottom - main_client.top),
+      g_palette_runtime.initialized ? &g_palette_runtime.colors : nullptr);
+  OriginalFacilityDialogContext context{
+      simtower::OriginalFacilityInformationController(
+          floor, tenant_index, std::move(information), std::move(dtmp)),
+      std::move(preview_raster)};
   if (const auto resource = simtower::select_original_facility_sound(
           *g_tower_document, g_audio && g_audio->sound_enabled(),
           floor, tenant_index);
@@ -4643,7 +4523,7 @@ int run_original_facility_information_dialog(
       owner, facility_information_dialog_proc,
       reinterpret_cast<LPARAM>(&context)));
   release_native_dialog_brush(context.static_background);
-  if (changed) *changed = context.changed;
+  if (changed) *changed = context.controller.changed();
   return result;
 }
 
@@ -5292,31 +5172,215 @@ int run_original_about_dialog() {
   return result;
 }
 
+// The Win32 host of the shared transport-information controller: each
+// call the procedure made inline before it shared the controller.
+class Win32TransportInformationHost final
+    : public Win32InformationHost<simtower::OriginalTransportInformationHost> {
+ public:
+  using Win32InformationHost::Win32InformationHost;
+  bool person_information(std::size_t person_index) override {
+    bool changed = false;
+    (void)run_original_person_information_dialog(
+        dialog_, person_index, &changed,
+        simtower::OriginalPersonInformationContext::transport_dialog);
+    return changed;
+  }
+};
+
+// Native message boundaries for ELVINFODLOGFILTER at 1100:0f10 and
+// ESCINFODLOGFILTER at 1100:1248 (one procedure; the click plan tells the
+// two apart).
+INT_PTR CALLBACK transport_information_dialog_proc(HWND dialog,
+                                                   UINT message,
+                                                   WPARAM wparam,
+                                                   LPARAM lparam) {
+  if (message == WM_INITDIALOG) {
+    auto* context = reinterpret_cast<OriginalTransportDialogContext*>(lparam);
+    SetWindowLongPtrW(dialog, DWLP_USER,
+                      reinterpret_cast<LONG_PTR>(context));
+    simtower::configure_original_dtmp_window(
+        dialog, context->controller.dtmp(), g_resources, g_logical_palette);
+    // 1100:0f6d-0f80 / 12a5-12b8 clear Win16 GCL_HCURSOR, then 11e0:0d80
+    // selector zero selects the stock arrow as the current cursor.
+    SetClassLongPtrW(dialog, GCLP_HCURSOR, 0);
+    SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+    // ELVINFODLOGFILTER 1100:0faf and ESCINFODLOGFILTER 1100:12e7 select
+    // the shared 13-pixel Arial font for their painted text and static
+    // controls.
+    context->control_font = make_original_dialog_font(13);
+    position_original_dialog(dialog);
+    HDC dc = GetDC(dialog);
+    if (dc) {
+      if (g_logical_palette) {
+        // 1100:0f85-0f97 / 12bd-12cf realize the active CLUT before the
+        // first resource-backed information presentation.
+        SelectPalette(dc, g_logical_palette, FALSE);
+        RealizePalette(dc);
+      }
+      SetTextAlign(dc, TA_UPDATECP);
+      SetBkMode(dc, TRANSPARENT);
+      simtower::paint_original_dialog_chrome(dialog, dc,
+                                             context->controller.dtmp());
+      simtower::render_original_dtmp(dialog, dc, context->controller.dtmp(),
+                                     g_resources);
+      paint_original_information_text(dc, *context);
+      paint_original_information_sprites(dc, *context);
+      ReleaseDC(dialog, dc);
+    }
+    Win32DialogOps ops(dialog);
+    return context->controller.initial_focus(ops) ? TRUE : FALSE;
+  }
+
+  auto* context = reinterpret_cast<OriginalTransportDialogContext*>(
+      GetWindowLongPtrW(dialog, DWLP_USER));
+  switch (message) {
+    case WM_PAINT: {
+      PAINTSTRUCT paint{};
+      HDC dc = BeginPaint(dialog, &paint);
+      if (dc && context) {
+        if (g_logical_palette) {
+          // Exact paint-time palette realization at 1100:10aa-10bc and
+          // 1100:1483-1495.
+          SelectPalette(dc, g_logical_palette, FALSE);
+          RealizePalette(dc);
+        }
+        SetTextAlign(dc, TA_UPDATECP);
+        SetBkMode(dc, TRANSPARENT);
+        simtower::paint_original_dialog_chrome(dialog, dc,
+                                               context->controller.dtmp());
+        paint_original_information_text(dc, *context);
+        paint_original_information_sprites(dc, *context);
+      }
+      EndPaint(dialog, &paint);
+      return TRUE;
+    }
+    case WM_ACTIVATE:
+      if (context) {
+        const auto plan = simtower::original_information_activation_plan(
+            LOWORD(wparam) != WA_INACTIVE,
+            g_original_active_modal_window != nullptr,
+            g_original_active_modal_window == dialog);
+        if (plan.activate_nested_modal) {
+          // 1100:1053-106e / 138b-13a6 keep a nested information dialog as
+          // the active modal target instead of allowing its parent to steal
+          // activation.
+          SetActiveWindow(g_original_active_modal_window);
+        }
+        return plan.consume ? TRUE : FALSE;
+      }
+      return FALSE;
+    case WM_CTLCOLORSTATIC:
+      if (context) {
+        return reinterpret_cast<INT_PTR>(original_gray_static_brush(
+            reinterpret_cast<HDC>(wparam), context->control_font,
+            context->static_background,
+            simtower::kOriginalDialogStaticBackgroundRgb));
+      }
+      return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORSCROLLBAR:
+      // Win16 WM_CTLCOLOR subtype six is static; every other subtype returns
+      // stock object 5 (NULL_BRUSH) without changing the background mode.
+      return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
+    case WM_LBUTTONDOWN:
+      if (context) {
+        const auto click_plan = context->controller.click_plan();
+        if (!click_plan.consume) break;
+
+        HDC dc = GetDC(dialog);
+        if (dc && g_logical_palette) {
+          if (click_plan.select_palette) {
+            SelectPalette(dc, g_logical_palette, FALSE);
+          }
+          if (click_plan.realize_palette) RealizePalette(dc);
+        }
+        {
+          // The portrait hit, Person Information and the refresh.
+          Win32DialogOps ops(dialog);
+          Win32TransportInformationHost host(dialog);
+          (void)context->controller.signal(
+              original_pointer_signal(
+                  simtower::OriginalDialogSignal::Kind::button_down, lparam),
+              ops, host);
+        }
+        if (dc) ReleaseDC(dialog, dc);
+
+        // Both original filters perform these restorations after every click,
+        // including empty panel space (1100:118e-11a8 / 145a-14e9).
+        if (click_plan.restore_topmost) {
+          SetWindowPos(dialog, HWND_TOPMOST, 0, 0, 0, 0,
+                       SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW);
+        }
+        if (click_plan.restore_modal_target) {
+          g_original_active_modal_window = dialog;
+        }
+        return TRUE;
+      }
+      break;
+    case WM_MOUSEMOVE:
+      if (context) {
+        // Exact 1100:5043 information-panel cursor selection.
+        Win32DialogOps ops(dialog);
+        Win32TransportInformationHost host(dialog);
+        (void)context->controller.signal(
+            original_pointer_signal(
+                simtower::OriginalDialogSignal::Kind::mouse_move, lparam),
+            ops, host);
+        return TRUE;
+      }
+      break;
+    case WM_COMMAND:
+      // A WM_COMMAND before WM_INITDIALOG (no context) is not handled. The
+      // old shared event_dialog_proc ended such a dialog on IDOK; no path
+      // sends one, so this is an intended no-op difference.
+      if (context) {
+        // ELVINFODLOGFILTER 1100:1113 and ESCINFODLOGFILTER 1100:13d5
+        // recognize only the IDOK command and always return dialog result 1.
+        Win32DialogOps ops(dialog);
+        Win32TransportInformationHost host(dialog);
+        bool handled = false;
+        const auto outcome = context->controller.signal(
+            simtower::OriginalDialogSignal{
+                simtower::OriginalDialogSignal::Kind::command,
+                static_cast<std::uint16_t>(LOWORD(wparam)),
+                static_cast<std::uint16_t>(HIWORD(wparam))},
+            ops, host, &handled);
+        if (outcome.result) {
+          g_original_active_modal_window = nullptr;
+          EndDialog(dialog, *outcome.result);
+        }
+        if (handled) return TRUE;
+      }
+      break;
+  }
+  return FALSE;
+}
+
 int run_original_transport_information_dialog(
     const simtower::OriginalMagnifierTarget& target) {
   // Shared native boundaries for ELVINFODLOGFILTER at 1100:0f10 and
   // ESCINFODLOGFILTER at 1100:1248.
   if (!g_tower_document) return 0;
-  const auto text = simtower::original_transport_information_text(
+  auto text = simtower::original_transport_information_text(
       g_resources, *g_tower_document, target);
   if (!text.valid || target.dialog_id == 0U) return 0;
 
   const auto original = simtower::parse_original_dialog(
       g_resources.find("DIALOG", target.dialog_id));
   const auto native = simtower::build_native_dialog_template(original);
-  OriginalEventDialogContext context{};
-  context.dtmp = simtower::parse_original_dtmp(
-      g_resources.find("DTMP", target.dialog_id));
   // 1100:1b53/1cbb call 11e0:008d for DTMP rectangles 3 and 6, then
-  // 1208:0cf5 adds the literal (+8,+1) text origin used above.
-  context.text_overlays[0] = {2U, text.primary};
-  context.text_overlays[1] = {5U, text.secondary};
-  context.text_overlay_count = context.text_overlays.size();
-  context.person_sprites = text.person_sprites;
-  context.transport_target = target;
+  // 1208:0cf5 adds the literal (+8,+1) text origin the painter uses.
+  OriginalTransportDialogContext context{
+      simtower::OriginalTransportInformationController(
+          target, std::move(text),
+          simtower::parse_original_dtmp(
+              g_resources.find("DTMP", target.dialog_id)))};
   const int result = static_cast<int>(run_original_modal_dialog(
       g_instance, reinterpret_cast<const DLGTEMPLATE*>(native.data()),
-      g_main_window, event_dialog_proc,
+      g_main_window, transport_information_dialog_proc,
       reinterpret_cast<LPARAM>(&context)));
   release_native_dialog_brush(context.static_background);
   return result;

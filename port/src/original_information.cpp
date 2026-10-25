@@ -1879,6 +1879,39 @@ OriginalMagnifierTarget select_original_magnifier_target(
   return target;
 }
 
+std::optional<OriginalMagnifierTarget>
+original_elevator_car_information_target(const OriginalTdtDocument& document,
+                                         std::size_t shaft,
+                                         std::size_t car) noexcept {
+  if (shaft >= document.elevators.size()) return std::nullopt;
+  const auto& elevator = document.elevators[shaft];
+  if (elevator.used == 0U || car >= elevator.car_records.size()) {
+    return std::nullopt;
+  }
+  const auto& exact = elevator.car_records[car].exact_bytes;
+  if (exact[15] == std::byte{0}) return std::nullopt;
+  OriginalMagnifierTarget target{};
+  target.kind = OriginalMagnifierTargetKind::elevator_car_information;
+  target.dialog_id = original_elevator_information_dialog_id(elevator.type);
+  target.elevator_index = shaft;
+  target.elevator_car_index = static_cast<std::int16_t>(car);
+  target.floor = signed_byte(exact[0]);
+  return target;
+}
+
+std::optional<OriginalMagnifierTarget>
+original_vertical_transport_information_target(
+    const OriginalTdtDocument& document, std::size_t index) noexcept {
+  const auto& stairs = document.post_elevator.stairs_bd70;
+  if (index >= stairs.size() || stairs[index].used == 0U) return std::nullopt;
+  OriginalMagnifierTarget target{};
+  target.kind = OriginalMagnifierTargetKind::vertical_transport_information;
+  target.dialog_id = original_vertical_transport_information_dialog_id();
+  target.vertical_transport_index = index;
+  target.floor = stairs[index].floor;
+  return target;
+}
+
 OriginalTransportInformationText original_transport_information_text(
     const OriginalResources& resources,
     const OriginalTdtDocument& document,
@@ -2442,6 +2475,19 @@ bool set_original_facility_rent_rate(
   refresh_original_tenant_information_satisfaction(
       document, part, floor_number, tenant_index);
   return true;
+}
+
+std::optional<std::uint8_t> get_original_facility_rent_rate(
+    const OriginalTdtDocument& document,
+    std::int16_t floor_number,
+    std::size_t tenant_index) noexcept {
+  if (floor_number < 0 ||
+      floor_number >= static_cast<std::int16_t>(document.floors.size())) {
+    return std::nullopt;
+  }
+  const auto& floor = document.floors[static_cast<std::size_t>(floor_number)];
+  if (tenant_index >= floor.tenants.size()) return std::nullopt;
+  return std::to_integer<std::uint8_t>(floor.tenants[tenant_index].exact_bytes[16]);
 }
 
 OriginalMovieChoiceResult choose_original_movie(
