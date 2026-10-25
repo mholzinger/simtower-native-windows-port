@@ -654,22 +654,31 @@ int main() {
 
     auto tower = simtower::make_original_new_tdt();
     tower.header.balance = 1'000;
+    // 1178:08dd/096d raise the DS:779e balance-changed latch after each
+    // nonzero add or removal.
+    assert(!tower.balance_changed_effect_active);
     simtower::add_original_rent_income(tower, rent, 7, 1);
     assert(tower.header.balance == 1'100);
     assert(tower.post_elevator.finance.income_by_category[0] == 100);
     assert(tower.post_elevator.finance.total_income == 100);
+    assert(tower.balance_changed_effect_active);
 
+    tower.balance_changed_effect_active = false;
     simtower::remove_original_rent_income(tower, rent, 7, 0);
     assert(tower.header.balance == 950);
     assert(tower.post_elevator.finance.income_by_category[0] == -50);
     assert(tower.post_elevator.finance.total_income == -50);
+    assert(tower.balance_changed_effect_active);
 
     // Tier four is the hard-coded no-charge sentinel; malformed native
     // indices are bounded rather than reading outside the 180-byte table.
+    // A zero amount leaves the latch untouched.
+    tower.balance_changed_effect_active = false;
     simtower::add_original_rent_income(tower, rent, 7, 4);
     simtower::remove_original_rent_income(tower, rent, 44, 0);
     simtower::add_original_rent_income(tower, rent, 7, 5);
     assert(tower.header.balance == 950);
+    assert(!tower.balance_changed_effect_active);
 
     // 1178:1377 caps only the add path.
     tower = simtower::make_original_new_tdt();
@@ -678,6 +687,11 @@ int main() {
     assert(tower.header.balance == 99'999'999);
     assert(tower.post_elevator.finance.income_by_category[0] == 9);
     assert(tower.post_elevator.finance.total_income == 9);
+    // A capped-to-zero add skips the 1178:08dd latch write.
+    tower.balance_changed_effect_active = false;
+    simtower::add_original_rent_income(tower, rent, 7, 0);
+    assert(tower.header.balance == 99'999'999);
+    assert(!tower.balance_changed_effect_active);
 
     // Removal passes a wrapping 32-bit NEG to 1060:0837.
     rent[40] = std::bit_cast<std::uint32_t>(
@@ -2925,7 +2939,7 @@ int main() {
 
   integrated_tower.hotel_checkout_count = 19U;
   integrated_tower.hotel_checkout_effect_cadence = true;
-  integrated_tower.hotel_checkout_effect_active = true;
+  integrated_tower.balance_changed_effect_active = true;
   state = {};
   state.frame_time = 0x04afU;
   step = simtower::step_original_simulation(
@@ -2933,7 +2947,7 @@ int main() {
   assert(step.advanced && state.frame_time == 0x04b0U);
   assert(integrated_tower.hotel_checkout_count == 0U);
   assert(integrated_tower.hotel_checkout_effect_cadence);
-  assert(integrated_tower.hotel_checkout_effect_active);
+  assert(integrated_tower.balance_changed_effect_active);
 
   state = {};
   state.frame_time = 0x00ef;
