@@ -1,0 +1,16 @@
+# Finance: Esc is IDCANCEL, which COUNTDLOGMAIN ignores; Enter closes on its
+# key up. A second Finance closes on a click in the OK surface.
+# args: --scenario busy --passes 3
+# expect-stderr: dialog finance requested \(40017\)
+# held: finance.bmp
+pass 2
+menu 40017
+expect-dialog finance
+dialog-hold finance.bmp
+dialog-key esc
+dialog-at 10 10
+dialog-key enter
+menu 40017
+expect-dialog finance
+dialog-at 170 335
+pass 3

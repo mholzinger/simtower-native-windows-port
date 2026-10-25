@@ -1,0 +1,15 @@
+# "alert 3" is only an answer for a three-button (Yes/No/Cancel) alert: the
+# two-button replace prompt of a Save As over an existing file is a script
+# error (exit 2) naming the "alert" line.
+# args: --scenario busy --passes 3
+# expect-exit: 2
+# expect-stderr: alert_answer_3_invalid.txt:12: alert 3 answers only
+pass 1
+menu 40002
+pick-file A3INV.TDT
+menu 40002
+pick-file A3INV.TDT
+alert 3
+menu 40002
+pick-file A3INV.TDT
+pass 3

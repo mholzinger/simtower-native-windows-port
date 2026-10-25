@@ -1,0 +1,16 @@
+# Find Tenant: a named shop is focused by a double click on its row: the
+# dialog closes, edit mode two is selected and the view moves (10e0:0cea).
+# args: --scenario busy --passes 3
+# expect-stderr: dialog rename tenant -> changed, name "Corner Shop"
+# expect-stderr: dialog find tenant: focused floor 11
+pass 1
+open-dialog rename-tenant 11 1
+expect-dialog rename tenant
+dialog-type Corner Shop
+dialog-key tab
+dialog-key space
+menu 40020
+expect-dialog find tenant
+dialog-list 5 0 double
+expect-mode 2
+pass 3

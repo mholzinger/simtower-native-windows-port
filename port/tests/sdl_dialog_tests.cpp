@@ -14,6 +14,7 @@
 
 #include "original_alert.hpp"
 #include "original_canvas_font.hpp"
+#include "original_dialog_controllers.hpp"
 #include "original_dialog_model.hpp"
 #include "original_dialog_paint.hpp"
 #include "original_dtmp_runtime.hpp"
@@ -28,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -42,15 +44,22 @@ using simtower::sdl::DialogControlKind;
 using simtower::sdl::DialogKey;
 using simtower::sdl::DialogPointer;
 using simtower::sdl::DialogStep;
-using simtower::sdl::ModalDialog;
+using simtower::sdl::DialogWindow;
 using Kind = OriginalDialogSignal::Kind;
 
 // frame_hash_tests pins (see there).
-constexpr std::uint64_t kPinned3012 = 0x7e2856a39260c257ULL;
-constexpr std::uint64_t kPinned3020 = 0xa7ef9191e9b37d29ULL;
-constexpr std::uint64_t kPinned3030 = 0x1a417dd660c54068ULL;
-constexpr std::uint64_t kPinned1001 = 0x057f9392f4e5c7b5ULL;
+constexpr std::uint64_t kPinned3012 = 0x6baea778f558ae73ULL;
+constexpr std::uint64_t kPinned3020 = 0xe27c24d172a2a2adULL;
+constexpr std::uint64_t kPinned3030 = 0x215459d150bf6b00ULL;
+constexpr std::uint64_t kPinned1001 = 0x1f88ddef77c7ef35ULL;
 constexpr std::uint64_t kPinnedAbout = 0x9d3405fefe1d2751ULL;
+// Find Person with three names, the first selected and the list focused;
+// Rename Person with "Ann Example" typed (caret shown); New Movie opening;
+// Finance with a few values.
+constexpr std::uint64_t kPinnedFind = 0x6758d2a98f665a50ULL;
+constexpr std::uint64_t kPinnedRename = 0x96711e708ff88305ULL;
+constexpr std::uint64_t kPinnedMovie = 0xc296c1fe39e7efa4ULL;
+constexpr std::uint64_t kPinnedFinance = 0xde29d41e099fb201ULL;
 
 constexpr std::array<std::uint16_t, 20> kEventDialogs{
     3000, 3001, 3002, 3003, 3010, 3011, 3012, 3013, 3014, 3020,
@@ -75,7 +84,7 @@ std::optional<OriginalDialogSignal> command(std::uint16_t id) {
 }
 
 // Press and release at a control's script click point.
-DialogStep click(ModalDialog& dialog, std::uint16_t id) {
+DialogStep click(DialogWindow& dialog, std::uint16_t id) {
   const auto point = dialog.click_point(id);
   assert(point);
   const auto down =
@@ -85,7 +94,7 @@ DialogStep click(ModalDialog& dialog, std::uint16_t id) {
       {DialogPointer::Kind::up, point->first, point->second});
 }
 
-std::vector<std::uint16_t> tab_stops(const ModalDialog& dialog) {
+std::vector<std::uint16_t> tab_stops(const DialogWindow& dialog) {
   std::vector<std::uint16_t> stops;
   for (const auto& control : dialog.controls()) {
     if (control.visible && control.enabled && control.tab_stop) {
@@ -96,7 +105,7 @@ std::vector<std::uint16_t> tab_stops(const ModalDialog& dialog) {
 }
 
 // Tab walks the stops in template order and wraps; Shift-Tab reverses.
-void check_tab_cycle(ModalDialog& dialog) {
+void check_tab_cycle(DialogWindow& dialog) {
   const auto stops = tab_stops(dialog);
   if (stops.empty()) return;
   const auto start = dialog.focus();
@@ -121,7 +130,7 @@ void check_tab_cycle(ModalDialog& dialog) {
 
 // The focus rectangle surrounds the label with a blank pixel when the
 // button is wide enough, and never leaves the bevel.
-void check_label(const ModalDialog& dialog,
+void check_label(const DialogWindow& dialog,
                  const simtower::sdl::DialogControl& control) {
   auto& font = simtower::OriginalCanvasFont::bundled();
   const bool is_default = dialog.default_button() == control.id;
@@ -137,11 +146,46 @@ void check_label(const ModalDialog& dialog,
     assert(label.focus.left < label.x);
     assert(label.focus.right > label.x + label.extent);
   }
+  // The label's ink (TA_TOP at label.x / label.y). On every side the bevel
+  // did not clamp, neither the dotted line nor the line just inside it
+  // touches ink (one blank pixel, as Win3.1 leaves).
+  const int pixels = dialog.font_pixels();
+  const int ascent = font.metrics(pixels).ascent;
+  const auto& f = label.focus;
+  const bool clamp_left = f.left == r.left + bevel;
+  const bool clamp_right = f.right == r.right - bevel;
+  const bool clamp_top = f.top == r.top + bevel;
+  const bool clamp_bottom = f.bottom == r.bottom - bevel;
+  int pen = label.x;
+  for (const char character : label.text) {
+    const auto& glyph =
+        font.glyph(pixels, static_cast<unsigned char>(character));
+    for (int row = 0; row < glyph.height; ++row) {
+      for (int column = 0; column < glyph.width; ++column) {
+        if (glyph.mask[static_cast<std::size_t>(row * glyph.width +
+                                                column)] == 0U) {
+          continue;
+        }
+        const int x = pen + glyph.left + column;
+        const int y = label.y + ascent + glyph.top + row;
+        assert(clamp_left || x > f.left + 1);
+        assert(clamp_right || x < f.right - 2);
+        assert(clamp_top || y > f.top + 1);
+        assert(clamp_bottom || y < f.bottom - 2);
+      }
+    }
+    pen += glyph.advance;
+  }
+  // The labels the round-1 review found touching their dots fit with air.
+  const std::string text = label.text;
+  if (text == "OK" || text == "Cancel" || text == "Find the Bomb") {
+    assert(!clamp_left && !clamp_right);
+  }
 }
 
 // Every pixel outside the dialog's outer rectangle is left alone; some
 // inside change.
-void check_draw(const ModalDialog& dialog,
+void check_draw(const DialogWindow& dialog,
                 const simtower::OriginalResources& resources) {
   simtower::OriginalWorldRaster raster{};
   raster.width = 1100;
@@ -168,7 +212,7 @@ void check_draw(const ModalDialog& dialog,
 
 // FNV-1a over the dialog's outer rectangle of a 1019x628 window raster
 // (0x00RRGGBB pixels, little-endian bytes), drawn at its placement.
-std::uint64_t dialog_hash(const ModalDialog& dialog,
+std::uint64_t dialog_hash(const DialogWindow& dialog,
                           const simtower::OriginalResources& resources) {
   simtower::OriginalWorldRaster raster{};
   raster.width = 1019;
@@ -206,7 +250,7 @@ bool check_hash(const char* name, std::uint64_t actual,
 // The '&' mnemonic of every MessageBox push button is underlined in the
 // text colour one pixel below the baseline, under that character only;
 // buttons without a mnemonic ("Cancel", "OK") have none.
-void check_mnemonic_underlines(const ModalDialog& dialog,
+void check_mnemonic_underlines(const DialogWindow& dialog,
                                const simtower::OriginalResources& resources) {
   auto& font = simtower::OriginalCanvasFont::bundled();
   simtower::OriginalWorldRaster raster{};
@@ -262,7 +306,7 @@ void descriptor_tests() {
   descriptor.frame = {2, 10, 2, 2};
   int escapes = 0;
   descriptor.escape_command =
-      [&](const ModalDialog&) -> std::optional<std::uint16_t> {
+      [&](const DialogWindow&) -> std::optional<std::uint16_t> {
     ++escapes;
     return 42U;
   };
@@ -285,7 +329,7 @@ void descriptor_tests() {
   hidden.text = "Later";
   hidden.visible = false;
   simtower::OriginalDialog dialog_template{};
-  ModalDialog dialog(descriptor, dialog_template, {button, hidden}, 200, 100,
+  DialogWindow dialog(descriptor, dialog_template, {button, hidden}, 200, 100,
                      5U);
   dialog.place(1000, 500);
   assert(dialog.label() == "custom" && !dialog.counts_modal_lock());
@@ -380,9 +424,27 @@ void synthetic_tests() {
   assert(box.focus() == 7U && box.default_button() == 7U);
   assert(box.key(DialogKey::other, 'y').signal == command(6));
   assert(!box.key(DialogKey::other, 'q').signal);
-  assert(!box.key(DialogKey::arrow).signal);
+  // The arrows move the focus through the button group (no WS_GROUP: the
+  // whole row), wrapping; the focused button becomes the default.
+  assert(box.focus() == 6U);
+  assert(!box.key(DialogKey::right).signal && box.focus() == 7U);
+  assert(box.default_button() == 7U);
+  assert(!box.key(DialogKey::down).signal && box.focus() == 2U);
+  assert(!box.key(DialogKey::right).signal && box.focus() == 6U);
+  assert(!box.key(DialogKey::left).signal && box.focus() == 2U);
+  assert(!box.key(DialogKey::up).signal && box.focus() == 7U);
+  (void)box.key(DialogKey::left);
+  assert(box.focus() == 6U);
   check_tab_cycle(box);
-  assert(box.key(DialogKey::space).signal == command(box.focus()));
+  // Space presses the focused button on the key down and clicks it on the
+  // key up.
+  {
+    const auto pressed = box.key(DialogKey::space);
+    assert(!pressed.signal && pressed.redraw);
+    assert(box.captured() == box.focus() && box.pressed());
+    assert(box.key_up(DialogKey::space).signal == command(box.focus()));
+    assert(box.captured() == 0U && !box.pressed());
+  }
   assert(box.timer_id() == 0U && box.timer_interval_ms() == 0U);
   // Message box placement: centered (TEMP), inside the desktop.
   const auto outer = box.outer();
@@ -638,8 +700,18 @@ void about_tests(const simtower::OriginalResources& resources) {
              *about.key(DialogKey::escape).signal, about) ==
          OriginalDialogOutcome{});
   assert(!about.key(DialogKey::tab).signal);
-  // Any other key, and a button release, closes it with 1.
-  for (const auto key : {DialogKey::other, DialogKey::space}) {
+  // The arrows are IsDialogMessage's too.
+  for (const auto key : {DialogKey::left, DialogKey::right, DialogKey::up,
+                         DialogKey::down}) {
+    assert(!about.key(key).signal);
+  }
+  // Alt and F10 are WM_SYSKEYDOWN: ABOUTDLGPROC never sees them.
+  assert(!about.key(DialogKey::menu).signal);
+  assert(!about.key_up(DialogKey::menu).signal);
+  // Any other key (WM_KEYDOWN), and a left or right button release, closes
+  // it with 1; the presses do nothing.
+  for (const auto key : {DialogKey::other, DialogKey::space, DialogKey::home,
+                         DialogKey::f4, DialogKey::backspace}) {
     assert(simtower::original_about_dialog_signal(*about.key(key).signal,
                                                   about) ==
            OriginalDialogOutcome({1, false}));
@@ -648,7 +720,8 @@ void about_tests(const simtower::OriginalResources& resources) {
   assert(!about.pointer({DialogPointer::Kind::down, 10, 10}).signal);
   assert(about.pointer({DialogPointer::Kind::up, 10, 10}).signal ==
          OriginalDialogSignal({Kind::close, 0U}));
-  assert(about.pointer({DialogPointer::Kind::right_down, 10, 10}).signal ==
+  assert(!about.pointer({DialogPointer::Kind::right_down, 10, 10}).signal);
+  assert(about.pointer({DialogPointer::Kind::right_up, 10, 10}).signal ==
          OriginalDialogSignal({Kind::close, 0U}));
   // Timer 9 scrolls the credits: each tick reaches ABOUTDLGPROC, which
   // repaints through the ops.
@@ -705,6 +778,199 @@ void frame_hash_tests(const simtower::OriginalResources& resources) {
   assert(ok);
 }
 
+// A recording ops-free stand-in for the procedures' hosts.
+struct NoFindHost final : simtower::OriginalFindDialogHost {
+  simtower::OriginalTdtDocument* document() override { return nullptr; }
+  int main_client_width() override { return 640; }
+  int main_client_height() override { return 400; }
+  void reset_marker() override { ++resets; }
+  void start_marker(const simtower::OriginalFindResolution&,
+                    std::uint32_t) override {}
+  void alert(int, const std::array<std::string, 4>&) override {}
+  void entry_removed() override {}
+  void invalidate_main() override {}
+  int resets{};
+};
+
+// The template + DTMP dialogs of round two: their layout from the
+// templates and DTMPs, the dialog manager's initial focus after the
+// controllers' WM_INITDIALOG, Enter / Esc / arrows, and pinned frames.
+void dtmp_dialog_tests(const simtower::OriginalResources& resources) {
+  using simtower::OriginalFindMode;
+  bool ok = true;
+  // Find Person: BITMAP/510's 300x211 client, OK / Remove / Find / list at
+  // their DTMP rectangles, the 13-pixel template font.
+  {
+    auto find = simtower::sdl::make_find_dialog(resources,
+                                                OriginalFindMode::person);
+    assert(find.label() == "find person" && find.counts_modal_lock());
+    assert(find.client_width() == 300 && find.client_height() == 211);
+    assert(find.font_pixels() == 13);
+    assert(find.control(1)->rect == OriginalRect({222, 181, 293, 204}));
+    assert(find.control(3)->rect == OriginalRect({7, 181, 78, 204}));
+    assert(find.control(4)->rect == OriginalRect({114, 181, 185, 204}));
+    assert(find.control(5)->rect == OriginalRect({10, 10, 290, 170}));
+    assert(find.control(5)->kind == DialogControlKind::list_box);
+    for (const std::uint16_t id : {1, 3, 4}) {
+      check_label(find, *find.control(id));
+    }
+    for (const std::uint16_t id : {1, 3, 4, 5}) {
+      assert(find.control(id)->visible);
+    }
+    simtower::OriginalFindController controller(
+        OriginalFindMode::person,
+        {{1U, "Ann Example"}, {2U, "Bob Builder"}, {3U, "Cid Lift"}});
+    controller.initialize(find);
+    find.focus_first_tab_stop();
+    assert(find.focus() == 1U && find.default_button() == 1U);
+    assert(!find.control(3)->enabled && !find.control(4)->enabled);
+    assert(find.control(5)->items.size() == 3U &&
+           find.list_selection(5) == -1);
+    // Enter closes through OK; Esc's IDCANCEL reaches nothing.
+    NoFindHost host;
+    assert(controller.signal(*find.key(DialogKey::enter).signal, find, host)
+               .result == 1);
+    assert(!controller.signal(*find.key(DialogKey::escape).signal, find,
+                              host)
+                .result);
+    // Down from OK skips the disabled Remove and Find: the list.
+    (void)find.key(DialogKey::down);
+    assert(find.focus() == 5U);
+    // A press selects; LBN_SELCHANGE enables Remove and Find.
+    const auto row = find.list_item_point(5, 0);
+    const auto step = find.pointer(
+        {DialogPointer::Kind::down, row->first, row->second});
+    (void)find.pointer({DialogPointer::Kind::up, row->first, row->second});
+    assert(!controller.signal(*step.signal, find, host).result);
+    assert(find.control(3)->enabled && find.control(4)->enabled);
+    find.place(1019, 628);
+    ok = check_hash("find person", dialog_hash(find, resources),
+                    kPinnedFind) &&
+         ok;
+  }
+  // Rename Person 730: Rename (1) disabled, Cancel (2) the default; the
+  // first WM_PAINT moves the focus to the edit; Enter there is Cancel.
+  {
+    auto rename = simtower::sdl::make_rename_dialog(resources, true);
+    assert(rename.label() == "rename person");
+    assert(rename.client_width() == 283 && rename.client_height() == 130);
+    assert(rename.control(4)->kind == DialogControlKind::edit);
+    assert(rename.control(4)->rect == OriginalRect({79, 40, 204, 69}));
+    assert(rename.control(5)->rect == OriginalRect({80, 20, 200, 36}));
+    assert(rename.control(1)->rect == OriginalRect({200, 90, 270, 116}));
+    rename.set_item_text(4, "");
+    rename.enable_item(3, false);
+    rename.enable_item(1, false);
+    rename.focus_first_tab_stop();
+    assert(rename.focus() == 2U);
+    assert(rename.take_paint());
+    rename.enable_item(4, true);
+    rename.focus_item(4);
+    assert(rename.focus() == 4U && rename.default_button() == 2U);
+    assert(rename.key(DialogKey::enter).signal == command(2));
+    for (const char character : std::string("Ann Example")) {
+      assert(rename.character(character).signal ==
+             OriginalDialogSignal(
+                 {Kind::command, 4U, simtower::kOriginalEditChange}));
+    }
+    rename.enable_item(1, true);
+    rename.place(1019, 628);
+    ok = check_hash("rename person typed", dialog_hash(rename, resources),
+                    kPinnedRename) &&
+         ok;
+  }
+  // Rename Tenant 732: its buttons are hidden in the template and shown by
+  // the DTMP pass.
+  {
+    auto rename = simtower::sdl::make_rename_dialog(resources, false);
+    assert(rename.label() == "rename tenant");
+    for (const std::uint16_t id : {1, 2, 3, 4, 5}) {
+      assert(rename.control(id)->visible);
+    }
+  }
+  // New Movie 731: WS_CAPTION with the TEMP frame; the DTMP size is the
+  // window's, so the client is smaller. Cancel (2) is first and default.
+  {
+    auto movie = simtower::sdl::make_movie_dialog(resources);
+    for (const auto& control : movie.controls()) {
+      if (simtower::original_widget_is_push_button(control.kind)) {
+        check_label(movie, control);
+      }
+    }
+    assert(movie.label() == "movie");
+    assert(movie.outer_width() == 280 && movie.outer_height() == 136);
+    assert(movie.client_width() ==
+           280 - 2 * simtower::sdl::kCaptionFrameBorder);
+    assert(movie.client_height() ==
+           136 - 2 * simtower::sdl::kCaptionFrameBorder -
+               simtower::sdl::kCaptionFrameHeight);
+    assert(movie.descriptor().paint_frame);
+    movie.focus_first_tab_stop();
+    assert(movie.focus() == 2U && movie.default_button() == 2U);
+    assert(movie.key(DialogKey::escape).signal == command(2));
+    (void)movie.key(DialogKey::down);
+    assert(movie.focus() == 1U && movie.default_button() == 1U);
+    (void)movie.key(DialogKey::up);
+    movie.place(1019, 628);
+    ok = check_hash("movie", dialog_hash(movie, resources), kPinnedMovie) &&
+         ok;
+  }
+  // Finance 500: no controls; the dialog has the focus, so key-ups and
+  // button events reach COUNTDLOGMAIN.
+  {
+    const auto dtmp =
+        simtower::parse_original_dtmp(resources.find("DTMP", 500));
+    const auto& r = dtmp.rectangles[0];
+    simtower::OriginalFinanceController finance_controller(
+        OriginalRect{r.left, r.top, r.right, r.bottom});
+    auto* controller = &finance_controller;
+    simtower::OriginalFinanceView view{};
+    view.year = 2;
+    view.quarter = 3;
+    view.total_balance = 1234567;
+    view.population[0] = 42;
+    auto finance = simtower::sdl::make_finance_dialog(resources, view);
+    // Without a paint-state source the surface is drawn released.
+    assert(finance.paint_state() == 0U);
+    finance.set_paint_state(
+        [controller]() { return controller->pressed() ? 1U : 0U; });
+    assert(finance.label() == "finance" && finance.controls().empty());
+    assert(finance.focus() == 0U);
+    const auto up = finance.key_up(DialogKey::enter);
+    assert(up.signal == OriginalDialogSignal({Kind::key_up, 0x0DU}));
+    // Enter's key down is IDOK, which COUNTDLOGMAIN ignores.
+    assert(finance.key(DialogKey::enter).signal == command(1));
+    assert(!controller->signal(*finance.key(DialogKey::enter).signal, finance)
+                .result);
+    finance.place(1019, 628);
+    ok = check_hash("finance", dialog_hash(finance, resources),
+                    kPinnedFinance) &&
+         ok;
+    const auto down = finance.pointer({DialogPointer::Kind::down,
+                                       finance.client_x() + r.left + 3,
+                                       finance.client_y() + r.top + 3});
+    assert(down.signal && down.signal->kind == Kind::button_down);
+    (void)controller->signal(*down.signal, finance);
+    assert(controller->pressed());
+    assert(dialog_hash(finance, resources) != kPinnedFinance);
+    const auto pressed_hash = dialog_hash(finance, resources);
+    // WM_KEYUP Return: UpdateWindow presents the pressed surface, then the
+    // released one, before the dialog closes (nm 5155-5176).
+    std::vector<std::uint64_t> presented{};
+    finance.set_update_window([&]() {
+      if (finance.take_invalidated()) {
+        presented.push_back(dialog_hash(finance, resources));
+      }
+    });
+    const auto closed = controller->signal(*up.signal, finance);
+    assert(closed.result == 0);
+    assert(presented.size() == 2U && presented[0] == pressed_hash &&
+           presented[1] == kPinnedFinance);
+    finance.set_update_window({});
+  }
+  assert(ok);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -720,6 +986,7 @@ int main(int argc, char** argv) {
   alert_tests(resources);
   about_tests(resources);
   frame_hash_tests(resources);
+  dtmp_dialog_tests(resources);
   std::printf("sdl dialog tests passed\n");
   return 0;
 }

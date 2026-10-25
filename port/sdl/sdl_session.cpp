@@ -1,5 +1,7 @@
 #include "sdl_session.hpp"
 
+#include "sdl_dialog_descriptors.hpp"
+
 #include "original_about.hpp"
 #include "original_alert.hpp"
 #include "original_canvas_font.hpp"
@@ -72,9 +74,11 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
   // SIMTOWER.INI BeepOnly (DS:de28) has no SDL profile yet: off.
   bool beep_only() override { return false; }
   bool modal_input_locked() override { return s_.modal_depth_ != 0; }
-  // No Find dialog yet: DS:77c0 is never set.
-  bool find_exit_latch_set() override { return false; }
-  void reset_find_marker() override {}
+  // DS:77c0 (only Person Information sets it, not ported yet).
+  bool find_exit_latch_set() override { return s_.find_marker_.phase != 0U; }
+  void reset_find_marker() override {
+    reset_original_find_marker(s_.find_marker_);
+  }
   bool primary_button_down() override { return s_.left_button_down_; }
 
   void set_capture(OriginalInputSurface surface) override {
@@ -323,8 +327,11 @@ class Session::TowerFileHost final : public OriginalTowerFileHost {
     // TEMP: the MessageBeep is not reproduced (no beep request is logged).
     const auto raw = s_.run_message_box(
         original_replace_existing_message_box(), kReplaceBoxLabel);
-    int answer = take_answer();
-    if (raw) answer = *raw == kOriginalAlertResultNo ? 2 : 1;
+    // The literal File box is MB_YESNO: no third answer.
+    const int answer = s_.take_alert_answer(
+        raw ? std::optional<int>(*raw == kOriginalAlertResultNo ? 2 : 1)
+            : std::nullopt,
+        false, "the replace prompt has two buttons");
     s_.log_request(RequestKind::alert, {-1, answer});
     s_.tally("replace prompt");
     log_line("replace " + path.string() + "? -> " +
@@ -377,13 +384,6 @@ class Session::TowerFileHost final : public OriginalTowerFileHost {
   void begin_new_tower() override { s_.new_tower(); }
 
  private:
-  int take_answer() {
-    const int answer = s_.alert_answer_;
-    s_.alert_answer_ = 1;
-    ++s_.host_requests_.dialogs;
-    return answer;
-  }
-
   Session& s_;
 };
 
@@ -490,7 +490,12 @@ class Session::MainCommandHost final : public OriginalMainCommandHost {
     s_.log_request(RequestKind::panel, {static_cast<int>(window), 0});
     s_.present_requested_ = true;
   }
-  void finance_dialog() override { dialog(kOriginalCommandFinance, "finance"); }
+  void finance_dialog() override {
+    // The same logged request as before, then the dialog when an input
+    // source runs it.
+    dialog(kOriginalCommandFinance, "finance");
+    (void)s_.run_finance_dialog();
+  }
   void about_dialog() override {
     // The About modal when an input source runs it, then the same logged
     // request as before, so runs without input keep their digests.
@@ -501,6 +506,7 @@ class Session::MainCommandHost final : public OriginalMainCommandHost {
     dialog(mode == OriginalFindMode::person ? kOriginalCommandFindPerson
                                             : kOriginalCommandFindTenant,
            mode == OriginalFindMode::person ? "find person" : "find tenant");
+    (void)s_.run_find_dialog(mode);
   }
   void help_contents() override {
     // WinHelp(SIMTOWER.HLP, HELP_CONTENTS = 3). TEMP: a logged request
@@ -530,9 +536,8 @@ class Session::MainCommandHost final : public OriginalMainCommandHost {
   void present_main_direct() override { s_.present_main(); }
 
  private:
-  // TEMP: Finance and Find are logged until their dialogs are ported
-  // (sdl_dialog_descriptors.hpp lists the deferred dialogs); About is logged
-  // here too.
+  // Finance, Find and About are logged here; the dialog runtime runs them
+  // when an input source drives them.
   void dialog(std::uint16_t command, const char* name) {
     ++s_.host_requests_.dialogs;
     s_.log_request(RequestKind::command_dialog, {command});
@@ -770,10 +775,11 @@ void Session::reset_simulation_state() {
 }
 
 void Session::reset_command_state() {
-  // reset_original_command_state: the shared edit/command part, then the
-  // Info status. There is no Find marker yet.
+  // reset_original_command_state: the shared edit/command part, the Info
+  // status and the Find marker.
   reset_original_world_input_state(world_input_, false);
   info_status_ = {};
+  reset_original_find_marker(find_marker_);
 }
 
 void Session::install_document(OriginalTdtDocument document) {
@@ -909,8 +915,8 @@ void Session::open_tower(const std::filesystem::path& path) {
 void Session::rebuild_main(OriginalMainSurfacePass pass,
                            bool advance_state,
                            bool full_frame_surface_dirty) {
-  // rebuild_original_main_backing without Elevator Control
-  // isolation, the Find marker and the construction preview.
+  // rebuild_original_main_backing without Elevator Control isolation,
+  // with the Find marker and the construction preview.
   const auto plan = original_main_surface_pass_plan(pass);
   if (advance_state) (void)advance_main_surface_state(pass);
   if (plan.clear_elevator_transfer_visuals_before_rebuild) {
@@ -924,6 +930,17 @@ void Session::rebuild_main(OriginalMainSurfacePass pass,
       palette_runtime_.initialized ? &palette_runtime_.colors : nullptr,
       &sky_decorations_, world_input_.map_mode, nullptr, {},
       full_frame_surface_dirty);
+  if (find_marker_.active()) {
+    // 10e0:055b: BITMAP/21256 over the found target.
+    const auto derived = palette_runtime_.initialized
+                             ? OriginalWorldPalette{}
+                             : original_world_palette(resources_, document());
+    composite_original_find_marker(
+        resources_,
+        palette_runtime_.initialized ? palette_runtime_.colors : derived,
+        find_marker_.cell_x, find_marker_.floor, viewport_.x, viewport_.y,
+        main_raster_);
+  }
   // 1090:03df/05ee: the construction outline over the rebuilt backing, as
   // rebuild_original_main_backing composites it.
   const auto preview_rect = original_world_input_preview_rect(
@@ -1025,14 +1042,17 @@ std::uint16_t Session::run_event_dialog(
   if (!input_source_ || !dialog.valid()) {
     return log_dialog(dialog, default_choice, meaning);
   }
-  auto modal = make_event_dialog(
-      resources_, prepare_original_event_dialog(resources_, dialog),
-      event_dialog_label(dialog.dialog_id));
-  if (!drives(modal)) return log_dialog(dialog, default_choice, meaning);
-  // 1068:0000: stop both channels and submit the WAVE before opening.
+  // 1068:0000: stop both channels and submit the WAVE, then prepare and
+  // open the dialog (run_original_event_dialog's order).
   if (audio_) {
     audio_->stop_all(true);
     if (dialog.wave_resource != 0) play_audio(dialog.wave_resource, 0U, 4U);
+  }
+  auto modal = make_event_dialog(
+      resources_, prepare_original_event_dialog(resources_, dialog),
+      event_dialog_label(dialog.dialog_id));
+  if (!drives(modal)) {
+    return log_dialog(dialog, default_choice, meaning, false);
   }
   OriginalEventDialogController controller(dialog.argument);
   const auto result = run_dialog_modal(
@@ -1053,7 +1073,7 @@ std::uint16_t Session::run_event_dialog(
                     false);
 }
 
-bool Session::drives(const ModalDialog& dialog) {
+bool Session::drives(const DialogWindow& dialog) {
   return input_source_ != nullptr && input_source_->drives_dialog(dialog);
 }
 
@@ -1078,13 +1098,33 @@ int Session::show_alert(int alert_id,
                                        alert_dialog_label(alert_id))) {
     answered = original_alert_result(presentation.button_mode, *raw);
   }
-  const int answer = answered.value_or(alert_answer_);
-  alert_answer_ = 1;
-  ++host_requests_.dialogs;
+  // Only a Yes/No/Cancel box (STRL/1001) has a third answer.
+  const int answer = take_alert_answer(
+      answered,
+      presentation.button_mode == kOriginalAlertButtonsYesNoCancel,
+      "ALRT/" + std::to_string(alert_id) + " has " +
+          std::to_string(
+              original_message_box_buttons(presentation.style).size()) +
+          " button(s)");
   log_request(RequestKind::alert, {alert_id, answer});
   tally("alert " + std::to_string(alert_id));
   log_line("alert " + std::to_string(alert_id) + " \"" +
            presentation.message + "\" -> " + std::to_string(answer));
+  return answer;
+}
+
+int Session::take_alert_answer(std::optional<int> driven, bool three_buttons,
+                               std::string_view box) {
+  if (!driven && alert_answer_ == 3 && !three_buttons) {
+    throw ScriptFailure(
+        2, (alert_answer_where_.empty() ? std::string("input")
+                                        : alert_answer_where_) +
+               ": alert 3 answers only a three-button alert, but " +
+               std::string(box));
+  }
+  const int answer = driven.value_or(alert_answer_);
+  alert_answer_ = 1;
+  ++host_requests_.dialogs;
   return answer;
 }
 
@@ -1131,7 +1171,198 @@ void Session::run_about_dialog() {
   }
 }
 
-std::optional<int> Session::run_dialog_modal(ModalDialog& dialog,
+// FINDDIALOGFILTER's world: the document, Main, the marker and the alerts.
+class Session::FindHost final : public OriginalFindDialogHost {
+ public:
+  explicit FindHost(Session& session) : s_(session) {}
+  OriginalTdtDocument* document() override {
+    return s_.document_ ? &*s_.document_ : nullptr;
+  }
+  int main_client_width() override { return s_.viewport_.width; }
+  int main_client_height() override { return s_.viewport_.height; }
+  void reset_marker() override { reset_original_find_marker(s_.find_marker_); }
+  void start_marker(const OriginalFindResolution& resolution,
+                    std::uint32_t selected_person) override {
+    start_original_find_marker(s_.find_marker_, resolution, selected_person,
+                               s_.coarse_tick_now());
+  }
+  void alert(int alert_id,
+             const std::array<std::string, 4>& substitutions) override {
+    (void)s_.show_alert(alert_id, {substitutions[0], substitutions[1],
+                                   substitutions[2], substitutions[3]});
+  }
+  void entry_removed() override {
+    s_.document_dirty_ = true;
+    s_.log_request(RequestKind::file, {2});
+  }
+  void invalidate_main() override {
+    s_.main_backing_dirty_ = true;
+    s_.present_requested_ = true;
+  }
+  void set_arrow_cursor() override { s_.cursor_id_ = 0U; }
+
+ private:
+  Session& s_;
+};
+
+class Session::RenameHost final : public OriginalRenameDialogHost {
+ public:
+  explicit RenameHost(Session& session) : s_(session) {}
+  OriginalTdtDocument* document() override {
+    return s_.document_ ? &*s_.document_ : nullptr;
+  }
+  void alert_strl(std::uint16_t strl_index) override {
+    const auto text =
+        original_strl_entry(s_.resources_.find("STRL", 1005), strl_index);
+    (void)s_.show_alert(1000, {text, {}, {}, {}});
+  }
+
+ private:
+  Session& s_;
+};
+
+bool Session::run_find_dialog(OriginalFindMode mode) {
+  if (!document_ || !input_source_) return false;
+  auto modal = make_find_dialog(resources_, mode);
+  if (!drives(modal)) return false;
+  OriginalFindController controller(mode,
+                                    original_find_entries(*document_, mode));
+  // WM_INITDIALOG; its TRUE return lets the dialog manager focus OK.
+  controller.initialize(modal);
+  if (controller.initial_focus(modal)) modal.focus_first_tab_stop();
+  FindHost host(*this);
+  (void)run_dialog_modal(
+      modal, [&](const DialogSignal& signal, OriginalDialogOps& ops) {
+        return controller.signal(signal, ops, host).result;
+      });
+  log_line(std::string("dialog find ") +
+           (mode == OriginalFindMode::person ? "person" : "tenant") +
+           (controller.resolution().focused() ? ": focused floor " +
+                                                    std::to_string(
+                                                        controller.resolution()
+                                                            .floor) +
+                                                    " x " +
+                                                    std::to_string(
+                                                        controller.resolution()
+                                                            .x)
+                                              : std::string(": closed")));
+  if (!controller.resolution().focused()) return true;
+  // 10e0:0cea: construction off, edit mode two, then Command, Map, the
+  // preview scratch and the camera transform.
+  end_original_lobby_drag(world_input_context(), *world_host_);
+  world_input_.build_mode_enabled = false;
+  world_input_.command_mode = 2U;
+  for (const auto step : original_find_focus_refresh_order()) {
+    switch (step) {
+      case OriginalFindFocusRefreshStep::command_repaint:
+      case OriginalFindFocusRefreshStep::map_repaint:
+        present_requested_ = true;
+        break;
+      case OriginalFindFocusRefreshStep::restore_preview_scratch:
+        // No Elevator Control isolation exists on SDL yet.
+        if (world_input_.preview_rect) {
+          world_input_.preview_rect.reset();
+          main_backing_dirty_ = true;
+        }
+        break;
+      case OriginalFindFocusRefreshStep::camera_transform:
+        world_host_->set_main_view(controller.resolution().view.x,
+                                   controller.resolution().view.y);
+        break;
+    }
+  }
+  return true;
+}
+
+bool Session::run_finance_dialog() {
+  if (!document_ || !input_source_) return false;
+  const auto dtmp = parse_original_dtmp(resources_.find(
+      "DTMP", original_finance_launcher_contract().dialog_resource_id));
+  if (dtmp.rectangles.empty()) return false;
+  const auto& rect = dtmp.rectangles[kOriginalFinanceButtonRectangle - 1U];
+  OriginalFinanceController controller(
+      OriginalRect{rect.left, rect.top, rect.right, rect.bottom});
+  auto modal =
+      make_finance_dialog(resources_, derive_original_finance_view(*document_));
+  if (!drives(modal)) return false;
+  // The painter draws the controller's pressed surface.
+  modal.set_paint_state(
+      [&controller]() { return controller.pressed() ? 1U : 0U; });
+  // WM_INITDIALOG: SetFocus(dialog), no control focused.
+  (void)run_dialog_modal(
+      modal, [&](const DialogSignal& signal, OriginalDialogOps& ops) {
+        return controller.signal(signal, ops).result;
+      });
+  return true;
+}
+
+bool Session::open_rename_dialog_for_test(const OriginalRenameTarget& target) {
+  const std::uint16_t id = target.person ? 730U : 732U;
+  ++host_requests_.dialogs;
+  log_request(RequestKind::command_dialog, {id});
+  tally(target.person ? "dialog rename person" : "dialog rename tenant");
+  if (!document_) return false;
+  OriginalRenameController controller(target);
+  bool driven = false;
+  if (input_source_) {
+    auto modal = make_rename_dialog(resources_, target.person);
+    if (drives(modal)) {
+      driven = true;
+      controller.initialize(modal, *document_);
+      modal.focus_first_tab_stop();
+      RenameHost host(*this);
+      (void)run_dialog_modal(
+          modal, [&](const DialogSignal& signal, OriginalDialogOps& ops) {
+            return controller.signal(signal, ops, host).result;
+          });
+    }
+  }
+  // The Information callers: a change dirties the document.
+  if (controller.changed()) {
+    document_dirty_ = true;
+    present_requested_ = true;
+  }
+  log_line(std::string("dialog rename ") +
+           (target.person ? "person" : "tenant") + " -> " +
+           (controller.changed() ? "changed" : "unchanged") +
+           (driven ? "" : " (not driven: cancel)") + ", name \"" +
+           original_rename_initial_text(*document_, target) + "\"");
+  return controller.changed();
+}
+
+bool Session::open_movie_dialog_for_test(std::size_t linked_record_index) {
+  ++host_requests_.dialogs;
+  log_request(RequestKind::command_dialog,
+              {731, static_cast<std::int64_t>(linked_record_index)});
+  tally("dialog movie");
+  if (!document_) return false;
+  OriginalMovieChoiceController controller(linked_record_index);
+  std::optional<int> result{};
+  if (input_source_) {
+    auto modal = make_movie_dialog(resources_);
+    if (drives(modal)) {
+      controller.initialize(modal, *document_, part_);
+      modal.focus_first_tab_stop();
+      result = run_dialog_modal(
+          modal, [&](const DialogSignal& signal, OriginalDialogOps&) {
+            return controller.signal(signal, &*document_, part_).result;
+          });
+    }
+  }
+  // The Facility caller: any result but Cancel (0) dirties the document.
+  const bool chosen = result.value_or(0) != 0;
+  if (chosen) {
+    document_dirty_ = true;
+    present_requested_ = true;
+    paint_info();
+  }
+  log_line("dialog movie record " + std::to_string(linked_record_index) +
+           " -> " + std::to_string(result.value_or(0)) +
+           (controller.changed() ? " (changed)" : ""));
+  return chosen;
+}
+
+std::optional<int> Session::run_dialog_modal(DialogWindow& dialog,
                                              const DialogProcedure& procedure) {
   // DialogBoxIndirectParamW's own loop: no idle pass runs until the dialog
   // ends. Event dialogs and About hold DS:24b8; MessageBox does not. The
@@ -1140,44 +1371,69 @@ std::optional<int> Session::run_dialog_modal(ModalDialog& dialog,
   const bool lock = dialog.counts_modal_lock();
   dialog.place(layout_.window_width, layout_.window_height);
   // Undone on every exit, including a ScriptFailure thrown by the source or
-  // an exception from the procedure (a nested alert).
+  // an exception from the procedure (a nested alert). The dialog it covered
+  // owes its procedure a WM_PAINT.
   struct Open {
     Session& session;
     InputSource* source;
     bool lock;
-    Open(Session& s, InputSource* src, bool l, ModalDialog& d)
-        : session(s), source(src), lock(l) {
+    DialogWindow& dialog;
+    Open(Session& s, InputSource* src, bool l, DialogWindow& d)
+        : session(s), source(src), lock(l), dialog(d) {
       session.dialogs_.push_back(&d);
       if (lock) ++session.modal_depth_;
+      // UpdateWindow from the procedure (ops.update_window): present the
+      // invalid dialog now (COUNTDLOGMAIN's pressed then released frame).
+      d.set_update_window([&d, src]() {
+        if (d.take_invalidated()) src->modal_changed();
+      });
     }
     Open(const Open&) = delete;
     Open& operator=(const Open&) = delete;
     ~Open() {
+      dialog.set_update_window({});
       session.dialogs_.pop_back();
       if (lock) --session.modal_depth_;
+      if (!session.dialogs_.empty()) session.dialogs_.back()->uncovered();
       try {
+        source->dialog_closed();
         source->modal_changed();
       } catch (...) {
         // Unwinding already; the next present repaints anyway.
       }
     }
   } open(*this, source, lock, dialog);
-  source->modal_changed();
   // The dialog clock: milliseconds since it opened, advanced only by the
   // inputs' elapsed_ms. SetTimer at WM_INITDIALOG (event dialogs) or the
   // first WM_PAINT (About) arms the first deadline.
   std::uint64_t now = 0U;
+  dialog.set_clock(now);
   std::optional<std::uint64_t> deadline{};
   if (dialog.timer_interval_ms() != 0U) deadline = dialog.timer_interval_ms();
   std::optional<int> result{};
+  const auto signal = [&](const DialogSignal& sent) {
+    if (!result) result = procedure(sent, dialog);
+  };
+  // WM_PAINT: when it opens, after the procedure invalidated it and after a
+  // dialog that covered it closed; never once per frame.
+  const auto paint = [&]() {
+    if (!result && dialog.take_paint()) {
+      signal(DialogSignal{DialogSignal::Kind::paint, 0U});
+    }
+  };
   const auto deliver = [&](const DialogStep& step) {
     if (step.redraw) source->modal_changed();
-    if (step.signal) result = procedure(*step.signal, dialog);
-    // The procedure's show_item / invalidate / resize repaint an open
-    // dialog.
+    if (step.signal) signal(*step.signal);
+    if (step.then) signal(*step.then);
+    paint();
+    // The procedure's ops repaint an open dialog.
     if (dialog.take_invalidated() && !result) source->modal_changed();
     return result.has_value();
   };
+  paint();
+  (void)dialog.take_invalidated();
+  source->modal_changed();
+  if (result) return result;
   // WM_TIMER: the event timer is one-shot (1068:0380 kills it); About's
   // repeats every interval.
   const auto fire_timer = [&](std::uint64_t at) {
@@ -1186,23 +1442,33 @@ std::optional<int> Session::run_dialog_modal(ModalDialog& dialog,
     return deliver(dialog.timer());
   };
   while (true) {
-    std::optional<std::uint32_t> wait{};
-    if (deadline) {
-      wait = static_cast<std::uint32_t>(
-          std::min<std::uint64_t>(*deadline - now, 0xFFFFFFFFU));
+    // The source wakes for the timer and for the caret's next blink (a
+    // focused edit); the blink only repaints.
+    std::optional<std::uint64_t> wake = deadline;
+    if (const auto blink = dialog.next_caret_blink()) {
+      wake = wake ? std::min(*wake, *blink) : *blink;
     }
+    std::optional<std::uint32_t> wait{};
+    if (wake) {
+      wait = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+          *wake > now ? *wake - now : 0U, 0xFFFFFFFFU));
+    }
+    const bool caret_shown = dialog.caret_visible();
     const auto input = source->next_dialog_input(wait);
     if (!input) break;
     now += input->elapsed_ms;
+    dialog.set_clock(now);
+    if (dialog.caret_visible() != caret_shown) source->modal_changed();
     bool done = false;
     switch (input->kind) {
       case DialogInput::Kind::pointer: {
         DialogPointer pointer{DialogPointer::Kind::move, input->pointer.x,
-                              input->pointer.y};
+                              input->pointer.y,
+                              (input->pointer.keys & kOriginalKeyShift) != 0U};
         switch (input->pointer.kind) {
           case InputKind::move: break;
-          // The dialog classes have no CS_DBLCLKS: a double click is a
-          // down.
+          // The dialog manager's own double-click test (on the dialog
+          // clock) stands in for CS_DBLCLKS: a double click is a down.
           case InputKind::down:
           case InputKind::double_click:
             pointer.kind = DialogPointer::Kind::down;
@@ -1211,12 +1477,21 @@ std::optional<int> Session::run_dialog_modal(ModalDialog& dialog,
           case InputKind::right_down:
             pointer.kind = DialogPointer::Kind::right_down;
             break;
+          case InputKind::right_up:
+            pointer.kind = DialogPointer::Kind::right_up;
+            break;
         }
         done = deliver(dialog.pointer(pointer));
         break;
       }
       case DialogInput::Kind::key:
-        done = deliver(dialog.key(input->key, input->character));
+        done = deliver(dialog.key(input->key, input->character, input->shift));
+        break;
+      case DialogInput::Kind::key_up:
+        done = deliver(dialog.key_up(input->key, input->character));
+        break;
+      case DialogInput::Kind::character:
+        done = deliver(dialog.character(input->character));
         break;
       case DialogInput::Kind::timer:
         // A scripted WM_TIMER now (nothing without a live timer).
@@ -1333,8 +1608,15 @@ std::uint32_t Session::coarse_tick(std::uint32_t now_ms) {
 }
 
 void Session::expire_find_marker() {
-  // 1258:0186 Find-marker timeout: the marker is only set by Find, which
-  // this frontend does not have yet, so it can never expire here.
+  // 1258:0186 Find-marker timeout (10e0:051d), then the 1058:0352
+  // construction toggle. Only Find sets the marker; an inactive one never
+  // expires, so no clock is read for it.
+  if (!find_marker_.active()) return;
+  auto expired = find_marker_;
+  if (expire_original_find_marker(expired, coarse_tick_now())) {
+    find_marker_ = expired;
+    apply_original_construction_toggle(world_input_context(), *world_host_);
+  }
 }
 
 OriginalIdleView Session::main_view() {
@@ -1596,6 +1878,7 @@ bool Session::run_selector_modal(OriginalCommandSelectorSession& selector) {
         break;
       case InputKind::up: step = selector.on_lbutton_up(row); break;
       case InputKind::right_down: step = selector.on_rbutton_down(); break;
+      case InputKind::right_up: break;
     }
     if (step.redraw) input_source_->modal_changed();
     if (step.end) {
@@ -1623,6 +1906,7 @@ void Session::pointer_event(const InputEvent& event) {
       break;
     case InputKind::move:
     case InputKind::right_down:
+    case InputKind::right_up:
       break;
   }
   const std::uint16_t keys = static_cast<std::uint16_t>(
@@ -1632,7 +1916,10 @@ void Session::pointer_event(const InputEvent& event) {
   // Main (1258:0256 never clears "inside").
   last_pointer_ = OriginalWorldPoint{event.x - layout_.main_client.x,
                                      event.y - layout_.main_client.y};
-  if (event.kind == InputKind::right_down) return;
+  if (event.kind == InputKind::right_down ||
+      event.kind == InputKind::right_up) {
+    return;
+  }
 
   const bool down =
       event.kind == InputKind::down || event.kind == InputKind::double_click;

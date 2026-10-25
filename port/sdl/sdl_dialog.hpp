@@ -5,7 +5,8 @@
 // platform (no native OS controls). No SDL here, so headless runs and the
 // portable tests use it too.
 //
-// The manager is generic: a ModalDialog holds the controls built from a
+// The manager is generic: a DialogWindow (one open dialog; nothing in it is
+// modal, only Session::run_dialog_modal is) holds the controls built from a
 // DIALOG template (plus the DTMP child placement), the focus, the pressed
 // (captured) push button, Tab / Enter / Esc / Space / mnemonics, pointer
 // capture, the dialog timer and the placement. Everything a particular
@@ -17,17 +18,41 @@
 // dialogs are three descriptors (sdl_dialog_descriptors.hpp): the event
 // dialogs, the message boxes and About.
 //
-// Session::run_dialog_modal feeds a ModalDialog input and passes the
+// Session::run_dialog_modal feeds a DialogWindow input and passes the
 // signals it produces (WM_COMMAND, WM_TIMER, the About close) to a
 // procedure that mirrors the Win32 dialog procedure; the procedure acts on
 // the dialog through OriginalDialogOps (show_item / invalidate / resize).
 // draw_dialog paints it.
 //
-// TEMP: push buttons use a fixed Win3.1-style look (USER draws them; no
-// resource holds it). Space clicks the focused button on the key press, and
-// the arrow keys do not move between grouped controls. Edit, list box,
-// combo box and scroll bar controls are built (they keep their template
-// rectangle) but have no behavior or painting yet.
+// Controls (their painting is in sdl_dialog_widgets.cpp, their behavior in
+// the DialogWindow members in sdl_dialog.cpp): push buttons, text statics,
+// single-line edits, list boxes, drop-down-list combo boxes and vertical
+// SB_CTL scroll bars, each with the Win32 messages the
+// game's procedures use (OriginalDialogOps) and the notifications they read
+// (LBN_SELCHANGE / LBN_DBLCLK, CBN_SELCHANGE, EN_CHANGE, WM_VSCROLL). The
+// dialog manager keeps IsDialogMessage's keyboard rules: Tab / Shift-Tab
+// over the WS_TABSTOP controls, the arrows over the WS_GROUP group of the
+// focused control unless it keeps them (edit, list, combo, scroll bar),
+// Enter = the focused or default push button, Esc = IDCANCEL, Space presses
+// a focused push button on key down and clicks it on key up, and a letter
+// clicks the push button whose mnemonic it is unless the focused control
+// takes characters. Alt and F10 alone (WM_SYSKEYDOWN) reach no procedure.
+//
+// Scroll bars are vertical only: a template SBS_HORZ bar (style bit 0
+// clear) is laid out, painted and hit-tested as a vertical one; none of
+// the ported dialogs has one.
+//
+// TODO(Elevator Control 400, not ported yet): it needs what this runtime
+// does not have: a modeless dialog (CreateDialogIndirectParamW, nm 3708)
+// that runs beside the main loop instead of in run_dialog_modal, the
+// WM_MOUSEMOVE its procedure reads (pressed_item; unhandled_pointer
+// receives no moves) and a WM_CTLCOLORSCROLLBAR brush (it returns a white
+// one; scroll bars here always draw the TEMP button face).
+//
+// TEMP (no Win3.1 reference yet, owner decision 2026-10-23): the Win3.1
+// look and metrics of these USER-drawn controls (bevels, edit text inset,
+// caret blink, list item height, scroll bar width, combo field height) and
+// the 13-pixel Liberation Sans of their text.
 
 #include "sdl_layout.hpp"
 
@@ -56,25 +81,60 @@ struct DialogControl {
   std::uint32_t style{};
   // Client coordinates (a GDI RECT).
   OriginalRect rect{};
+  // The window text (Windows-1252): a label, or an edit's contents.
   std::string text{};
   // WS_VISIBLE, or shown by the DTMP render pass or show_item.
   bool visible{};
   bool enabled{};
   bool tab_stop{};
+  // Edit: the selection runs from anchor to caret (the caret is its active
+  // end); no selection when they are equal.
+  std::size_t caret{};
+  std::size_t anchor{};
+  // List box / combo box: the strings in order (unsorted templates only),
+  // the selection (-1: none), the first visible row and the caret row
+  // (focus rectangle). A combo box's list is open while dropped.
+  std::vector<std::string> items{};
+  int selection{-1};
+  int top_index{};
+  int caret_index{};
+  bool dropped{};
+  // Scroll bar (SB_CTL): range and thumb position (the procedure owns the
+  // position; the control only moves its tracking ghost while dragged).
+  int scroll_min{};
+  int scroll_max{};
+  int scroll_pos{};
 };
 
 // The keys the dialog manager (IsDialogMessage) and the procedures see.
 // `other` with a letter is a character key (a button mnemonic: IsDialogMessage
 // clicks the push button whose '&' letter matches, e.g. Y/N on a MessageBox).
+// `menu` is Alt or F10 pressed alone (WM_SYSKEYDOWN).
 enum class DialogKey : std::uint8_t {
   enter,
   escape,
   tab,
   shift_tab,
   space,
-  arrow,
+  left,
+  right,
+  up,
+  down,
+  home,
+  end,
+  page_up,
+  page_down,
+  backspace,
+  delete_key,
+  f4,
+  menu,
   other,
 };
+
+// The Win32 virtual key of a key (VK_RETURN, VK_SPACE, ...; the upper-case
+// letter for `other` with a letter, else 0).
+[[nodiscard]] std::uint16_t dialog_key_virtual_key(DialogKey key,
+                                                   char character);
 
 // What the dialog passes to its procedure (original_dialog_model.hpp).
 using DialogSignal = OriginalDialogSignal;
@@ -82,18 +142,23 @@ using DialogSignal = OriginalDialogSignal;
 struct DialogStep {
   bool redraw{};
   std::optional<DialogSignal> signal{};
+  // A second signal the same input sends right after the first (a scroll
+  // bar's SB_THUMBPOSITION then SB_ENDSCROLL).
+  std::optional<DialogSignal> then{};
 };
 
 // Window-coordinate mouse event (sdl_session.hpp's InputEvent, kept here
 // without the session).
 struct DialogPointer {
-  enum class Kind : std::uint8_t { move, down, up, right_down };
+  enum class Kind : std::uint8_t { move, down, up, right_down, right_up };
   Kind kind{Kind::move};
   int x{};
   int y{};
+  // MK_SHIFT (an edit extends its selection).
+  bool shift{};
 };
 
-class ModalDialog;
+class DialogWindow;
 
 // Where a dialog goes in the desktop (the SDL window is the Win16 desktop).
 enum class DialogPlacement : std::uint8_t {
@@ -118,7 +183,7 @@ struct DialogFrameInsets {
   int bottom{};
 };
 
-// The per-dialog part of a ModalDialog.
+// The per-dialog part of a DialogWindow.
 struct DialogDescriptor {
   // The script name ("expect-dialog"): event_dialog_label and friends.
   std::string label{};
@@ -137,24 +202,35 @@ struct DialogDescriptor {
   // the dialog itself; null: nothing).
   using Painter = std::function<void(OriginalDrawContext& context,
                                      OriginalCanvasFont& font,
-                                     const ModalDialog& dialog,
+                                     const DialogWindow& dialog,
                                      const OriginalResources& resources)>;
   Painter paint_frame{};
   Painter paint_client{};
   // IsDialogMessage(VK_ESCAPE): the WM_COMMAND id to send, or nullopt for
   // nothing. Null: IDCANCEL whether or not a control 2 exists (the dialog
   // manager's rule).
-  std::function<std::optional<std::uint16_t>(const ModalDialog& dialog)>
+  std::function<std::optional<std::uint16_t>(const DialogWindow& dialog)>
       escape_command{};
   // A key the manager does not consume (Space without a focused push
   // button, a letter that is no mnemonic) reaches the dialog procedure as
   // WM_KEYDOWN; this maps it to a signal. Null ignores it.
   std::function<std::optional<DialogSignal>(DialogKey key, char character)>
       unhandled_key{};
-  // A button event on no push button (and not ending a capture) reaches the
-  // dialog procedure (WM_LBUTTONUP / WM_RBUTTONDOWN). Null ignores it.
-  std::function<std::optional<DialogSignal>(const DialogPointer& pointer)>
+  // A WM_KEYUP the manager does not consume (any key up but the Space that
+  // clicks a pressed push button). Null ignores it.
+  std::function<std::optional<DialogSignal>(DialogKey key, char character)>
+      unhandled_key_up{};
+  // A button event on no control that takes it (and not ending a capture)
+  // reaches the dialog procedure (WM_LBUTTONDOWN / WM_LBUTTONUP /
+  // WM_RBUTTONDOWN / WM_RBUTTONUP); the pointer is in window coordinates.
+  // Null ignores it.
+  std::function<std::optional<DialogSignal>(const DialogPointer& pointer,
+                                            int client_x, int client_y)>
       unhandled_pointer{};
+  // WM_CTLCOLOREDIT / WM_CTLCOLORLISTBOX brushes (null: the control's own
+  // COLOR_WINDOW white).
+  std::optional<OriginalRgb> edit_background{};
+  std::optional<OriginalRgb> list_background{};
 };
 
 // Which dialog is open, as scripts name it ("expect-dialog"): "event ID"
@@ -165,13 +241,19 @@ struct DialogDescriptor {
 inline constexpr char kAboutDialogLabel[] = "about";
 inline constexpr char kReplaceBoxLabel[] = "box replace";
 inline constexpr char kInvalidFilenameBoxLabel[] = "box invalid-filename";
+inline constexpr char kFinanceDialogLabel[] = "finance";
+inline constexpr char kFindPersonDialogLabel[] = "find person";
+inline constexpr char kFindTenantDialogLabel[] = "find tenant";
+inline constexpr char kRenamePersonDialogLabel[] = "rename person";
+inline constexpr char kRenameTenantDialogLabel[] = "rename tenant";
+inline constexpr char kMovieDialogLabel[] = "movie";
 
-class ModalDialog final : public OriginalDialogOps {
+class DialogWindow final : public OriginalDialogOps {
  public:
   // dialog_template: the template the dialog-manager rules read (Enter's
   // default id); controls: its children in template order (Z order: the
   // first is on top), in client coordinates.
-  ModalDialog(DialogDescriptor descriptor,
+  DialogWindow(DialogDescriptor descriptor,
               OriginalDialog dialog_template,
               std::vector<DialogControl> controls,
               int client_width,
@@ -239,23 +321,129 @@ class ModalDialog final : public OriginalDialogOps {
   }
   [[nodiscard]] std::uint64_t timer_ticks() const { return timer_ticks_; }
 
+  // The dialog manager's focus after WM_INITDIALOG returns TRUE: the first
+  // visible, enabled WS_TABSTOP control in template order (none: 0).
+  void focus_first_tab_stop();
+  // The focused control (null: none).
+  [[nodiscard]] const DialogControl* focused_control() const {
+    return control(focus_);
+  }
+  // Window-coordinate center of list item `index` of list box id when it is
+  // a visible row (scripts' "dialog-list"); nullopt otherwise.
+  [[nodiscard]] std::optional<std::pair<int, int>> list_item_point(
+      std::uint16_t id, int index) const;
+  // The dialog clock (milliseconds since it opened): double clicks and the
+  // caret blink use it, never the session clock.
+  void set_clock(std::uint64_t ms) { clock_ms_ = ms; }
+  [[nodiscard]] std::uint64_t clock() const { return clock_ms_; }
+  // Whether the edit caret is drawn now (focused edit, blink phase), and
+  // the dialog-clock time it next blinks (nullopt: no focused edit).
+  [[nodiscard]] bool caret_visible() const;
+  [[nodiscard]] std::optional<std::uint64_t> next_caret_blink() const;
+
   DialogStep pointer(const DialogPointer& event);
-  // character: the lower-case letter of a character key (0 for none).
-  DialogStep key(DialogKey key, char character = '\0');
+  // A key press (WM_KEYDOWN through IsDialogMessage). character: the
+  // lower-case letter of a character key (0 for none); shift: Shift is
+  // down (Shift+arrows extend an edit selection).
+  DialogStep key(DialogKey key, char character = '\0', bool shift = false);
+  // A key release (WM_KEYUP).
+  DialogStep key_up(DialogKey key, char character = '\0');
+  // One typed character (WM_CHAR, Windows-1252) for the focused control: an
+  // edit inserts it, a list box or combo box selects the next item starting
+  // with it; anything else ignores it.
+  DialogStep character(char cp1252);
   // WM_TIMER: counts the tick and passes the timer signal on.
   DialogStep timer();
+  // Whether the dialog owes its procedure a WM_PAINT (when it opened, after
+  // invalidate, after a covering dialog closed); clears it.
+  [[nodiscard]] bool take_paint();
+  // A nested dialog that covered this one closed.
+  void uncovered() {
+    paint_pending_ = true;
+    invalidated_ = true;
+  }
 
   // OriginalDialogOps, for the procedure. Each marks the dialog for a
   // repaint (take_invalidated).
   void show_item(std::uint16_t id, bool shown) override;
   void invalidate() override;
   void resize(int client_width, int client_height) override;
+  void enable_item(std::uint16_t id, bool enabled) override;
+  void focus_item(std::uint16_t id) override;
+  void set_item_text(std::uint16_t id, std::string_view cp1252) override;
+  [[nodiscard]] std::string item_text(std::uint16_t id) const override;
+  void list_reset(std::uint16_t id) override;
+  void list_add(std::uint16_t id, std::string_view cp1252) override;
+  void list_delete(std::uint16_t id, int index) override;
+  [[nodiscard]] int list_selection(std::uint16_t id) const override;
+  void list_set_selection(std::uint16_t id, int index) override;
+  void set_scroll_range(std::uint16_t id, int min, int max) override;
+  void set_scroll_pos(std::uint16_t id, int position) override;
+  // UpdateWindow: runs the host's synchronous repaint (set_update_window;
+  // nothing without one).
+  void update_window() override;
   // Whether an op asked for a repaint since the last call (then clears it).
   [[nodiscard]] bool take_invalidated();
 
+  // The host's UpdateWindow (Session::run_dialog_modal presents the window
+  // when the dialog is invalid); empty clears it.
+  void set_update_window(std::function<void()> update) {
+    update_window_ = std::move(update);
+  }
+  // The procedure's own state that the descriptor's painters read (the
+  // DWLP_USER context of the Win32 procedure; Finance: nonzero while its
+  // OK surface is drawn pressed). The host that runs the procedure sets the
+  // source and keeps what it reads alive while the dialog is open; 0
+  // without one.
+  void set_paint_state(std::function<std::uint32_t()> source) {
+    paint_state_ = std::move(source);
+  }
+  [[nodiscard]] std::uint32_t paint_state() const {
+    return paint_state_ ? paint_state_() : 0U;
+  }
+
+  // Widget geometry shared by the painters, hit tests and tests.
+  [[nodiscard]] OriginalRect scroll_track(const DialogControl& control) const;
+  [[nodiscard]] int list_rows(const DialogControl& control) const;
+  [[nodiscard]] bool list_has_scroll_bar(const DialogControl& control) const;
+  // The tracking ghost of a dragged scroll bar thumb (nullopt: none).
+  [[nodiscard]] std::optional<int> scroll_tracking(std::uint16_t id) const {
+    return scroll_drag_ && scroll_drag_->id == id
+               ? std::optional<int>(scroll_drag_->position)
+               : std::nullopt;
+  }
+
  private:
+  // The rectangle that takes the mouse: the control's, except a combo
+  // box's field (plus its list while dropped).
+  [[nodiscard]] OriginalRect hit_rect(const DialogControl& control) const;
   [[nodiscard]] const DialogControl* control_at(int x, int y) const;
+  [[nodiscard]] DialogControl* mutable_control(std::uint16_t id);
   void move_focus(bool forward);
+  void move_group_focus(bool forward);
+  // WM_NEXTDLGCTL-style focus change: an edit gets its whole text selected.
+  void set_focus(std::uint16_t id, bool select_edit_text);
+  void close_drop_downs();
+  DialogStep edit_key(DialogControl& edit, DialogKey key, bool shift);
+  DialogStep edit_character(DialogControl& edit, char cp1252);
+  DialogStep list_key(DialogControl& list, DialogKey key);
+  DialogStep list_select(DialogControl& list, int index, bool notify);
+  DialogStep combo_key(DialogControl& combo, DialogKey key);
+  DialogStep scroll_key(DialogControl& bar, DialogKey key);
+  DialogStep pointer_down(const DialogPointer& event, int x, int y);
+  DialogStep scroll_bar_down(DialogControl& bar, const OriginalRect& area,
+                             bool for_list, int x, int y);
+  void list_scroll_to(DialogControl& list, int top);
+  void ensure_visible(DialogControl& list);
+
+  // The drag that a press on a control started (WM_LBUTTONDOWN capture).
+  enum class Drag : std::uint8_t { none, button, edit, list, combo_list };
+  struct ScrollDrag {
+    std::uint16_t id{};
+    bool for_list{};
+    int grab{};       // pointer offset inside the thumb
+    int position{};   // the tracking position
+  };
 
   DialogDescriptor descriptor_{};
   OriginalDialog dialog_{};
@@ -269,8 +457,22 @@ class ModalDialog final : public OriginalDialogOps {
   std::uint16_t focus_{};
   std::uint16_t captured_{};
   bool pressed_{};
+  bool space_pressed_{};
+  Drag drag_{Drag::none};
+  std::optional<ScrollDrag> scroll_drag_{};
   bool invalidated_{};
+  bool paint_pending_{true};
   std::uint64_t timer_ticks_{};
+  std::uint64_t clock_ms_{};
+  std::uint64_t caret_epoch_ms_{};
+  // The previous press, for the double-click test (a second press on the
+  // same list within 500 ms and 4 pixels).
+  std::optional<std::uint64_t> last_press_ms_{};
+  int last_press_x_{};
+  int last_press_y_{};
+  std::uint16_t last_press_id_{};
+  std::function<void()> update_window_{};
+  std::function<std::uint32_t()> paint_state_{};
 };
 
 // Dialog base units of a font (GdiGetCharDimensions): the rounded average
@@ -349,10 +551,67 @@ void draw_dialog_outline(OriginalDrawContext& context,
                          const OriginalRect& rect,
                          OriginalRgb rgb);
 
+// TEMP Win3.1-style control metrics (USER computes them; no resource
+// holds them, and no reference exists yet).
+inline constexpr int kDialogScrollBarWidth = 17;   // list box WS_VSCROLL
+inline constexpr int kDialogComboButtonWidth = 17;
+inline constexpr int kDialogComboFieldExtra = 6;   // field = line + 6
+inline constexpr int kDialogEditInsetX = 2;        // inside the border
+inline constexpr int kDialogEditInsetY = 2;
+inline constexpr int kDialogListInsetX = 2;
+inline constexpr int kDialogCaretBlinkMs = 530;
+// GetDoubleClickTime and SM_CXDOUBLECLK defaults.
+inline constexpr int kDialogDoubleClickMs = 500;
+inline constexpr int kDialogDoubleClickDistance = 4;
+
+// An edit's text origin (client coordinates) and the width its text may
+// fill (no ES_AUTOHSCROLL: a character that would pass it is refused).
+struct DialogEditLayout {
+  int text_x{};
+  int text_y{};
+  int width{};
+};
+[[nodiscard]] DialogEditLayout dialog_edit_layout(const DialogControl& edit);
+// The character boundary nearest to client x in an edit.
+[[nodiscard]] std::size_t dialog_edit_hit(OriginalCanvasFont& font,
+                                          int pixel_height,
+                                          const DialogControl& edit,
+                                          int x);
+// The rows of a list box (its rectangle inside the border) and of an open
+// combo box list, in client coordinates.
+[[nodiscard]] OriginalRect dialog_list_rows_rect(const DialogControl& list);
+[[nodiscard]] OriginalRect dialog_combo_field_rect(const DialogControl& combo,
+                                                   int line_height);
+[[nodiscard]] OriginalRect dialog_combo_list_rect(const DialogControl& combo,
+                                                  int line_height);
+
+// The parts of a vertical scroll bar (SB_CTL or a list's WS_VSCROLL) at a
+// position in [min, max]: the arrow buttons (each min(width, height / 2)
+// tall), the trough between them and the square thumb. The painter, the
+// hit test and the thumb drag all use it.
+struct DialogScrollParts {
+  OriginalRect up{};
+  OriginalRect down{};
+  int track_top{};
+  int track_bottom{};
+  // Empty when the range is empty or there is no room (no thumb).
+  OriginalRect thumb{};
+};
+[[nodiscard]] DialogScrollParts dialog_scroll_parts(const OriginalRect& bar,
+                                                    int min,
+                                                    int max,
+                                                    int position);
+
+// The controls, bottom up (the first template child is on top), each in
+// its Win3.1-style look (TEMP), then an open combo box list over them.
+void paint_dialog_controls(OriginalDrawContext& context,
+                           OriginalCanvasFont& font,
+                           const DialogWindow& dialog);
+
 // Paints the dialog at its placement into a window raster: the frame
 // painter, the client painter, then the controls bottom up.
 void draw_dialog(OriginalWorldRaster& raster,
-                 const ModalDialog& dialog,
+                 const DialogWindow& dialog,
                  const OriginalResources& resources);
 
 }  // namespace simtower::sdl

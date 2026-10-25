@@ -15,6 +15,18 @@
 
 namespace simtower {
 
+// RGB(level, level, level).
+[[nodiscard]] constexpr OriginalRgb original_gray(std::uint8_t level) noexcept {
+  return (static_cast<OriginalRgb>(level) << 16U) |
+         (static_cast<OriginalRgb>(level) << 8U) | level;
+}
+
+// InflateRect(&rect, -by, -by).
+[[nodiscard]] constexpr OriginalRect original_deflate_rect(OriginalRect rect,
+                                                           int by) noexcept {
+  return {rect.left + by, rect.top + by, rect.right - by, rect.bottom - by};
+}
+
 // 11e0:06d9: two three-pixel bevels (outer 179 top-left / 140 bottom-right,
 // inner 102 / 230) and a 204 fill of what remains.
 void paint_original_dtmp_frame(OriginalDrawContext& context,

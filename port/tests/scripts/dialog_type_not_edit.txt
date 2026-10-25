@@ -1,0 +1,9 @@
+# dialog-type needs an edit with the focus: Find's focus is OK (exit 2).
+# args: --scenario busy --passes 3
+# expect-exit: 2
+# expect-stderr: dialog-type: the focused control of find person is not an edit
+pass 1
+menu 40019
+expect-dialog find person
+dialog-type abc
+pass 3

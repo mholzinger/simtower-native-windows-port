@@ -148,6 +148,10 @@ OriginalDialogOutcome OriginalEventDialogController::signal(
     case OriginalDialogSignal::Kind::close:
     case OriginalDialogSignal::Kind::draw_item:
     case OriginalDialogSignal::Kind::scroll:
+    case OriginalDialogSignal::Kind::paint:
+    case OriginalDialogSignal::Kind::key_up:
+    case OriginalDialogSignal::Kind::button_down:
+    case OriginalDialogSignal::Kind::button_up:
       return {};
   }
   switch (original_event_dialog_action(command, argument_, balance,
@@ -179,6 +183,10 @@ OriginalDialogOutcome original_about_dialog_signal(
     case OriginalDialogSignal::Kind::command:
     case OriginalDialogSignal::Kind::draw_item:
     case OriginalDialogSignal::Kind::scroll:
+    case OriginalDialogSignal::Kind::paint:
+    case OriginalDialogSignal::Kind::key_up:
+    case OriginalDialogSignal::Kind::button_down:
+    case OriginalDialogSignal::Kind::button_up:
       return {};
   }
   return {};

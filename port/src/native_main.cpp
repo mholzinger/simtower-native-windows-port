@@ -3,20 +3,21 @@
 #include "original_audio_waveout_win32.hpp"
 #include "original_command_palette_win32.hpp"
 #include "original_construction.hpp"
-#include "original_dib_win32.hpp"
-#include "original_dialog_win32.hpp"
+#include "original_dialog_controllers.hpp"
 #include "original_dialog_model.hpp"
-#include "original_dtmp.hpp"
+#include "original_dialog_win32.hpp"
+#include "original_dib_win32.hpp"
 #include "original_draw_context_win32.hpp"
+#include "original_dtmp.hpp"
 #include "original_dtmp_runtime_win32.hpp"
 #include "original_elevator_control.hpp"
 #include "original_finance.hpp"
 #include "original_find.hpp"
 #include "original_font_win32.hpp"
 #include "original_idle_pass.hpp"
-#include "original_main_command.hpp"
 #include "original_info_win32.hpp"
 #include "original_information_win32.hpp"
+#include "original_main_command.hpp"
 #include "original_map.hpp"
 #include "original_palette_frame_win32.hpp"
 #include "original_people.hpp"
@@ -2829,7 +2830,9 @@ int run_original_event_dialog(
 struct OriginalFinanceDialogContext {
   simtower::OriginalDtmp dtmp{};
   simtower::OriginalFinanceView view{};
-  bool pressed{};
+  // COUNTDLOGMAIN's key and button transactions (and the pressed state the
+  // painter reads), shared with the SDL host.
+  simtower::OriginalFinanceController controller{{}};
 };
 
 HFONT make_original_dialog_font(int pixel_height) {
@@ -3930,6 +3933,87 @@ std::wstring original_get_dialog_item_text(HWND dialog, int item) {
   return std::wstring(text.data(), static_cast<std::size_t>(length));
 }
 
+// The shared dialog controllers' OriginalDialogOps over a Win32 dialog: the
+// same USER calls the procedures made inline before they shared the
+// controllers (original_dialog_controllers.hpp). Text crosses the CP1252
+// boundary as the procedures convert it; list ops address a LISTBOX (the
+// only list the shared procedures use).
+class Win32DialogOps final : public simtower::OriginalDialogOps {
+ public:
+  explicit Win32DialogOps(HWND dialog) : dialog_(dialog) {}
+
+  void show_item(std::uint16_t id, bool shown) override {
+    ShowWindow(GetDlgItem(dialog_, id), shown ? SW_SHOW : SW_HIDE);
+  }
+  void invalidate() override { InvalidateRect(dialog_, nullptr, FALSE); }
+  void invalidate_rect(const simtower::OriginalRect& rect) override {
+    const RECT native{rect.left, rect.top, rect.right, rect.bottom};
+    InvalidateRect(dialog_, &native, FALSE);
+  }
+  void update_window() override { UpdateWindow(dialog_); }
+  void resize(int client_width, int client_height) override {
+    RECT outer{0, 0, client_width, client_height};
+    AdjustWindowRectEx(
+        &outer, static_cast<DWORD>(GetWindowLongPtrW(dialog_, GWL_STYLE)),
+        FALSE, static_cast<DWORD>(GetWindowLongPtrW(dialog_, GWL_EXSTYLE)));
+    SetWindowPos(dialog_, nullptr, 0, 0, outer.right - outer.left,
+                 outer.bottom - outer.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+  void enable_item(std::uint16_t id, bool enabled) override {
+    EnableWindow(GetDlgItem(dialog_, id), enabled);
+  }
+  void focus_item(std::uint16_t id) override {
+    SetFocus(GetDlgItem(dialog_, id));
+  }
+  void set_item_text(std::uint16_t id, std::string_view cp1252) override {
+    const auto wide = original_cp1252_to_wide(cp1252);
+    original_set_dialog_item_text(dialog_, id, wide.c_str());
+  }
+  [[nodiscard]] std::string item_text(std::uint16_t id) const override {
+    return original_wide_to_cp1252(original_get_dialog_item_text(dialog_, id));
+  }
+  void list_reset(std::uint16_t id) override {
+    SendDlgItemMessageW(dialog_, id, LB_RESETCONTENT, 0U, 0);
+  }
+  void list_add(std::uint16_t id, std::string_view cp1252) override {
+    const auto text = original_cp1252_to_wide(cp1252);
+    SendDlgItemMessageW(dialog_, id, LB_ADDSTRING, 0U,
+                        reinterpret_cast<LPARAM>(text.c_str()));
+  }
+  void list_delete(std::uint16_t id, int index) override {
+    SendDlgItemMessageW(dialog_, id, LB_DELETESTRING,
+                        static_cast<WPARAM>(index), 0);
+  }
+  [[nodiscard]] int list_selection(std::uint16_t id) const override {
+    const auto selected =
+        SendDlgItemMessageW(dialog_, id, LB_GETCURSEL, 0U, 0);
+    return selected == LB_ERR ? -1 : static_cast<int>(selected);
+  }
+  void list_set_selection(std::uint16_t id, int index) override {
+    SendDlgItemMessageW(dialog_, id, LB_SETCURSEL,
+                        static_cast<WPARAM>(index), 0);
+  }
+  void set_scroll_range(std::uint16_t id, int min, int max) override {
+    SetScrollRange(GetDlgItem(dialog_, id), SB_CTL, min, max, TRUE);
+  }
+  void set_scroll_pos(std::uint16_t id, int position) override {
+    SetScrollPos(GetDlgItem(dialog_, id), SB_CTL, position, TRUE);
+  }
+
+ private:
+  HWND dialog_{};
+};
+
+// The rename procedures' WM_INITDIALOG transaction (the saved name into
+// edit 4, Delete and Rename gated) through the shared controller.
+void initialize_original_rename_dialog(
+    HWND dialog, const simtower::OriginalRenameTarget& target) {
+  Win32DialogOps ops(dialog);
+  simtower::OriginalRenameController(target).initialize(ops,
+                                                        *g_tower_document);
+}
+
 // Native message boundary for NAMEPEPLEDIALOGFILTER at 1100:3a39.
 INT_PTR CALLBACK person_rename_dialog_proc(HWND dialog, UINT message,
                                            WPARAM wparam, LPARAM lparam) {
@@ -3956,12 +4040,8 @@ INT_PTR CALLBACK person_rename_dialog_proc(HWND dialog, UINT message,
           GetNearestPaletteIndex(g_logical_palette, background));
     }
     context->control_background = CreateSolidBrush(background);
-    const auto name = original_cp1252_to_wide(
-        simtower::original_person_saved_name(
-            *g_tower_document, context->person_index));
-    original_set_dialog_item_text(dialog, 4, name.c_str());
-    EnableWindow(GetDlgItem(dialog, 3), !name.empty());
-    enable_original_person_rename_button(dialog);
+    initialize_original_rename_dialog(
+        dialog, {true, context->person_index, 0, 0U});
     if (HDC dc = GetDC(dialog)) {
       paint_original_rename_dialog(dialog, dc, context->dtmp, true);
       ReleaseDC(dialog, dc);
@@ -4038,22 +4118,19 @@ INT_PTR CALLBACK person_rename_dialog_proc(HWND dialog, UINT message,
             const auto wide = original_get_dialog_item_text(dialog, 4);
             if (wide.empty()) return TRUE;
             const auto name = original_wide_to_cp1252(wide);
-            const auto result = simtower::set_original_person_name(
-                *g_tower_document, context->person_index, name);
-            if (result.status ==
-                simtower::OriginalPersonNameStatus::too_long) {
+            // The shared Save branch (original_rename_save): too long
+            // alerts STRL/1005[4] and stays open; a full table alerts
+            // STRL/1005[6] and closes.
+            const auto result = simtower::original_rename_save(
+                *g_tower_document, {true, context->person_index, 0, 0U},
+                name);
+            if (result.alert_strl_index) {
               const auto text = simtower::original_strl_entry(
-                  g_resources.find("STRL", 1005), 4U);
-              (void)simtower::show_original_alert(
-                  dialog, g_resources, 1000, {text, {}, {}, {}});
-              return TRUE;
-            }
-            if (result.status == simtower::OriginalPersonNameStatus::full) {
-              const auto text = simtower::original_strl_entry(
-                  g_resources.find("STRL", 1005), 6U);
+                  g_resources.find("STRL", 1005), *result.alert_strl_index);
               (void)simtower::show_original_alert(
                   dialog, g_resources, 1000, {text, {}, {}, {}});
             }
+            if (!result.close) return TRUE;
             context->changed = context->changed || result.changed;
           }
           close_dialog();
@@ -4430,12 +4507,8 @@ INT_PTR CALLBACK tenant_rename_dialog_proc(HWND dialog, UINT message,
           GetNearestPaletteIndex(g_logical_palette, background));
     }
     context->control_background = CreateSolidBrush(background);
-    const auto name = original_cp1252_to_wide(
-        simtower::original_tenant_saved_name(
-            *g_tower_document, context->floor, context->tenant_index));
-    original_set_dialog_item_text(dialog, 4, name.c_str());
-    EnableWindow(GetDlgItem(dialog, 3), !name.empty());
-    enable_original_tenant_rename_button(dialog);
+    initialize_original_rename_dialog(
+        dialog, {false, 0U, context->floor, context->tenant_index});
     if (HDC dc = GetDC(dialog)) {
       paint_original_rename_dialog(dialog, dc, context->dtmp, true);
       ReleaseDC(dialog, dc);
@@ -4506,23 +4579,19 @@ INT_PTR CALLBACK tenant_rename_dialog_proc(HWND dialog, UINT message,
             const auto wide = original_get_dialog_item_text(dialog, 4);
             if (wide.empty()) return TRUE;
             const auto name = original_wide_to_cp1252(wide);
-            const auto result = simtower::set_original_tenant_name(
-                *g_tower_document, context->floor, context->tenant_index,
-                name);
-            if (result.status ==
-                simtower::OriginalTenantNameStatus::too_long) {
+            // The shared Save branch (original_rename_save): too long
+            // alerts STRL/1005[4] and stays open; a full table alerts
+            // STRL/1005[7] and closes.
+            const auto result = simtower::original_rename_save(
+                *g_tower_document,
+                {false, 0U, context->floor, context->tenant_index}, name);
+            if (result.alert_strl_index) {
               const auto text = simtower::original_strl_entry(
-                  g_resources.find("STRL", 1005), 4U);
-              (void)simtower::show_original_alert(
-                  dialog, g_resources, 1000, {text, {}, {}, {}});
-              return TRUE;
-            }
-            if (result.status == simtower::OriginalTenantNameStatus::full) {
-              const auto text = simtower::original_strl_entry(
-                  g_resources.find("STRL", 1005), 7U);
+                  g_resources.find("STRL", 1005), *result.alert_strl_index);
               (void)simtower::show_original_alert(
                   dialog, g_resources, 1000, {text, {}, {}, {}});
             }
+            if (!result.close) return TRUE;
             context->changed = context->changed || result.changed;
           }
           close_dialog();
@@ -4571,14 +4640,11 @@ bool run_original_tenant_rename_dialog(std::int16_t floor,
 
 void enable_original_movie_choice_buttons(HWND dialog) {
   if (!g_tower_document) return;
-  const auto new_cost = std::bit_cast<std::int16_t>(
-      g_part.words_52_to_ac[34]);
-  const auto classic_cost = std::bit_cast<std::int16_t>(
-      g_part.words_52_to_ac[35]);
-  EnableWindow(GetDlgItem(dialog, 1),
-               g_tower_document->header.balance >= new_cost);
-  EnableWindow(GetDlgItem(dialog, 3),
-               g_tower_document->header.balance >= classic_cost);
+  // PART words 34 / 35 against the balance (original_movie_choice_enabled).
+  const auto enabled =
+      simtower::original_movie_choice_enabled(*g_tower_document, g_part);
+  EnableWindow(GetDlgItem(dialog, 1), enabled.new_release);
+  EnableWindow(GetDlgItem(dialog, 3), enabled.classic);
 }
 
 void paint_original_movie_choice_dialog(
@@ -5050,95 +5116,84 @@ const simtower::OriginalDtmpRect& original_finance_rectangle(
   return context.dtmp.rectangles[one_based_index - 1U];
 }
 
-void paint_original_finance_value(
-    HDC dc,
-    const OriginalFinanceDialogContext& context,
-    std::size_t rectangle_index,
-    std::int32_t value) {
-  // Exact native text/placement equivalent of Finance helper 11e0:00ca:
-  // 1208:0c89 measures the formatted string and 1208:07a5 emits it at the
-  // current drawing position.
-  const auto text = std::to_wstring(value);
-  SIZE extent{};
-  GetTextExtentPoint32W(dc, text.data(), static_cast<int>(text.size()),
-                        &extent);
-  const auto& rectangle =
-      original_finance_rectangle(context, rectangle_index);
-  const auto position = simtower::original_finance_value_position(
-      rectangle_index, rectangle.right, rectangle.top, extent.cx);
-  MoveToEx(dc, position.x, position.y, nullptr);
-  TextOutW(dc, 0, 0, text.data(), static_cast<int>(text.size()));
-}
-
 void paint_original_finance_dialog(
     HDC dc,
     const OriginalFinanceDialogContext& context) {
   // 1060:0105/0479 builds the default surface from BITMAP/500. BITMAP/501
   // differs in the DTMP/500 button rectangle and supplies its pressed state.
   simtower::draw_original_dib(dc, g_resources.find("BITMAP", 500), 0, 0);
-  if (context.pressed) {
-    const auto& button = original_finance_rectangle(context, 1U);
+  if (context.controller.pressed()) {
+    const auto& button = original_finance_rectangle(
+        context, simtower::kOriginalFinanceButtonRectangle);
     simtower::draw_original_dib_region(
         dc, g_resources.find("BITMAP", 501), button.left, button.top,
         button.left, button.top, button.right - button.left,
         button.bottom - button.top);
   }
 
+  // The values in draw order with their fonts and anchors come from the
+  // shared original_finance_text_ops (the SDL painter draws the same list);
+  // 11e0:00ca measures each summary value with 1208:0c89 in its font.
   const int old_background = SetBkMode(dc, TRANSPARENT);
   const UINT old_alignment = SetTextAlign(dc, TA_UPDATECP);
   HFONT font14 = make_original_dialog_font(14);
   HFONT font12 = make_original_dialog_font(12);
-  HGDIOBJ old_font = font14 ? SelectObject(dc, font14) : nullptr;
-
-  paint_original_finance_value(dc, context, 6U, context.view.total_income);
-  paint_original_finance_value(dc, context, 7U,
-                               context.view.total_maintenance);
-  if (font12) SelectObject(dc, font12);
-  paint_original_finance_value(dc, context, 8U, context.view.year);
-  paint_original_finance_value(dc, context, 9U, context.view.quarter);
-  paint_original_finance_value(dc, context, 10U,
-                               context.view.net_revenues);
-  paint_original_finance_value(dc, context, 11U,
-                               context.view.other_income);
-  paint_original_finance_value(dc, context, 12U,
-                               context.view.construction_costs);
-  paint_original_finance_value(dc, context, 13U,
-                               context.view.last_quarter_balance);
-  paint_original_finance_value(dc, context, 14U,
-                               context.view.total_balance);
-
-  SetTextAlign(dc, TA_UPDATECP | TA_RIGHT | TA_BASELINE);
-  for (std::size_t row = 0U; row < 10U; ++row) {
-    const std::array values{
-        context.view.population[row],
-        context.view.income[row],
-        context.view.maintenance[row],
-    };
-    for (std::size_t column = 0U; column < values.size(); ++column) {
-      const auto& rectangle =
-          original_finance_rectangle(context, 3U + column);
-      const auto text = std::to_wstring(values[column]);
-      MoveToEx(dc, static_cast<int>(rectangle.right) - 1,
-               static_cast<int>(rectangle.top) +
-                   static_cast<int>(row + 1U) * 13 - 2,
-               nullptr);
-      TextOutW(dc, 0, 0, text.data(), static_cast<int>(text.size()));
+  HGDIOBJ old_font = nullptr;
+  bool font_selected = false;
+  const auto select_font = [&](int pixels) {
+    HFONT font = pixels == 14 ? font14 : font12;
+    if (!font) return;
+    HGDIOBJ previous = SelectObject(dc, font);
+    if (!font_selected) {
+      old_font = previous;
+      font_selected = true;
     }
+  };
+  const auto measure = [&](int pixels, std::string_view text) {
+    select_font(pixels);
+    const auto wide = original_cp1252_to_wide(text);
+    SIZE extent{};
+    GetTextExtentPoint32W(dc, wide.data(), static_cast<int>(wide.size()),
+                          &extent);
+    return static_cast<int>(extent.cx);
+  };
+  const auto text_ops = simtower::original_finance_text_ops(
+      context.view, context.dtmp, measure);
+  for (const auto& op : text_ops) {
+    select_font(op.font_pixels);
+    SetTextAlign(dc, op.right_baseline
+                         ? TA_UPDATECP | TA_RIGHT | TA_BASELINE
+                         : TA_UPDATECP);
+    const auto wide = original_cp1252_to_wide(op.text);
+    MoveToEx(dc, op.x, op.y, nullptr);
+    TextOutW(dc, 0, 0, wide.data(), static_cast<int>(wide.size()));
   }
 
-  if (old_font) SelectObject(dc, old_font);
+  if (font_selected) SelectObject(dc, old_font);
   SetTextAlign(dc, old_alignment);
   SetBkMode(dc, old_background);
 }
 
-bool original_finance_button_hit(
-    const OriginalFinanceDialogContext& context,
-    LPARAM position) {
-  const auto& button = original_finance_rectangle(context, 1U);
-  const int x = static_cast<std::int16_t>(LOWORD(position));
-  const int y = static_cast<std::int16_t>(HIWORD(position));
-  return x >= button.left && x < button.right &&
-         y >= button.top && y < button.bottom;
+// WM_KEYUP / WM_LBUTTONDOWN / WM_LBUTTONUP through the shared controller;
+// a close is EndDialog(0), then COUNTDLOGMAIN clears DS:31a4 and returns
+// FALSE through 1060:0454.
+void signal_original_finance_dialog(HWND dialog,
+                                    OriginalFinanceDialogContext& context,
+                                    const simtower::OriginalDialogSignal&
+                                        signal) {
+  Win32DialogOps ops(dialog);
+  const auto outcome = context.controller.signal(signal, ops);
+  if (!outcome.result) return;
+  EndDialog(dialog, *outcome.result);
+  g_original_active_modal_window = nullptr;
+}
+
+simtower::OriginalDialogSignal original_finance_button_signal(
+    simtower::OriginalDialogSignal::Kind kind, LPARAM position) {
+  simtower::OriginalDialogSignal signal{kind};
+  signal.x = static_cast<std::int16_t>(LOWORD(position));
+  signal.y = static_cast<std::int16_t>(HIWORD(position));
+  return signal;
 }
 
 // Native message boundary for COUNTDLOGMAIN at 1060:00d3.
@@ -5179,53 +5234,27 @@ INT_PTR CALLBACK finance_dialog_proc(HWND dialog, UINT message,
     }
     case WM_KEYUP:
       if (context) {
-        const auto presentation =
-            simtower::original_finance_key_presentation(
-                static_cast<std::uint16_t>(wparam));
-        const auto& button = original_finance_rectangle(*context, 1U);
-        const RECT rectangle{button.left, button.top,
-                             button.right, button.bottom};
-        if (presentation.draw_pressed) {
-          context->pressed = true;
-          InvalidateRect(dialog, &rectangle, FALSE);
-          UpdateWindow(dialog);
-        }
-        if (presentation.draw_released) {
-          context->pressed = false;
-          InvalidateRect(dialog, &rectangle, FALSE);
-          UpdateWindow(dialog);
-        }
-        if (!presentation.close) break;
-        EndDialog(dialog, 0);
-        // COUNTDLOGMAIN clears DS:31a4 after EndDialog and then returns
-        // FALSE through 1060:0454.
-        g_original_active_modal_window = nullptr;
+        signal_original_finance_dialog(
+            dialog, *context,
+            {simtower::OriginalDialogSignal::Kind::key_up,
+             static_cast<std::uint16_t>(wparam)});
         return FALSE;
       }
       break;
     case WM_LBUTTONDOWN:
-      if (context && original_finance_button_hit(*context, lparam)) {
-        context->pressed = true;
-        const auto& button = original_finance_rectangle(*context, 1U);
-        const RECT rectangle{button.left, button.top,
-                             button.right, button.bottom};
-        InvalidateRect(dialog, &rectangle, FALSE);
-        UpdateWindow(dialog);
+      if (context) {
+        signal_original_finance_dialog(
+            dialog, *context,
+            original_finance_button_signal(
+                simtower::OriginalDialogSignal::Kind::button_down, lparam));
       }
       return FALSE;
     case WM_LBUTTONUP:
       if (context) {
-        const bool close = original_finance_button_hit(*context, lparam);
-        context->pressed = false;
-        const auto& button = original_finance_rectangle(*context, 1U);
-        const RECT rectangle{button.left, button.top,
-                             button.right, button.bottom};
-        InvalidateRect(dialog, &rectangle, FALSE);
-        UpdateWindow(dialog);
-        if (close) {
-          EndDialog(dialog, 0);
-          g_original_active_modal_window = nullptr;
-        }
+        signal_original_finance_dialog(
+            dialog, *context,
+            original_finance_button_signal(
+                simtower::OriginalDialogSignal::Kind::button_up, lparam));
       }
       return FALSE;
   }
@@ -5242,6 +5271,10 @@ void run_original_finance_dialog() {
       simtower::parse_original_dtmp(
           g_resources.find("DTMP", launcher.dialog_resource_id)),
       simtower::derive_original_finance_view(*g_tower_document)};
+  const auto& button = original_finance_rectangle(
+      context, simtower::kOriginalFinanceButtonRectangle);
+  context.controller = simtower::OriginalFinanceController(
+      {button.left, button.top, button.right, button.bottom});
   (void)run_original_modal_dialog(
       g_instance, reinterpret_cast<const DLGTEMPLATE*>(native.data()),
       launcher.main_window_owner ? g_main_window : nullptr,
@@ -5284,38 +5317,12 @@ bool run_original_help_contents() {
 }
 
 struct OriginalFindDialogContext {
-  simtower::OriginalFindMode mode{simtower::OriginalFindMode::tenant};
   simtower::OriginalDtmp dtmp{};
-  std::vector<simtower::OriginalFindEntry> entries{};
-  simtower::OriginalFindResolution resolution{};
-  bool changed{};
+  // FINDDIALOGFILTER's list, resolve, remove and close transactions (and
+  // the resolution and entries they keep), shared with the SDL host.
+  simtower::OriginalFindController controller;
   HFONT control_font{};
 };
-
-int original_find_selected_index(HWND dialog) {
-  // 10d8:0487 sends the Win16 list-box selection query (message 0x420) to
-  // Find item 5. LB_GETCURSEL is its native Win32 semantic equivalent.
-  constexpr auto query = simtower::original_find_selection_query();
-  const auto selected = SendDlgItemMessageW(
-      dialog, query.control_id, LB_GETCURSEL, query.wparam,
-      static_cast<LPARAM>(query.lparam));
-  return selected == LB_ERR ? -1 : static_cast<int>(selected);
-}
-
-void enable_original_find_actions(HWND dialog, bool enabled) {
-  EnableWindow(GetDlgItem(dialog, 3), enabled);
-  EnableWindow(GetDlgItem(dialog, 4), enabled);
-}
-
-void populate_original_find_list(HWND dialog,
-                                 const OriginalFindDialogContext& context) {
-  SendDlgItemMessageW(dialog, 5, LB_RESETCONTENT, 0U, 0);
-  for (const auto& entry : context.entries) {
-    const auto text = original_cp1252_to_wide(entry.name);
-    SendDlgItemMessageW(dialog, 5, LB_ADDSTRING, 0U,
-                        reinterpret_cast<LPARAM>(text.c_str()));
-  }
-}
 
 void paint_original_find_dialog(HWND dialog,
                                 HDC dc,
@@ -5337,68 +5344,61 @@ void paint_original_find_dialog(HWND dialog,
   }
 }
 
-bool resolve_original_find_selection(HWND dialog,
-                                     OriginalFindDialogContext& context) {
-  if (!g_tower_document) return false;
-  const int selected = original_find_selected_index(dialog);
-  if (selected < 0 ||
-      static_cast<std::size_t>(selected) >= context.entries.size()) {
-    return false;
+// FINDDIALOGFILTER's world outside its controls for the shared controller:
+// the tower, Main's client rectangle, the DS:77b4 marker and the alerts.
+class Win32FindDialogHost final : public simtower::OriginalFindDialogHost {
+ public:
+  explicit Win32FindDialogHost(HWND dialog) : dialog_(dialog) {}
+  simtower::OriginalTdtDocument* document() override {
+    return g_tower_document ? &*g_tower_document : nullptr;
+  }
+  int main_client_width() override {
+    RECT client{};
+    GetClientRect(g_main_window, &client);
+    return client.right - client.left;
+  }
+  int main_client_height() override {
+    RECT client{};
+    GetClientRect(g_main_window, &client);
+    return client.bottom - client.top;
+  }
+  void reset_marker() override {
+    simtower::reset_original_find_marker(g_find_marker);
+  }
+  void start_marker(const simtower::OriginalFindResolution& resolution,
+                    std::uint32_t selected_person) override {
+    simtower::start_original_find_marker(g_find_marker, resolution,
+                                         selected_person,
+                                         original_runtime_coarse_tick());
+  }
+  // Exact 10e0:0669/06cd named-person fallbacks: ALRT/1002 when the person
+  // is outside the tower, ALRT/1003 with the recovered lobby floor text.
+  void alert(int alert_id,
+             const std::array<std::string, 4>& substitutions) override {
+    (void)simtower::show_original_alert(
+        dialog_, g_resources, alert_id,
+        {substitutions[0], substitutions[1], substitutions[2],
+         substitutions[3]});
+  }
+  void entry_removed() override {
+    g_tower_dirty = true;
+    update_original_tower_title(g_main_window);
+  }
+  void invalidate_main() override { invalidate_original_main_surface(); }
+  void set_arrow_cursor() override {
+    SetCursor(resolve_original_cursor(0U));
   }
 
-  RECT client{};
-  GetClientRect(g_main_window, &client);
-  const auto& entry = context.entries[static_cast<std::size_t>(selected)];
-  // FINDDIALOGFILTER clears a previous DS:77b4 target before resolving the
-  // new list selection.
-  simtower::reset_original_find_marker(g_find_marker);
-  if (context.mode == simtower::OriginalFindMode::person) {
-    context.resolution = simtower::resolve_original_find_person(
-        *g_tower_document, entry.link, client.right - client.left,
-        client.bottom - client.top);
-  } else {
-    context.resolution = simtower::resolve_original_find_tenant(
-        *g_tower_document, static_cast<std::uint16_t>(entry.link),
-        client.right - client.left, client.bottom - client.top);
-  }
-  if (context.mode == simtower::OriginalFindMode::person &&
-      context.resolution.alerts()) {
-    // Exact 10e0:0669/06cd named-person fallbacks. They select ALRT/1002
-    // when the person is outside the tower, or ALRT/1003 with the recovered
-    // lobby floor text when no more precise tenant/transit position exists.
-    SetCursor(resolve_original_cursor(0U));
-    if (context.resolution.kind ==
-        simtower::OriginalFindResolutionKind::not_in_tower_alert) {
-      (void)simtower::show_original_alert(
-          dialog, g_resources, 1002, {entry.name, {}, {}, {}});
-    } else {
-      const auto floor_text = simtower::original_find_floor_text(
-          context.resolution.floor);
-      (void)simtower::show_original_alert(
-          dialog, g_resources, 1003,
-          {entry.name, floor_text, {}, {}});
-    }
-    // Both original alert helpers call 10e0:04cf(0), leaving Find open and
-    // the target marker reset.
-    context.resolution = {};
-    invalidate_original_main_surface();
-    return false;
-  }
-  if (!context.resolution.focused()) {
-    // 10e0:0cc9 keeps the modal open for targets which no longer resolve.
-    // Do not invent a viewport jump.
-    return false;
-  }
-  simtower::start_original_find_marker(
-      g_find_marker, context.resolution,
-      context.mode == simtower::OriginalFindMode::person
-          ? entry.link
-          : 0xffffffffU,
-      original_runtime_coarse_tick());
-  g_original_active_modal_window = nullptr;
-  EndDialog(dialog, 1);
-  return true;
-}
+ private:
+  HWND dialog_{};
+};
+
+// 10d8:0487 sends the Win16 list-box selection query (message 0x420) to
+// Find item 5; Win32DialogOps::list_selection is its LB_GETCURSEL.
+static_assert(simtower::original_find_selection_query().control_id ==
+                  simtower::kOriginalFindListId &&
+              simtower::original_find_selection_query().wparam == 0U &&
+              simtower::original_find_selection_query().lparam == 0U);
 
 // Native message boundary for FINDDIALOGFILTER at 10d8:006f.
 INT_PTR CALLBACK find_dialog_proc(HWND dialog, UINT message,
@@ -5414,8 +5414,8 @@ INT_PTR CALLBACK find_dialog_proc(HWND dialog, UINT message,
     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
     context->control_font = make_original_dialog_font(13);
     position_original_dialog(dialog);
-    populate_original_find_list(dialog, *context);
-    enable_original_find_actions(dialog, false);
+    Win32DialogOps ops(dialog);
+    context->controller.initialize(ops);
     HDC dc = GetDC(dialog);
     if (dc) {
       const auto plan = simtower::original_find_presentation_plan(
@@ -5441,9 +5441,7 @@ INT_PTR CALLBACK find_dialog_proc(HWND dialog, UINT message,
       }
       ReleaseDC(dialog, dc);
     }
-    const auto focus = simtower::original_find_initialization_focus_plan();
-    if (focus.focus_list) SetFocus(GetDlgItem(dialog, 5));
-    return focus.handled_result ? TRUE : FALSE;
+    return context->controller.initial_focus(ops) ? TRUE : FALSE;
   }
 
   auto* context = reinterpret_cast<OriginalFindDialogContext*>(
@@ -5470,49 +5468,22 @@ INT_PTR CALLBACK find_dialog_proc(HWND dialog, UINT message,
       return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
     case WM_COMMAND: {
       if (!context) break;
-      using CommandAction = simtower::OriginalFindDialogCommandAction;
-      const auto command = simtower::original_find_dialog_command_plan(
-          static_cast<std::uint16_t>(LOWORD(wparam)),
-          static_cast<std::uint16_t>(HIWORD(wparam)));
-      switch (command.action) {
-        case CommandAction::close:
-          // 10d8:018c calls 10e0:04cf(0) before cleanup/EndDialog(1).
-          simtower::reset_original_find_marker(g_find_marker);
-          invalidate_original_main_surface();
-          g_original_active_modal_window = nullptr;
-          EndDialog(dialog, 1);
-          return TRUE;
-        case CommandAction::remove: {
-          if (!g_tower_document) return command.consume ? TRUE : FALSE;
-          const int selected = original_find_selected_index(dialog);
-          if (selected >= 0 &&
-              simtower::remove_original_find_entry(
-                  *g_tower_document, context->mode,
-                  static_cast<std::size_t>(selected))) {
-            SendDlgItemMessageW(dialog, 5, LB_DELETESTRING,
-                                static_cast<WPARAM>(selected), 0);
-            context->entries.erase(
-                context->entries.begin() +
-                static_cast<std::ptrdiff_t>(selected));
-            context->changed = true;
-            g_tower_dirty = true;
-            update_original_tower_title(g_main_window);
-          }
-          return command.consume ? TRUE : FALSE;
-        }
-        case CommandAction::resolve:
-          (void)resolve_original_find_selection(dialog, *context);
-          return command.consume ? TRUE : FALSE;
-        case CommandAction::enable_actions:
-          enable_original_find_actions(dialog, true);
-          return command.consume ? TRUE : FALSE;
-        case CommandAction::disable_actions:
-          enable_original_find_actions(dialog, false);
-          return command.consume ? TRUE : FALSE;
-        case CommandAction::none:
-          return command.consume ? TRUE : FALSE;
+      const auto id = static_cast<std::uint16_t>(LOWORD(wparam));
+      const auto code = static_cast<std::uint16_t>(HIWORD(wparam));
+      const auto command =
+          simtower::original_find_dialog_command_plan(id, code);
+      Win32DialogOps ops(dialog);
+      Win32FindDialogHost host(dialog);
+      const auto outcome = context->controller.signal(
+          {simtower::OriginalDialogSignal::Kind::command, id, code}, ops,
+          host);
+      if (outcome.result) {
+        // Close (10d8:018c after 10e0:04cf(0)) and a focused resolution
+        // both clear DS:31a4 and end with 1.
+        g_original_active_modal_window = nullptr;
+        EndDialog(dialog, *outcome.result);
       }
-      break;
+      return command.consume ? TRUE : FALSE;
     }
   }
   return FALSE;
@@ -5525,15 +5496,16 @@ void run_original_find_dialog(simtower::OriginalFindMode mode) {
       g_resources.find("DIALOG", launcher.dialog_resource_id));
   const auto native = simtower::build_native_dialog_template(original);
   OriginalFindDialogContext context{
-      mode,
       simtower::parse_original_dtmp(
           g_resources.find("DTMP", launcher.dialog_resource_id)),
-      simtower::original_find_entries(*g_tower_document, mode)};
+      simtower::OriginalFindController(
+          mode, simtower::original_find_entries(*g_tower_document, mode))};
   (void)run_original_modal_dialog(
       g_instance, reinterpret_cast<const DLGTEMPLATE*>(native.data()),
       launcher.main_window_owner ? g_main_window : nullptr,
       find_dialog_proc, reinterpret_cast<LPARAM>(&context));
-  if (context.resolution.focused()) {
+  const auto& resolution = context.controller.resolution();
+  if (resolution.focused()) {
     // 10e0:0cea exits construction into edit mode two, synchronously presents
     // Command then Map, restores pending preview scratch through 11f8:3b94,
     // and only then applies 1080:0000's camera transform/full refresh.
@@ -5564,8 +5536,8 @@ void run_original_find_dialog(simtower::OriginalFindMode mode) {
           }
           break;
         case simtower::OriginalFindFocusRefreshStep::camera_transform:
-          set_original_view(g_main_window, context.resolution.view.x,
-                            context.resolution.view.y);
+          set_original_view(g_main_window, resolution.view.x,
+                            resolution.view.y);
           break;
       }
     }

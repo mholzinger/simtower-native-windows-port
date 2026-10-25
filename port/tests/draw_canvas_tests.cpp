@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstring>
 #include <set>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -72,6 +74,40 @@ std::vector<std::byte> make_dib(int width,
   std::memcpy(bytes.data() + sizeof(header) + colors.size() * 4U,
               rows.data(), rows.size());
   return bytes;
+}
+
+// True when the glyph has an enclosed counter: an off pixel that a
+// 4-connected flood from outside its (padded) box cannot reach.
+bool has_closed_counter(const simtower::OriginalCanvasGlyph& glyph) {
+  const int w = glyph.width + 2;
+  const int h = glyph.height + 2;
+  std::vector<int> cells(static_cast<std::size_t>(w) * h, 0);
+  for (int y = 0; y < glyph.height; ++y) {
+    for (int x = 0; x < glyph.width; ++x) {
+      cells[static_cast<std::size_t>((y + 1) * w + x + 1)] =
+          glyph.mask[static_cast<std::size_t>(y * glyph.width + x)];
+    }
+  }
+  std::vector<int> stack{0};
+  cells[0] = 2;
+  while (!stack.empty()) {
+    const int i = stack.back();
+    stack.pop_back();
+    const int x = i % w;
+    const int y = i / w;
+    const int steps[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    for (const auto& step : steps) {
+      const int nx = x + step[0];
+      const int ny = y + step[1];
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      auto& cell = cells[static_cast<std::size_t>(ny * w + nx)];
+      if (cell == 0) {
+        cell = 2;
+        stack.push_back(ny * w + nx);
+      }
+    }
+  }
+  return std::find(cells.begin(), cells.end(), 0) != cells.end();
 }
 
 }  // namespace
@@ -224,9 +260,40 @@ int main() {
       assert(lit.front() && lit.back());
       assert(std::find(lit.begin(), lit.end(), false) != lit.end());
     }
+    // Bowls stay closed at the dialog and panel sizes. At 11 pixels the
+    // right side of 'o' and the top of the 'a' bowl straddle two columns
+    // where the curve shifts; the 8-connected bridge keeps them ("c'clock"
+    // was the symptom). Open letters stay open.
+    for (int px = 11; px <= 14; ++px) {
+      for (const unsigned char c : {'o', 'e', 'a', 'd', 'b', 'p', 'q'}) {
+        assert(has_closed_counter(font.glyph(px, c)));
+      }
+      for (const unsigned char c : {'c', 's', 'C', 'G'}) {
+        assert(!has_closed_counter(font.glyph(px, c)));
+      }
+    }
     assert(simtower::original_cp1252_to_unicode(0x80U) == 0x20acU);
     assert(simtower::original_cp1252_to_unicode('A') == 'A');
     assert(simtower::original_cp1252_to_unicode(0xe9U) == 0xe9U);
+    // Typed UTF-8 to WM_CHAR bytes.
+    using simtower::original_utf8_to_cp1252;
+    assert(original_utf8_to_cp1252("Ab 9") == "Ab 9");
+    assert(original_utf8_to_cp1252("\xE2\x82\xAC") == "\x80");  // euro
+    assert(original_utf8_to_cp1252("caf\xC3\xA9") == "caf\xE9");  // e-acute
+    // 0x80..0x9F: U+201A is 0x82; U+0080 (C1, no byte) is dropped.
+    assert(original_utf8_to_cp1252("\xE2\x80\x9A") == "\x82");
+    assert(original_utf8_to_cp1252("\xC2\x80").empty());
+    // An unmapped CJK character and a 4-byte emoji are dropped.
+    assert(original_utf8_to_cp1252("a\xE6\x97\xA5" "b") == "ab");
+    assert(original_utf8_to_cp1252("\xF0\x9F\x98\x80") == "");
+    // Controls and DEL are not WM_CHAR text here.
+    assert(original_utf8_to_cp1252("\t\x7F").empty());
+    // Truncated and invalid sequences: dropped, no read past the end, the
+    // next character kept.
+    assert(original_utf8_to_cp1252("x\xE2\x82").size() == 1U);
+    assert(original_utf8_to_cp1252(std::string_view("\xC3", 1)).empty());
+    assert(original_utf8_to_cp1252("\xE2\x82y") == "y");
+    assert(original_utf8_to_cp1252("\x80\xFFz") == "z");
   }
 
   {
