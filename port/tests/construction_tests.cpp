@@ -1108,14 +1108,23 @@ int main() {
     assert(poor.header.exact_bytes[30] == std::byte{0xff});
     assert(poor.header.exact_bytes[31] == std::byte{0xff});
 
+    // 1178:011d adds the 150 floor charge to the 10,000 facility charge in
+    // one accumulator ([bp-8], never reset between its loops), so a balance
+    // covering only the facility fails the second comparison with message 8.
     auto split_gate = make_metro_ready_tower(costs);
     split_gate.header.balance = 10000;
     result = simtower::build_original_metro_station(
         split_gate, 2, 120, costs);
+    assert(result.status ==
+           simtower::OriginalConstructionStatus::insufficient_funds);
+    assert(result.cost == 10150);
+    assert(result.construction_status_code == 8U);
+
+    auto exact = make_metro_ready_tower(costs);
+    exact.header.balance = 10150;
+    result = simtower::build_original_metro_station(exact, 2, 120, costs);
     assert(result.succeeded() && result.cost == 10150);
-    // 1178:011d compares the 10,000 facility and 150 floor previews to the
-    // same starting balance independently, so the final debit may be below 0.
-    assert(split_gate.header.balance == -150);
+    assert(exact.header.balance == 0);
 
     auto late_phase = make_metro_ready_tower(costs);
     late_phase.header.frame_time = 1600U;
@@ -1136,6 +1145,38 @@ int main() {
          {std::uint8_t{2}, std::uint8_t{1}, std::uint8_t{0}}) {
       assert(wrapped_phase.floors[floor].tenants[0].variant == 0U);
     }
+  }
+
+  {
+    // 11f8:0d04 only requires that no Metro exists, and 2f5a's type-31
+    // branch accepts any basement floor 2..9 whose floor two below is empty.
+    // 20e7 then stacks 31/32/33 downward from the selected floor and 0d3e
+    // stores that floor in DS:b3e8.
+    auto tower = simtower::make_original_new_tdt();
+    assert(simtower::build_original_initial_lobby(
+               tower, 100, 200, 1, costs)
+               .succeeded());
+    for (int floor = 9; floor >= 4; --floor) {
+      assert(simtower::build_original_floor(
+                 tower, static_cast<std::int16_t>(floor), 120, 150, costs)
+                 .succeeded());
+    }
+    tower.header.frame_time = 0U;
+    tower.header.balance = 30000;
+    const auto result =
+        simtower::build_original_metro_station(tower, 5, 120, costs);
+    assert(result.succeeded());
+    assert(tower.header.exact_bytes[30] == std::byte{5});
+    assert(tower.header.exact_bytes[31] == std::byte{0});
+    const auto has_type = [&](int floor, std::int8_t type) {
+      const auto& tenants = tower.floors[static_cast<std::size_t>(floor)].tenants;
+      return std::any_of(tenants.begin(), tenants.end(),
+                         [&](const auto& tenant) {
+                           return tenant.type == -type;
+                         });
+    };
+    assert(has_type(5, 31) && has_type(4, 32) && has_type(3, 33));
+    assert(tower.floors[2].tenants.empty());
   }
 
   {
@@ -1384,9 +1425,10 @@ int main() {
     assert(first.exact_bytes[15] == std::byte{0xff});
     assert(first.exact_bytes[16] == std::byte{4});
 
-    // A separate adjacent placement remains a distinct 11f8:17fd record.
-    // During a real drag, 11f8:26dd instead resubmits the cumulative span and
-    // 11f8:284d replaces the covered run with one record.
+    // A separate adjacent placement is inserted as its own 11f8:17fd record,
+    // then 17fd's unconditional 11f8:3a31 call at 1f51 coalesces adjacent
+    // type-0 records (11f8:3a87 compares only the type byte), keeping the
+    // first record's fields.
     // Direct 1178:0697 coverage for 284d's shared direct-amount transaction:
     // a nonzero overlap-path charge wraps both accounting dwords equally.
     const auto balance_before_direct_debit = tower.header.balance;
@@ -1396,34 +1438,30 @@ int main() {
     assert(tower.header.balance == balance_before_direct_debit - 45);
     assert(tower.header.construction_costs ==
            costs_before_direct_debit - 45);
-    assert(tower.floors[11].tenants.size() == 2U);
+    assert(tower.floors[11].tenants.size() == 1U);
     assert(tower.floors[11].tenants[0].left == 120U);
-    assert(tower.floors[11].tenants[0].right == 121U);
-    assert(tower.floors[11].tenants[1].left == 121U);
-    assert(tower.floors[11].tenants[1].right == 130U);
+    assert(tower.floors[11].tenants[0].right == 130U);
+    assert(tower.floors[11].tenants[0].status == 2U);
 
     // A disjoint request fills the unrepresented gap to the old edge and
     // charges all fifteen newly exposed cells, not only the requested five.
-    // 11f8:30ef preserves the gap and the clicked interval as separate rows.
+    // 11f8:30ef inserts the gap and the clicked interval as separate rows;
+    // on a non-Lobby story both are type 0, so 3a31 merges the whole run.
     result = simtower::build_original_floor(tower, 11, 140, 145, costs);
     assert(result.succeeded() && result.cost == 75);
-    assert(tower.floors[11].tenants.size() == 4U);
+    assert(tower.floors[11].tenants.size() == 1U);
     assert(tower.floors[11].tenants[0].left == 120U);
-    assert(tower.floors[11].tenants[1].right == 130U);
-    assert(tower.floors[11].tenants[2].left == 130U);
-    assert(tower.floors[11].tenants[2].right == 140U);
-    assert(tower.floors[11].tenants[3].left == 140U);
-    assert(tower.floors[11].tenants[3].right == 145U);
+    assert(tower.floors[11].tenants[0].right == 145U);
 
+    // An already-covered request costs nothing; the overlap split is merged
+    // back into the single run.
     const auto balance_before_noop = tower.header.balance;
     result = simtower::build_original_floor(tower, 11, 125, 130, costs);
     assert(result.succeeded() && result.cost == 0);
     assert(tower.header.balance == balance_before_noop);
-    assert(tower.floors[11].tenants.size() == 5U);
-    assert(tower.floors[11].tenants[1].left == 121U);
-    assert(tower.floors[11].tenants[1].right == 125U);
-    assert(tower.floors[11].tenants[2].left == 125U);
-    assert(tower.floors[11].tenants[2].right == 130U);
+    assert(tower.floors[11].tenants.size() == 1U);
+    assert(tower.floors[11].tenants[0].left == 120U);
+    assert(tower.floors[11].tenants[0].right == 145U);
 
     // A supported next story and first basement story use the two distinct
     // 11f8:2e64 branches.
@@ -1435,9 +1473,9 @@ int main() {
 
     const auto bytes = simtower::serialize_original_tdt(tower);
     const auto reparsed = simtower::parse_original_tdt(bytes);
-    assert(reparsed.floors[11].tenants.size() == 5U);
+    assert(reparsed.floors[11].tenants.size() == 1U);
     assert(reparsed.floors[11].tenants[0].left == 120U);
-    assert(reparsed.floors[11].tenants[4].right == 145U);
+    assert(reparsed.floors[11].tenants[0].right == 145U);
     assert(reparsed.floors[11].tenants[0].status == 2U);
     assert(simtower::serialize_original_tdt(reparsed) == bytes);
   }
@@ -1544,6 +1582,114 @@ int main() {
     tower.post_elevator.b92d = 7U;
     simtower::refresh_original_medical_for_day(tower);
     assert(tower.post_elevator.b92d == 7U);
+  }
+
+  {
+    // Floor built in two placements is one coalesced type-0 run, so an Office
+    // across the former seam at 121 fits instead of being rejected as
+    // occupied.
+    auto tower = simtower::make_original_new_tdt();
+    assert(simtower::build_original_initial_lobby(
+               tower, 100, 200, 1, costs)
+               .succeeded());
+    assert(simtower::build_original_floor(tower, 11, 115, 121, costs)
+               .succeeded());
+    assert(simtower::build_original_floor(tower, 11, 121, 140, costs)
+               .succeeded());
+    assert(tower.floors[11].tenants.size() == 1U);
+    assert(simtower::build_original_office(tower, 11, 117, 0, costs)
+               .succeeded());
+  }
+
+  {
+    // 11f8:17fd's overlap path accepts a facility that runs past a floor
+    // edge when the type-0 record at that edge starts at or before the
+    // facility (1ba8-1bf3), or is record 0 (1bcb-1c21), and moves the floor
+    // edge (1d7f-1daf, 1deb-1e0a). Support comes from the wider Lobby below.
+    auto tower = simtower::make_original_new_tdt();
+    tower.header.balance = 10'000'000;
+    assert(simtower::build_original_initial_lobby(
+               tower, 80, 300, 1, costs)
+               .succeeded());
+    assert(simtower::build_original_floor(tower, 11, 100, 200, costs)
+               .succeeded());
+    assert(tower.floors[11].tenants.size() == 1U);
+
+    const auto past_right = simtower::build_original_office(
+        tower, 11, 195, 0, costs);
+    assert(past_right.succeeded());
+    const auto& floor = tower.floors[11];
+    assert(floor.left_edge == 100U);
+    assert(floor.tenants.size() == 2U);
+    assert(floor.tenants[0].type == 0 && floor.tenants[0].left == 100U &&
+           floor.tenants[0].right == 195U);
+    assert(floor.tenants[1].left == 195U);
+    assert(floor.right_edge == floor.tenants[1].right);
+    assert(floor.right_edge > 200U);
+
+    const auto past_left = simtower::build_original_office(
+        tower, 11, 95, 0, costs);
+    assert(past_left.succeeded());
+    assert(floor.left_edge == 95U);
+    assert(floor.tenants.size() == 3U);
+    assert(floor.tenants[0].left == 95U);
+    assert(floor.tenants[1].type == 0 &&
+           floor.tenants[1].left == floor.tenants[0].right &&
+           floor.tenants[1].right == 195U);
+
+    // 11f8:17fd checks funds (1178:009e at 183d) before 2e64 support and
+    // 2f5a floor legality, so an unaffordable request on an unsupported
+    // floor reports the funds message, not the support one.
+    {
+      auto poor = simtower::make_original_new_tdt();
+      poor.header.balance = 0;
+      const auto office = simtower::build_original_office(
+          poor, 50, 120, 0, costs);
+      assert(office.status ==
+             simtower::OriginalConstructionStatus::insufficient_funds);
+      assert(office.construction_status_code == 7U);
+      const auto hotel = simtower::build_original_hotel_room(
+          poor, 3, 50, 120, 0, costs);
+      assert(hotel.status ==
+             simtower::OriginalConstructionStatus::insufficient_funds);
+      assert(hotel.construction_status_code == 7U);
+    }
+
+    // 11f8:2e64 chooses its branch by floor, not type, and runs before 2f5a:
+    // a basement Office with no floor above it fails basement support (4)
+    // before 2f5a's above-ground-only rejection (10).
+    {
+      auto basement = simtower::make_original_new_tdt();
+      assert(simtower::build_original_initial_lobby(
+                 basement, 100, 200, 1, costs)
+                 .succeeded());
+      const auto office = simtower::build_original_office(
+          basement, 5, 120, 0, costs);
+      assert(office.status ==
+             simtower::OriginalConstructionStatus::invalid_span);
+      assert(office.construction_status_code == 4U);
+    }
+
+    // 11f8:07d8 checks for a Ramp (1198:0beb, message 34) before 240d calls
+    // 17fd, so ground-floor Parking without a Ramp reports 34, not 2f5a's 12.
+    {
+      auto ground = simtower::make_original_new_tdt();
+      assert(simtower::build_original_initial_lobby(
+                 ground, 100, 200, 1, costs)
+                 .succeeded());
+      const auto parking = simtower::build_original_parking(
+          ground, 10, 120, costs);
+      assert(parking.status ==
+             simtower::OriginalConstructionStatus::parking_ramp_required);
+      assert(parking.construction_status_code == 34U);
+    }
+
+    // Overlapping an existing Office is still rejected.
+    const auto before_overlap = simtower::serialize_original_tdt(tower);
+    const auto overlap = simtower::build_original_office(
+        tower, 11, 190, 0, costs);
+    assert(overlap.status == simtower::OriginalConstructionStatus::occupied);
+    assert(simtower::serialize_original_tdt(tower) == before_overlap);
   }
 
   {
@@ -2425,20 +2571,18 @@ int main() {
     assert(result.cost == 0);
     assert(!result.construction_sound_requested);
     assert(result.document_changed);
-    const auto& split = tower.floors[10].tenants;
-    assert(split.size() == 3U);
-    assert(split[0].type == 0x18 && split[0].left == 156 &&
-           split[0].right == 160);
-    assert(split[1].type == 0x18 && split[1].left == 160 &&
-           split[1].right == 164);
-    assert(split[2].type == 0x18 && split[2].left == 164 &&
-           split[2].right == 172);
+    // 284d's overlap path splits the run at the request, then its 11f8:3a31
+    // call at 2dec coalesces the adjacent type-0x18 records back into one.
+    const auto& merged = tower.floors[10].tenants;
+    assert(merged.size() == 1U);
+    assert(merged[0].type == 0x18 && merged[0].left == 156 &&
+           merged[0].right == 172);
 
     const auto bytes = simtower::serialize_original_tdt(tower);
     const auto reparsed = simtower::parse_original_tdt(bytes);
     assert(reparsed.floors[10].left_edge == 156);
     assert(reparsed.floors[10].right_edge == 172);
-    assert(reparsed.floors[10].tenants.size() == 3U);
+    assert(reparsed.floors[10].tenants.size() == 1U);
     assert(simtower::serialize_original_tdt(reparsed) == bytes);
   }
 
@@ -3485,6 +3629,13 @@ int main() {
     assert(tower.post_elevator.parking_connected == 0);
     assert(tower.header.exact_bytes[50] == std::byte{0});
     assert(tower.header.exact_bytes[51] == std::byte{0});
+
+    // 1198:0200's DEC is unconditional: another orphan wraps the count.
+    tower.post_elevator.cf9c_records[0][0] = std::byte{9};
+    tower.post_elevator.cf9c_records[0][1] = std::byte{0xff};
+    simtower::refresh_original_parking_for_day(tower);
+    assert(tower.header.exact_bytes[50] == std::byte{0xff});
+    assert(tower.header.exact_bytes[51] == std::byte{0xff});
   }
 
   {
