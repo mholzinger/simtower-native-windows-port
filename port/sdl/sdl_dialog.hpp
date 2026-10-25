@@ -304,6 +304,7 @@ inline constexpr char kFindTenantDialogLabel[] = "find tenant";
 inline constexpr char kRenamePersonDialogLabel[] = "rename person";
 inline constexpr char kRenameTenantDialogLabel[] = "rename tenant";
 inline constexpr char kMovieDialogLabel[] = "movie";
+inline constexpr char kStartupDialogLabel[] = "startup";
 inline constexpr char kElevatorControlDialogLabel[] = "elevator control";
 inline constexpr char kElevatorPopupDialogLabel[] = "elevator popup";
 

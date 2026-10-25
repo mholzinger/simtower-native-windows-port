@@ -920,6 +920,34 @@ void dtmp_dialog_tests(const simtower::OriginalResources& resources) {
     ok = check_hash("movie", dialog_hash(movie, resources), kPinnedMovie) &&
          ok;
   }
+  // New / Load 10000: no caption, the 260x118 DTMP client, the three
+  // buttons shown at their DTMP rectangles, centered; New Tower is the
+  // default and has the focus; Esc is IDCANCEL = 2 (Quit).
+  {
+    auto startup = simtower::sdl::make_startup_dialog(resources);
+    assert(startup.label() == "startup" && startup.counts_modal_lock());
+    assert(startup.client_width() == 260 && startup.client_height() == 118);
+    assert(startup.outer_width() == 260 && startup.outer_height() == 118);
+    assert(startup.font_pixels() == 13);
+    assert(startup.control(1)->rect == OriginalRect({16, 10, 244, 36}));
+    assert(startup.control(2)->rect == OriginalRect({90, 82, 170, 108}));
+    assert(startup.control(3)->rect == OriginalRect({16, 46, 244, 72}));
+    for (const std::uint16_t id : {1, 2, 3}) {
+      assert(startup.control(id)->visible);
+      check_label(startup, *startup.control(id));
+    }
+    const simtower::OriginalNewLoadDialogController controller;
+    assert(controller.initial_focus(startup));
+    startup.focus_first_tab_stop();
+    assert(startup.focus() == 1U && startup.default_button() == 1U);
+    assert(controller.signal(*startup.key(DialogKey::enter).signal).result ==
+           1);
+    assert(controller.signal(*startup.key(DialogKey::escape).signal)
+               .result == 2);
+    startup.place(1019, 628);
+    assert(startup.outer().x == (1019 - 260) / 2 &&
+           startup.outer().y == (628 - 118) / 2);
+  }
   // Finance 500: no controls; the dialog has the focus, so key-ups and
   // button events reach COUNTDLOGMAIN.
   {

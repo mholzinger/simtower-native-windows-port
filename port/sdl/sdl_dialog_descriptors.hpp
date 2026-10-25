@@ -42,6 +42,13 @@
 //   make_rename_dialog in the .cpp for what is known and still open.
 // - New Movie (DIALOG/DTMP 731): WS_CAPTION "New Movie" with a TEMP Win3.1
 //   frame (one-pixel border, navy caption), the chrome, three buttons.
+// - New / Load (DIALOG/DTMP 10000, NEWORLOADDLOGFILTER 1018:0067): no
+//   caption (0x92000042), the 260x118 DTMP client with the 1068:0567
+//   chrome, New Tower (1, the default), Quit (2) and Load Saved Tower (3)
+//   placed by the DTMP in the template's 10-point font (13 pixels; the
+//   13-pixel WM_CTLCOLOR font is the same size), centered on the desktop
+//   (11e0:0c10). Esc sends IDCANCEL = 2, which is Quit, as the Win32
+//   dialog manager does.
 // - Finance (DIALOG/DTMP 500, COUNTDLOGMAIN): BITMAP/500 with BITMAP/501
 //   over the pressed button and the twelve values
 //   (paint_original_finance); no controls, key-ups and clicks reach the
@@ -79,10 +86,9 @@
 //   painter), OK placed by the DTMP; the procedure is the shared
 //   OriginalTransportInformationController.
 //
-// Deferred (they keep their logged or auto-answered SDL behavior for a
-// later step): the Command selector's own window chrome,
-// the startup (New/Load) dialog and the splash. Each becomes another
-// descriptor.
+// Deferred (it keeps its SDL behavior for a later step): the Command
+// selector's own window chrome. The startup splash (TOWER_TITLE) is no
+// dialog here: compose_window draws it under the open dialogs.
 
 #include "sdl_dialog.hpp"
 
@@ -148,6 +154,8 @@ inline constexpr int kCaptionFrameHeight = 18;
     const OriginalResources& resources,
     bool person);
 [[nodiscard]] DialogWindow make_movie_dialog(
+    const OriginalResources& resources);
+[[nodiscard]] DialogWindow make_startup_dialog(
     const OriginalResources& resources);
 // Elevator Control's panel at the launch block's requested left
 // (original_elevator_control_launch_contract); client paints the client

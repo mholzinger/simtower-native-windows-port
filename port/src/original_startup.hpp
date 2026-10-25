@@ -286,6 +286,36 @@ original_new_load_dialog_command_plan(std::uint16_t control) noexcept {
              : OriginalNewLoadDialogCommandPlan{false, false, 0U, false};
 }
 
+// The DIALOG/10000 button ids, which are also the 1018:0000 results.
+inline constexpr std::uint16_t kOriginalNewLoadNewTowerId = 1U;
+inline constexpr std::uint16_t kOriginalNewLoadQuitId = 2U;
+inline constexpr std::uint16_t kOriginalNewLoadLoadId = 3U;
+
+// What 1128:01a5-01d3 reaches to act on the New/Load result.
+class OriginalStartupChoiceHost {
+ public:
+  virtual ~OriginalStartupChoiceHost() = default;
+  // 10d0:0122: the confirmation, the Open sheet and the load. True when a
+  // file was loaded.
+  virtual bool open_tower() = 0;
+  // Whether a tower is installed: 10d0:0225 installs one before disk I/O
+  // and itself falls back to New after a failed load.
+  virtual bool has_document() = 0;
+  // 10d0:001d.
+  virtual void begin_new_tower() = 0;
+};
+
+// 1128:01a5-01d3 with the Win32 port's native result handling. 1 runs New;
+// 3 runs Open and, when it loaded nothing and installed no tower (a
+// cancelled sheet), New; 2 ends the process with 0 (1128:01b9 fails the
+// initialization). Any other value goes on to the show sequence without a
+// call, as 1128:01b7 does, except -1 (a failed DialogBox), which the Win32
+// port ends with 1. Returns the exit code, or nullopt to show the windows.
+// Every host call is made in that order (has_document only after an Open
+// that loaded nothing).
+[[nodiscard]] std::optional<int> apply_original_startup_choice(
+    int choice, OriginalStartupChoiceHost& host);
+
 struct OriginalNewLoadDialogStyle {
   int paint_font_pixels{};
   int control_font_pixels{};

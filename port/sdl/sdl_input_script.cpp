@@ -242,7 +242,7 @@ std::vector<ScriptCommand> parse_input_script(
             "expect-dialog takes event ID, alert ID, about, box replace, "
             "box invalid-filename, finance, find person, find tenant, "
             "rename person, rename tenant, movie, elevator popup, "
-            "facility ID, person ID or transport ID");
+            "facility ID, person ID, transport ID or startup");
       };
       const std::string rest =
           words.size() == 3 ? words[1] + " " + words[2] : std::string{};
@@ -257,7 +257,8 @@ std::vector<ScriptCommand> parse_input_script(
             *kind, static_cast<std::uint16_t>(id));
       } else if (words.size() == 2 &&
                  (words[1] == kFinanceDialogLabel ||
-                  words[1] == kMovieDialogLabel)) {
+                  words[1] == kMovieDialogLabel ||
+                  words[1] == kStartupDialogLabel)) {
         command.text = words[1];
       } else if (rest == kFindPersonDialogLabel ||
                  rest == kFindTenantDialogLabel ||

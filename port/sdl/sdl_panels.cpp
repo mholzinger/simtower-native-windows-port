@@ -5,10 +5,13 @@
 #include "sdl_menu.hpp"
 #include "sdl_style.hpp"
 
+#include "original_canvas_font.hpp"
 #include "original_command_palette.hpp"
+#include "original_draw_canvas.hpp"
 #include "original_info.hpp"
 #include "original_map.hpp"
 #include "original_palette_frame.hpp"
+#include "original_startup.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -214,6 +217,20 @@ OriginalWorldRaster compose_window(const Session& session) {
     }
   }
 
+  // The startup splash (SETUPSTARTUPDLGB 1010:0304): the whole desktop
+  // (here the window) filled black with the bitmap centered, negative
+  // positions clamped (1010:0395-0423). It is above the hidden windows and
+  // below the New / Load dialog it owns.
+  if (const auto splash = session.startup_splash()) {
+    OriginalCanvasDrawContext context(canvas.raster(),
+                                      OriginalCanvasFont::bundled());
+    context.fill_rect({0, 0, layout.window_width, layout.window_height},
+                      style::kBlack);
+    const auto placement = original_startup_bitmap_placement(
+        resources, *splash, layout.window_width, layout.window_height);
+    context.draw_dib(resources.find("BITMAP", *splash), placement.left,
+                     placement.top);
+  }
   // Elevator Control: TOPMOST above the palettes (1098:08c9; TEMP, owner
   // decision D2: also while the window is inactive), below the modals.
   if (const auto* control = session.elevator_control()) {

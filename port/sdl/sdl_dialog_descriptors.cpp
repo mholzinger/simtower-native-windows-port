@@ -9,6 +9,7 @@
 #include "original_elevator_control.hpp"
 #include "original_elevator_control_controller.hpp"
 #include "original_information.hpp"
+#include "original_startup.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -267,14 +268,15 @@ DtmpDialogParts dtmp_dialog_parts(const OriginalResources& resources,
 // placement and the modal lock (run_original_modal_dialog); chrome selects
 // the 1068:0567 generic painter (Rename, New Movie) before the bitmaps. A
 // descriptor that brings its own paint_client (Finance) keeps it.
-DialogWindow make_dtmp_dialog(const OriginalResources& resources,
-                             std::string label, OriginalDialog dialog,
-                             OriginalDtmp dtmp, DialogDescriptor descriptor,
-                             bool chrome) {
+DialogWindow make_dtmp_dialog(
+    const OriginalResources& resources, std::string label,
+    OriginalDialog dialog, OriginalDtmp dtmp, DialogDescriptor descriptor,
+    bool chrome,
+    DialogPlacement placement = DialogPlacement::screen_position) {
   const int font_pixels = original_dialog_font_pixels(dialog.font_point_size);
   auto parts = dtmp_dialog_parts(resources, dialog, dtmp, font_pixels);
   descriptor.label = std::move(label);
-  descriptor.placement = DialogPlacement::screen_position;
+  descriptor.placement = placement;
   descriptor.counts_modal_lock = true;
   descriptor.font_pixels = font_pixels;
   descriptor.frame = parts.frame;
@@ -421,6 +423,21 @@ DialogWindow make_movie_dialog(const OriginalResources& resources) {
           resources.find("DIALOG", launcher.dialog_resource_id)),
       parse_original_dtmp(resources.find("DTMP", launcher.dialog_resource_id)),
       descriptor, true);
+}
+
+DialogWindow make_startup_dialog(const OriginalResources& resources) {
+  // 1018:0000 loads DIALOG/10000; WM_INITDIALOG's 1070:0005 sizes it from
+  // DTMP/10000 and 1070:0231 shows the buttons at its rectangles.
+  const auto launcher = original_new_load_launcher_contract();
+  DialogDescriptor descriptor{};
+  // WM_CTLCOLOR returns NULL_BRUSH (1018:0152): the buttons keep their
+  // face; there are no statics.
+  return make_dtmp_dialog(
+      resources, kStartupDialogLabel,
+      parse_original_dialog(
+          resources.find("DIALOG", launcher.dialog_resource_id)),
+      parse_original_dtmp(resources.find("DTMP", launcher.dialog_resource_id)),
+      descriptor, true, DialogPlacement::centered);
 }
 
 DialogWindow make_finance_dialog(const OriginalResources& resources,
