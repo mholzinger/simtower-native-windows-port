@@ -679,11 +679,11 @@ class Session::MainCommandHost final : public OriginalMainCommandHost {
     (void)s_.run_find_dialog(mode);
   }
   void help_contents() override {
-    // WinHelp(SIMTOWER.HLP, HELP_CONTENTS = 3). TEMP: a logged request
-    // until the help viewer exists.
-    s_.log_request(RequestKind::help, {3});
+    // WinHelp(SIMTOWER.HLP, HELP_CONTENTS = 3): the converted contents page
+    // (sdl_help.hpp). The logged request does not depend on the help files.
+    s_.log_request(RequestKind::help, {kWinHelpContents});
     s_.tally("help contents");
-    log_line("help contents requested (SIMTOWER.HLP, WinHelp command 3)");
+    s_.open_help(kWinHelpContents);
   }
   bool bomb_offer() override {
     auto context = s_.idle_pass_context();
@@ -2654,6 +2654,28 @@ bool Session::direct_build(const DirectBuild& build) {
   main_backing_dirty_ = true;
   present_requested_ = true;
   return built;
+}
+
+void Session::open_help(std::uint16_t command) {
+  HelpRequest request{.command = command};
+  const std::string what = "help contents requested (SIMTOWER.HLP, WinHelp"
+                           " command " + std::to_string(command) + ")";
+  const auto page = help_page(help_directory_, command);
+  if (!page) {
+    log_line(what + ": no converted help in '" + help_directory_.string() +
+             "'");
+  } else {
+    request.page = page->filename().string();
+    request.url = file_url(*page);
+    // Only the window host installs a viewer, so headless runs never open
+    // a browser.
+    request.opened = help_viewer_ && help_viewer_->open_url(request.url);
+    log_line(what + ": " + request.url +
+             (request.opened ? " (opened)"
+                             : help_viewer_ ? " (open failed)"
+                                            : " (not opened: headless)"));
+  }
+  last_help_ = std::move(request);
 }
 
 void Session::log_request(RequestKind kind,

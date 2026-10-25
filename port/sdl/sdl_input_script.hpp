@@ -33,6 +33,12 @@
 //                          menu or Main is disabled (Elevator Control
 //                          open); a grayed item is logged and not sent
 //   key f1                 the F1 accelerator (TranslateAccelerator, 40021)
+//   expect-help PAGE | missing | none
+//                          the last help request (Help > Contents, F1)
+//                          resolved to PAGE (e.g. contents.html) in the
+//                          help directory, found no converted help there,
+//                          or none was made. Headless runs only log the
+//                          request and its file URL, never open it
 //   pick-file PATH|cancel  the result of an Open / Save As sheet (PATH is
 //                          the rest of the line). Right after the command
 //                          that opens the sheet it answers that sheet;
@@ -259,6 +265,7 @@ enum class ScriptOp : std::uint8_t {
   expect_idle_passes,
   expect_rent,
   expect_find_latch,
+  expect_help,
   hold,
 };
 

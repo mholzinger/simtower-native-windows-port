@@ -118,12 +118,17 @@ game core (portable today)        presentation logic (to make portable)
 
 ## Help (decision 3a)
 
-- Convert SIMTOWER.HLP to HTML once, at asset-extraction time, and open the
-  index page with the platform's open-URL service. Output is derived game
-  content and stays gitignored.
-- Upstream's tools assume HelpDeco, LibreOffice and splitmrb
-  (`tools/extract_help_topics.py`, `decode_shg.py`). Replacing that chain
-  with a self-contained converter is a separate work item.
+- Convert SIMTOWER.HLP to HTML once, at build time, and open the contents
+  page with the platform's open-URL service. Output is derived game content
+  and stays in the build tree.
+- `tools/convert_winhelp.py` (Python 3 standard library only) replaces
+  upstream's HelpDeco, LibreOffice and splitmrb chain
+  (`tools/extract_help_topics.py`, `decode_shg.py`). The SDL build runs it
+  into `help/` next to `simtower_sdl` (`--help-dir` overrides);
+  `sdl/sdl_help.hpp` maps the original's only WinHelp call (HELP_CONTENTS,
+  menu and F1) to `contents.html`. Headless runs log the URL instead.
+- Open question: the Win32 host still calls WinHelp, which current Windows
+  no longer ships.
 
 ## Migration plan (each step keeps the Win32 build green)
 

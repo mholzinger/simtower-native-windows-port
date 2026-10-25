@@ -1,0 +1,8 @@
+# Without converted help (no SIMTOWER.HLP or no Python 3 at build time),
+# Help > Contents is only logged and the game goes on.
+# args: --scenario none --passes 2 --help-dir no-such-help
+# expect-stderr: help contents requested .*: no converted help in 'no-such-help'
+pass 1
+menu 40021
+expect-help missing
+pass 2

@@ -478,6 +478,11 @@ std::vector<ScriptCommand> parse_input_script(
     } else if (verb == "dialog-hold") {
       command.op = ScriptOp::dialog_hold;
       command.text = rest_of_line(line, verb);
+    } else if (verb == "expect-help") {
+      command.op = ScriptOp::expect_help;
+      if (words.size() != 2) throw fail("expect-help takes PAGE, missing or "
+                                        "none");
+      command.text = words[1];
     } else if (verb == "expect-title" || verb == "expect-saved") {
       command.op = verb == "expect-title" ? ScriptOp::expect_title
                                           : ScriptOp::expect_saved;
@@ -1018,6 +1023,7 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
     case ScriptOp::expect_idle_passes:
     case ScriptOp::expect_rent:
     case ScriptOp::expect_find_latch:
+    case ScriptOp::expect_help:
       check_expectation(command);
       break;
     case ScriptOp::hold:
@@ -1188,6 +1194,16 @@ void ScriptPlayer::check_expectation(const ScriptCommand& command) const {
       actual = *rate;
       what = "rent rate";
       break;
+    }
+    case ScriptOp::expect_help: {
+      const auto& help = session_.last_help();
+      const std::string actual_help =
+          !help ? "none" : help->page.empty() ? "missing" : help->page;
+      if (actual_help != command.text) {
+        throw ScriptFailure(3, command.where + ": expected help " +
+                                   command.text + ", got " + actual_help);
+      }
+      return;
     }
     case ScriptOp::expect_title:
       if (session_.window_title() != command.text) {
