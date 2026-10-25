@@ -149,7 +149,9 @@ void draw_status(HDC dc, const std::string& text) {
   // 1118:02ee-02fb establishes the DrawText current position explicitly.
   // With TA_UPDATECP/TA_BASELINE this is observable: omitting it can leave the
   // status string at the current position inherited from the balance painter.
-  MoveToEx(dc, field.left + 2, field.bottom, nullptr);
+  // Tracked change (cleanup, 1118:0307's 1208:0cf5(0, -1)): the baseline
+  // at field.bottom - 1, was field.bottom.
+  MoveToEx(dc, field.left + 2, field.bottom - 1, nullptr);
   RECT text_rect = field;
   DrawTextA(dc, text.data(), static_cast<int>(text.size()), &text_rect,
             DT_SINGLELINE);

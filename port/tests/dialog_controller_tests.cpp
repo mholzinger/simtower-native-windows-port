@@ -2,8 +2,9 @@
 // frozen copies of the Win32 procedures' transactions in native_main.cpp
 // as they were before the procedures shared them: FINDDIALOGFILTER's
 // resolve / remove / close (find_dialog_proc now runs the controller), the
-// two rename Save branches (now calling original_rename_save), the New
-// Movie button gate (now calling original_movie_choice_enabled) and
+// two rename Save branches (now calling original_rename_save), the two
+// rename procedures' whole WM_COMMAND and the New Movie procedure's button
+// gate and WM_COMMAND (all three now run the controllers) and
 // COUNTDLOGMAIN's key-up, mouse and text placement (finance_dialog_proc and
 // its painter now run the controller and original_finance_text_ops). The
 // frozen copies prove the shared path behaves as Win32 did. Each scenario
@@ -33,6 +34,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -58,6 +60,10 @@ OriginalDialogSignal command(std::uint16_t id, std::uint16_t code = 0U) {
   return {Kind::command, id, code};
 }
 
+std::string enable_event(std::uint16_t id, bool on) {
+  return "enable " + std::to_string(id) + (on ? " 1" : " 0");
+}
+
 // A dialog's controls as the procedures see them: the list box, the
 // enabled flags, item texts and focus.
 struct FakeOps final : simtower::OriginalDialogOps {
@@ -70,6 +76,8 @@ struct FakeOps final : simtower::OriginalDialogOps {
   // UpdateWindow calls, and the invalidations each one followed.
   std::vector<int> updates{};
   std::vector<simtower::OriginalRect> rects{};
+  // When set, every EnableWindow is logged in call order.
+  std::vector<std::string>* log{};
 
   void show_item(std::uint16_t, bool) override {}
   void invalidate() override { ++invalidations; }
@@ -79,7 +87,10 @@ struct FakeOps final : simtower::OriginalDialogOps {
   }
   void update_window() override { updates.push_back(invalidations); }
   void resize(int, int) override {}
-  void enable_item(std::uint16_t id, bool on) override { enabled[id] = on; }
+  void enable_item(std::uint16_t id, bool on) override {
+    enabled[id] = on;
+    if (log) log->push_back(enable_event(id, on));
+  }
   void focus_item(std::uint16_t id) override { focus = id; }
   void set_item_text(std::uint16_t id, std::string_view text) override {
     texts[id] = std::string(text);
@@ -402,6 +413,9 @@ void rename_controller_tests(OriginalTdtDocument document,
   controller.initialize(ops, document);
   // An unnamed target: empty text, Delete and Rename disabled.
   assert(ops.texts[4].empty() && !ops.enabled[3] && !ops.enabled[1]);
+  // The WM_INITDIALOG tail: no SetFocus, TRUE (the dialog manager focuses
+  // the first tab stop); edit 4 waits for the WM_PAINT tail.
+  assert(controller.initial_focus(ops) && ops.focus == 0U);
   // WM_PAINT: the edit is enabled and focused, nothing else.
   assert(!controller.signal({Kind::paint, 0U}, ops, host).result);
   assert(ops.focus == 4U && ops.enabled[4]);
@@ -442,6 +456,249 @@ void rename_controller_tests(OriginalTdtDocument document,
   assert(!cancelled.signal(command(9), second, host).result);
 }
 
+// The rename procedures' WM_COMMAND, end to end. Both sides log EnableWindow,
+// the ALRT/1000 index and each close tail step in call order.
+class LoggingRenameHost final : public simtower::OriginalRenameDialogHost {
+ public:
+  LoggingRenameHost(OriginalTdtDocument* document,
+                    std::vector<std::string>& log)
+      : document_(document), log_(log) {}
+  OriginalTdtDocument* document() override { return document_; }
+  void alert_strl(std::uint16_t index) override {
+    log_.push_back("alert " + std::to_string(index));
+  }
+
+ private:
+  OriginalTdtDocument* document_{};
+  std::vector<std::string>& log_;
+};
+
+// The close tails both procedures keep: NAMEPEPLEDIALOGFILTER 1100:3ce8-3d0f
+// (DTMP, brush, DS:31a4, ReleaseCapture, EndDialog) and
+// NAMETENANTDIALOGFILTER 1100:4069-4082 (DTMP, DS:31a4, EndDialog).
+void log_rename_close(bool person_proc, int result,
+                      std::vector<std::string>& log) {
+  log.push_back("dtmp");
+  if (person_proc) log.push_back("brush");
+  log.push_back("modal");
+  if (person_proc) log.push_back("capture");
+  log.push_back("end " + std::to_string(result));
+}
+
+// Frozen copy of person_rename_dialog_proc / tenant_rename_dialog_proc's
+// WM_COMMAND (native_main.cpp before they ran the controller), with the
+// HWND calls replaced by the log and edit 4 by a string.
+struct LegacyRenameDialog {
+  simtower::OriginalRenameTarget target{};
+  OriginalTdtDocument* document{};  // g_tower_document
+  std::string edit{};
+  bool changed{};
+  std::vector<std::string>* log{};
+  std::optional<int> ended{};
+
+  bool command(std::uint16_t id) {
+    using CommandAction = simtower::OriginalRenameDialogCommandAction;
+    const auto plan = simtower::original_rename_dialog_command_plan(id);
+    const auto close_dialog = [&]() {
+      log_rename_close(target.person, plan.close_result, *log);
+      ended = plan.close_result;
+    };
+    switch (plan.action) {
+      case CommandAction::refresh_edit_gate:
+        // enable_original_person_rename_button (GetWindowTextLengthW
+        // through original_rename_ok_enabled) and
+        // enable_original_tenant_rename_button (length != 0).
+        log->push_back(enable_event(
+            1U, target.person
+                    ? simtower::original_rename_ok_enabled(edit.size())
+                    : !edit.empty()));
+        return true;
+      case CommandAction::save:
+        if (!document) return plan.consume;
+        {
+          if (edit.empty()) return true;
+          const auto result =
+              simtower::original_rename_save(*document, target, edit);
+          if (result.alert_strl_index) {
+            log->push_back("alert " +
+                           std::to_string(*result.alert_strl_index));
+          }
+          if (!result.close) return true;
+          changed = changed || result.changed;
+        }
+        close_dialog();
+        return true;
+      case CommandAction::cancel:
+        close_dialog();
+        return true;
+      case CommandAction::remove:
+        if (document) {
+          const bool removed =
+              target.person
+                  ? simtower::remove_original_person_name(
+                        *document, target.person_index)
+                        .changed
+                  : simtower::remove_original_tenant_name(
+                        *document, target.floor, target.tenant_index)
+                        .changed;
+          changed = changed || removed;
+        }
+        close_dialog();
+        return true;
+      case CommandAction::none:
+        return plan.consume;
+    }
+    return false;
+  }
+};
+
+// The procedures as they are now: signal_original_rename_dialog (a
+// controller per message over the dialog's ops and Win32RenameDialogHost)
+// and the proc's close tail when it returns a result.
+struct SharedRenameDialog {
+  simtower::OriginalRenameTarget target{};
+  OriginalTdtDocument* document{};
+  FakeOps ops{};
+  bool changed{};
+  std::vector<std::string>* log{};
+  std::optional<int> ended{};
+
+  bool command(std::uint16_t id, std::uint16_t code) {
+    const auto plan = simtower::original_rename_dialog_command_plan(id);
+    ops.log = log;
+    LoggingRenameHost host(document, *log);
+    simtower::OriginalRenameController controller(target);
+    const auto outcome = controller.signal(::command(id, code), ops, host);
+    changed = changed || controller.changed();
+    if (outcome.result) {
+      log_rename_close(target.person, *outcome.result, *log);
+      ended = outcome.result;
+    }
+    return plan.consume;
+  }
+};
+
+struct RenameStep {
+  std::string text{};
+  std::uint16_t id{};
+  std::uint16_t code{};
+};
+
+// Runs the steps on both copies until the dialog closes; returns the number
+// of steps run.
+std::size_t rename_command_parity(
+    const OriginalTdtDocument& base,
+    const simtower::OriginalRenameTarget& target, bool with_document,
+    const std::vector<RenameStep>& steps) {
+  auto legacy_document = base;
+  auto shared_document = base;
+  std::vector<std::string> legacy_log;
+  std::vector<std::string> shared_log;
+  LegacyRenameDialog legacy{target,
+                            with_document ? &legacy_document : nullptr};
+  legacy.log = &legacy_log;
+  SharedRenameDialog shared{target,
+                            with_document ? &shared_document : nullptr};
+  shared.log = &shared_log;
+  std::size_t run = 0U;
+  for (const auto& step : steps) {
+    legacy.edit = step.text;
+    shared.ops.texts[simtower::kOriginalRenameEditId] = step.text;
+    const bool legacy_return = legacy.command(step.id);
+    const bool shared_return = shared.command(step.id, step.code);
+    ++run;
+    assert(legacy_return == shared_return);
+    assert(shared_log == legacy_log);
+    assert(shared.ended == legacy.ended);
+    assert(shared.changed == legacy.changed);
+    if (shared.ended) break;
+  }
+  assert(simtower::serialize_original_tdt_game_save(shared_document) ==
+         simtower::serialize_original_tdt_game_save(legacy_document));
+  return run;
+}
+
+// A copy of `base` whose person (or tenant) name table is full, and an
+// unnamed target whose Save then reports the full table.
+std::pair<OriginalTdtDocument, simtower::OriginalRenameTarget>
+full_name_table(const OriginalTdtDocument& base, bool person) {
+  auto document = base;
+  if (person) {
+    for (std::size_t index = 0; index < document.people.size(); ++index) {
+      // A full table returns before touching the document.
+      const auto result = simtower::set_original_person_name(
+          document, index, "P" + std::to_string(index));
+      if (result.status == simtower::OriginalPersonNameStatus::full) {
+        return {document, {true, index, 0, 0U}};
+      }
+    }
+  } else {
+    for (std::int16_t floor = 0; floor < 120; ++floor) {
+      for (std::size_t index = 0; index < 12U; ++index) {
+        const auto result = simtower::set_original_tenant_name(
+            document, floor, index,
+            "T" + std::to_string(floor) + "." + std::to_string(index));
+        if (result.status == simtower::OriginalTenantNameStatus::full) {
+          return {document, {false, 0U, floor, index}};
+        }
+      }
+    }
+  }
+  assert(false && "name table never filled");
+  return {document, {}};
+}
+
+void rename_command_tests(
+    const OriginalTdtDocument& base,
+    const std::vector<simtower::OriginalRenameTarget>& targets) {
+  constexpr std::uint16_t change = simtower::kOriginalEditChange;
+  const std::string too_long(20, 'q');
+  // Edit gate both ways (any notification), an unknown id and id 0, Save
+  // with empty text, Save too long (alert, stays open), then a saved name.
+  const std::vector<RenameStep> edit_then_save{
+      {"", 4, change}, {"Al", 4, change}, {"Al", 4, 0x0100U},
+      {"Al", 9, 0},    {"Al", 0, 0},      {"", 1, 0},
+      {too_long, 1, 0}, {"Al Tower", 1, 0}};
+  const std::vector<RenameStep> remove{{"x", 4, change}, {"", 3, 0}};
+  const std::vector<RenameStep> cancel{{"Zed", 4, change}, {"Zed", 2, 0}};
+  const std::vector<RenameStep> no_document{
+      {"Al", 4, change}, {"Al", 1, 0}, {"Al", 3, 0}};
+  int closes = 0;
+  for (const auto& target : targets) {
+    // Named (the staged names) and unnamed targets.
+    auto unnamed = base;
+    (void)simtower::original_rename_remove(unnamed, target);
+    const OriginalTdtDocument& unnamed_view = unnamed;
+    for (const auto* document : {&base, &unnamed_view}) {
+      assert(rename_command_parity(*document, target, true, edit_then_save) ==
+             edit_then_save.size());
+      assert(rename_command_parity(*document, target, true, remove) == 2U);
+      assert(rename_command_parity(*document, target, true, cancel) == 2U);
+      assert(rename_command_parity(*document, target, false, no_document) ==
+             3U);
+      closes += 4;
+    }
+  }
+  // A full table: STRL/1005[6] or [7], and the dialog still closes.
+  for (const bool person : {true, false}) {
+    const auto [full, target] = full_name_table(base, person);
+    assert(rename_command_parity(full, target, true,
+                                 {{"New Name", 1, 0}}) == 1U);
+    std::vector<std::string> log;
+    SharedRenameDialog shared{target, nullptr};
+    auto copy = full;
+    shared.document = &copy;
+    shared.log = &log;
+    shared.ops.texts[simtower::kOriginalRenameEditId] = "New Name";
+    (void)shared.command(1, 0);
+    assert(!log.empty() && log.front() == (person ? "alert 6" : "alert 7"));
+    assert(shared.ended == 1);
+    ++closes;
+  }
+  std::printf("rename command parity: %zu targets, %d closing runs\n",
+              targets.size(), closes);
+}
+
 // --- New Movie ------------------------------------------------------------
 
 void movie_tests(OriginalTdtDocument document,
@@ -471,6 +728,144 @@ void movie_tests(OriginalTdtDocument document,
   assert(!controller.signal(command(7), &document, part).result);
   assert(controller.signal(command(1), nullptr, part).result == 1);
   assert(!controller.changed());
+}
+
+// Frozen copy of movie_choice_dialog_proc's WM_INITDIALOG button gate and
+// WM_COMMAND (native_main.cpp before it ran the controller), the HWND calls
+// replaced by a log.
+struct LegacyMovieDialog {
+  std::size_t record{};
+  OriginalTdtDocument* document{};  // g_tower_document
+  const simtower::OriginalPartTable* part{};
+  bool changed{};
+  std::vector<std::string>* log{};
+  std::optional<int> ended{};
+
+  // enable_original_movie_choice_buttons.
+  void init() {
+    if (!document) return;
+    const auto enabled =
+        simtower::original_movie_choice_enabled(*document, *part);
+    log->push_back(enable_event(1U, enabled.new_release));
+    log->push_back(enable_event(3U, enabled.classic));
+  }
+  bool command(std::uint16_t id) {
+    using CommandAction = simtower::OriginalMovieChoiceDialogCommandAction;
+    const auto plan = simtower::original_movie_choice_dialog_command_plan(id);
+    switch (plan.action) {
+      case CommandAction::cancel:
+        log->push_back("dtmp");
+        log->push_back("end 0");
+        ended = 0;
+        return true;
+      case CommandAction::new_release:
+      case CommandAction::classic:
+        if (document) {
+          const auto choice = plan.action == CommandAction::new_release
+                                  ? simtower::OriginalMovieChoice::new_release
+                                  : simtower::OriginalMovieChoice::classic;
+          const auto result =
+              simtower::choose_original_movie(*document, *part, record, choice);
+          changed = changed || result.changed;
+        }
+        log->push_back("dtmp");
+        log->push_back("end 1");
+        ended = 1;
+        return true;
+      case CommandAction::none:
+        return plan.consume;
+    }
+    return false;
+  }
+};
+
+// movie_choice_dialog_proc as it is now: the controller's initialize (with
+// the proc's document guard) and a controller per WM_COMMAND, then the
+// proc's DTMP release and EndDialog when it returns a result.
+struct SharedMovieDialog {
+  std::size_t record{};
+  OriginalTdtDocument* document{};
+  const simtower::OriginalPartTable* part{};
+  FakeOps ops{};
+  bool changed{};
+  std::vector<std::string>* log{};
+  std::optional<int> ended{};
+
+  void init() {
+    ops.log = log;
+    if (!document) return;
+    simtower::OriginalMovieChoiceController(record).initialize(ops, *document,
+                                                               *part);
+  }
+  bool command(std::uint16_t id, std::uint16_t code) {
+    const auto plan = simtower::original_movie_choice_dialog_command_plan(id);
+    simtower::OriginalMovieChoiceController controller(record);
+    const auto outcome =
+        controller.signal(::command(id, code), document, *part);
+    changed = changed || controller.changed();
+    if (outcome.result) {
+      log->push_back("dtmp");
+      log->push_back("end " + std::to_string(*outcome.result));
+      ended = outcome.result;
+    }
+    return plan.consume;
+  }
+};
+
+void movie_command_tests(const OriginalTdtDocument& base,
+                         const simtower::OriginalPartTable& part) {
+  const auto new_cost = std::bit_cast<std::int16_t>(part.words_52_to_ac[34]);
+  const auto classic_cost =
+      std::bit_cast<std::int16_t>(part.words_52_to_ac[35]);
+  const std::size_t records = base.post_elevator.dc24_records.size();
+  const std::vector<std::vector<std::uint16_t>> scripts{
+      {7, 0, 4, 1}, {3}, {2}, {0xffffU, 2}};
+  int runs = 0;
+  int changed = 0;
+  for (const std::int32_t balance :
+       {0, static_cast<int>(classic_cost), static_cast<int>(new_cost),
+        100000000}) {
+    for (const std::size_t record :
+         {std::size_t{0}, records == 0U ? std::size_t{0} : records - 1U,
+          records + 3U}) {
+      for (const bool with_document : {true, false}) {
+        for (const auto& script : scripts) {
+          auto legacy_document = base;
+          auto shared_document = base;
+          legacy_document.header.balance = balance;
+          shared_document.header.balance = balance;
+          std::vector<std::string> legacy_log;
+          std::vector<std::string> shared_log;
+          LegacyMovieDialog legacy{
+              record, with_document ? &legacy_document : nullptr, &part};
+          legacy.log = &legacy_log;
+          SharedMovieDialog shared{
+              record, with_document ? &shared_document : nullptr, &part};
+          shared.log = &shared_log;
+          legacy.init();
+          shared.init();
+          assert(shared_log == legacy_log);
+          for (const auto id : script) {
+            const bool legacy_return = legacy.command(id);
+            const bool shared_return = shared.command(id, 0U);
+            assert(legacy_return == shared_return);
+            assert(shared_log == legacy_log);
+            assert(shared.ended == legacy.ended);
+            assert(shared.changed == legacy.changed);
+            if (shared.ended) break;
+          }
+          assert(shared.ended.has_value());
+          assert(simtower::serialize_original_tdt_game_save(
+                     shared_document) ==
+                 simtower::serialize_original_tdt_game_save(
+                     legacy_document));
+          ++runs;
+          if (shared.changed) ++changed;
+        }
+      }
+    }
+  }
+  std::printf("movie command parity: %d runs, %d changed\n", runs, changed);
 }
 
 // --- Finance ------------------------------------------------------------
@@ -614,7 +1009,9 @@ int main(int argc, char** argv) {
     (void)simtower::original_rename_remove(fresh, target);
     rename_controller_tests(fresh, target);
   }
+  rename_command_tests(document, targets);
   movie_tests(document, startup.part);
+  movie_command_tests(document, startup.part);
   finance_tests(resources, document);
   std::printf("dialog controller tests passed\n");
   return 0;

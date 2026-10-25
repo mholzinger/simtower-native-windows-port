@@ -129,6 +129,7 @@ add_custom_command(
 add_library(simtower_canvas STATIC
   src/original_canvas_font.cpp
   src/original_draw_canvas.cpp
+  src/original_text_encoding.cpp
   ${SIMTOWER_CANVAS_FONT_SOURCE}
 )
 target_include_directories(simtower_canvas SYSTEM PRIVATE
@@ -584,7 +585,9 @@ if(BUILD_TESTING)
                    elevator_control_scroll_frame elevator_control_repeat
                    elevator_control_double elevator_control_double_scroll
                    elevator_control_tracking elevator_control_magnifier
-                   elevator_control_magnifier_car)
+                   elevator_control_magnifier_car
+                   elevator_control_accelerator
+                   elevator_control_phase_released)
       add_test(
         NAME simtower_sdl_${script}
         COMMAND ${CMAKE_COMMAND}

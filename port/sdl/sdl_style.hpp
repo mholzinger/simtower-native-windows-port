@@ -16,6 +16,10 @@ inline constexpr std::uint32_t kWhite = 0x00FFFFFFU;
 // COLOR_ACTIVECAPTION and COLOR_HIGHLIGHT (owner decision 2026-10-23).
 inline constexpr std::uint32_t kCaption = 0x00000080U;
 inline constexpr std::uint32_t kCaptionText = kWhite;
+// COLOR_INACTIVECAPTION and COLOR_INACTIVECAPTIONTEXT: the Windows 3.1
+// defaults (white bar, black title) for a window that is not active.
+inline constexpr std::uint32_t kInactiveCaption = kWhite;
+inline constexpr std::uint32_t kInactiveCaptionText = kBlack;
 inline constexpr std::uint32_t kHighlight = 0x00000080U;
 inline constexpr std::uint32_t kHighlightText = kWhite;
 // COLOR_BTNFACE, COLOR_BTNSHADOW, COLOR_BTNHIGHLIGHT, COLOR_WINDOWFRAME.

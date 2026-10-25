@@ -147,6 +147,11 @@ class NullHost final : public OriginalElevatorControlHost {
   void invalidate_command() override {}
   void enable_window(OriginalElevatorControlCloseWindow, bool) override {}
   void unpublish() override {}
+  // The button is still down: a phase press opens the (cancelled) popup,
+  // as the interface's old default answered.
+  bool primary_button_down() override { return true; }
+  void audio_pump() override {}
+  void sample_auxiliary_pointer_tick() override {}
   void destroy() override {}
 
  private:
@@ -344,6 +349,9 @@ void shaft_cases(const OriginalResources& resources,
               NullHost host(document, startup);
               controller.signal(down, ops, host);
               assert(controller.pressed_item() == pressed);
+              // The shared painter draws the pressed look (D2), the legacy
+              // GDI copy the DS:31b4 latch; a press on 1 or 2 sets both.
+              assert(controller.pressed_visual() == pressed);
             }
             char name[96];
             std::snprintf(name, sizeof(name),

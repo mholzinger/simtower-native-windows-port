@@ -379,15 +379,50 @@ void check_info_canvas(const simtower::OriginalResources& resources) {
               static_cast<unsigned long long>(hash));
   // Depends on BITMAP/320..327, the bundled font, and the canvas rules.
   // Update deliberately (and look at the image) when one of those changes.
-  assert(hash == 0x758b18a75848d323ULL);
+  assert(hash == 0x4def2975a8e1bc52ULL);
 
   const auto base = backend.backing();
   {
+    // The status baseline moved up one row in the cleanup (field.bottom - 1,
+    // 1118:0307's 1208:0cf5(0, -1)), which shows the top descender row of
+    // the 'g' in "Parking". Only the status field {41, 33, 303, 44} (filled
+    // 0xd9d9d9, text clipped to it) changed: shifting its rows 33..42 down
+    // one row and refilling row 33 reproduces the frame from before. Row 33
+    // has no ink now, so no glyph reaches above the field either way.
+    auto before = image;
+    constexpr std::uint32_t kStatusFill = 0xd9d9d9U;
+    for (int x = 41; x < 303; ++x) {
+      assert(before[static_cast<std::size_t>(33) * kInfoWidth + x] ==
+             kStatusFill);
+    }
+    for (int y = 43; y > 33; --y) {
+      for (int x = 41; x < 303; ++x) {
+        before[static_cast<std::size_t>(y) * kInfoWidth + x] =
+            before[static_cast<std::size_t>(y - 1) * kInfoWidth + x];
+      }
+    }
+    for (int x = 41; x < 303; ++x) {
+      before[static_cast<std::size_t>(33) * kInfoWidth + x] = kStatusFill;
+    }
+    std::printf("info canvas before status baseline fnv1a %016llx\n",
+                static_cast<unsigned long long>(fnv1a(before)));
+    assert(fnv1a(before) == 0x30d4dddc8b544117ULL);
+    // Then, on that frame: the row rule of the canvas font's dropout pass
+    // (the 11-pixel '0' top) changed it in exactly two pixels: the bowl
+    // top of the 14-pixel 'a' in "Year" (date field) moves column 3 from
+    // row 4 to row 3. Swapping them back reproduces the frame from before
+    // that rule.
+    const std::size_t a_top = static_cast<std::size_t>(23) * kInfoWidth + 251;
+    const std::size_t a_low = a_top + static_cast<std::size_t>(kInfoWidth);
+    assert(before[a_top] == kDark && before[a_low] == 0x999999U);
+    std::swap(before[a_top], before[a_low]);
+    std::printf("info canvas before row rule fnv1a %016llx\n",
+                static_cast<unsigned long long>(fnv1a(before)));
+    assert(fnv1a(before) == 0x758b18a75848d323ULL);
     // The 11-pixel bowl fix in the canvas font's dropout pass changed this
     // frame in exactly one pixel: the bowl corner of 'P' in "Parking"
     // (12-pixel status line), which it closes. Putting the backing pixel
     // back reproduces the frame from before the fix.
-    auto before = image;
     const std::size_t corner = static_cast<std::size_t>(39) * kInfoWidth + 176;
     assert(before[corner] != base[corner]);
     before[corner] = base[corner];
@@ -603,7 +638,7 @@ void check_info_call_sequence(const simtower::OriginalResources& resources) {
       "color 262626",
       "transparent",
       "align 25",
-      "move 43,44",
+      "move 43,43",  // 1118:02fb then 0307 (0, -1): field.bottom - 1
       "drawtext Status 41,33,303,44",
       "font-",
       // 1118:0368 population

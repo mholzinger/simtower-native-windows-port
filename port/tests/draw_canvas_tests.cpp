@@ -272,6 +272,82 @@ int main() {
         assert(!has_closed_counter(font.glyph(px, c)));
       }
     }
+    // Digit shapes at the Info and dialog sizes (11 and 12 pixels): no
+    // empty row inside a digit (a dropout gap) and no stray pixel on its
+    // top ink row (one with no neighbour on that row and nothing directly
+    // below; the 11-pixel '0' had one over ".##.#."). Between its top and
+    // bottom rows '0' has one left and one right wall per row, and neither
+    // wall juts out on a single row. TEMP exceptions, see
+    // original_canvas_font.cpp: the 11-pixel '6' top pixel and the
+    // 11-pixel '0' row 4 bulge; asserted as present so a fix shows up.
+    {
+      using Glyph = simtower::OriginalCanvasGlyph;
+      const auto bit = [](const Glyph& g, int x, int y) {
+        return x >= 0 && y >= 0 && x < g.width && y < g.height &&
+               g.mask[static_cast<std::size_t>(y * g.width + x)] != 0U;
+      };
+      const auto ink_rows = [&](const Glyph& g) {
+        std::vector<int> rows;
+        for (int y = 0; y < g.height; ++y) {
+          for (int x = 0; x < g.width; ++x) {
+            if (bit(g, x, y)) {
+              rows.push_back(y);
+              break;
+            }
+          }
+        }
+        return rows;
+      };
+      const auto stray_on_row = [&](const Glyph& g, int y) {
+        for (int x = 0; x < g.width; ++x) {
+          if (bit(g, x, y) && !bit(g, x - 1, y) && !bit(g, x + 1, y) &&
+              !bit(g, x, y + 1)) {
+            return true;
+          }
+        }
+        return false;
+      };
+      // Runs of on pixels in row y as [first, last] columns.
+      const auto runs = [&](const Glyph& g, int y) {
+        std::vector<std::pair<int, int>> result;
+        for (int x = 0; x < g.width; ++x) {
+          if (!bit(g, x, y)) continue;
+          if (!result.empty() && result.back().second == x - 1) {
+            result.back().second = x;
+          } else {
+            result.push_back({x, x});
+          }
+        }
+        return result;
+      };
+      for (int px = 11; px <= 12; ++px) {
+        for (unsigned char c = '0'; c <= '9'; ++c) {
+          const auto& g = font.glyph(px, c);
+          const auto rows = ink_rows(g);
+          assert(!rows.empty());
+          assert(rows.back() - rows.front() + 1 ==
+                 static_cast<int>(rows.size()));
+          const bool temp_stray = px == 11 && c == '6';
+          assert(stray_on_row(g, rows.front()) == temp_stray);
+        }
+        const auto& zero = font.glyph(px, '0');
+        const auto rows = ink_rows(zero);
+        std::vector<int> left;
+        std::vector<int> right;
+        for (int y = rows.front() + 1; y < rows.back(); ++y) {
+          const auto walls = runs(zero, y);
+          assert(walls.size() == 2U);
+          left.push_back(walls.front().first);
+          right.push_back(walls.back().second);
+        }
+        int juts = 0;
+        for (std::size_t i = 1; i + 1 < left.size(); ++i) {
+          if (left[i] < left[i - 1] && left[i] < left[i + 1]) ++juts;
+          if (right[i] > right[i - 1] && right[i] > right[i + 1]) ++juts;
+        }
+        assert(juts == (px == 11 ? 1 : 0));  // TEMP: 11-pixel row 4
+      }
+    }
     assert(simtower::original_cp1252_to_unicode(0x80U) == 0x20acU);
     assert(simtower::original_cp1252_to_unicode('A') == 'A');
     assert(simtower::original_cp1252_to_unicode(0xe9U) == 0xe9U);

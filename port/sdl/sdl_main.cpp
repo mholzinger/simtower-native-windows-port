@@ -920,11 +920,16 @@ void resize_session(const SDL_Event& event, simtower::sdl::Session& session) {
   session.resize(width, height);
 }
 
-// The 1050:05a7 selector modal in the window: a nested SDL_WaitEvent loop
-// that re-presents the window (with the selector overlay) and runs no idle
-// pass, as DialogBoxIndirectParamW's own loop does. Only pointer input,
-// QUIT, EXPOSED and RESIZED are handled inside it; other events (focus,
-// keys, wheel) are dropped while it runs.
+// A WM_KEYDOWN that TranslateAccelerator matches against TOWER_MENU's
+// table (its one entry, VK_F1 -> 40021). The same test for Main and for the
+// Elevator Control path. TEMP: auto-repeat downs are not offered to it (the
+// existing Main behaviour; whether Win16 TranslateAccelerator acts on
+// repeats is not established).
+bool accelerator_key_down(const SDL_Event& event) {
+  return event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F1 &&
+         !event.key.repeat;
+}
+
 // WM_KEYDOWN / WM_KEYUP for a dialog manager (an open modal dialog, or the
 // active Elevator Control): the key, Shift, and a letter's lower-case
 // character (a button mnemonic); nullopt for any other event.
@@ -976,6 +981,11 @@ std::optional<simtower::sdl::DialogInput> dialog_key_input(
   return input;
 }
 
+// The 1050:05a7 selector modal in the window: a nested SDL_WaitEvent loop
+// that re-presents the window (with the selector overlay) and runs no idle
+// pass, as DialogBoxIndirectParamW's own loop does. Only pointer input,
+// QUIT, EXPOSED and RESIZED are handled inside it; other events (focus,
+// keys, wheel) are dropped while it runs.
 class WindowModalSource final : public simtower::sdl::InputSource {
  public:
   WindowModalSource(Window& window, simtower::sdl::Session& session)
@@ -1012,6 +1022,15 @@ class WindowModalSource final : public simtower::sdl::InputSource {
   // The window answers every dialog.
   bool drives_dialog(const simtower::sdl::DialogWindow& /*dialog*/) override {
     return true;
+  }
+
+  // GetAsyncKeyState(VK_LBUTTON) < 0: SDL's button state after a pump,
+  // which already counts the events queued behind the one being routed
+  // (a fast click's release reads as up). The button is SDL_BUTTON_LEFT,
+  // the one pointer_input routes as the press.
+  std::optional<bool> primary_button_held() override {
+    SDL_PumpEvents();
+    return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0U;
   }
 
   // The open dialog's loop (sdl_dialog.hpp): pointer input, the keys the
@@ -1316,12 +1335,20 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
                   WindowActivation& activation, LoneAlt& lone_alt) {
   const bool lone_alt_up = lone_alt.released(event);
   // While Elevator Control is open it is the active window and Main (with
-  // its menu bar and accelerators) is disabled: keys go to its dialog
-  // manager (IsDialogMessage; 1258:00bc routes there first), presses on
-  // the menu bar reach nothing, and the SDL-only arrow / wheel scroll
+  // its menu bar) is disabled. 1258:00ea-0118 (DS:31a0 set): a message goes
+  // to TranslateAccelerator(Elevator Control, TOWER_MENU's table) first
+  // (1258:00fd), and only when that returns 0 to its dialog manager
+  // (IsDialogMessage, 1258:010f). TranslateAccelerator takes only key-downs
+  // (and characters), so every key-up reaches the dialog manager. Presses
+  // on the menu bar reach nothing, and the SDL-only arrow / wheel scroll
   // stand-ins of Main are off.
   const bool control_open = session.elevator_control() != nullptr;
   if (control_open) {
+    if (accelerator_key_down(event) &&
+        session.accelerator(simtower::kOriginalVirtualKeyF1)) {
+      expose = true;
+      return true;
+    }
     if (const auto key = dialog_key_input(event)) {
       // Auto-repeat downs are WM_KEYDOWN repeats, as in USER.
       session.elevator_control_input(*key);
@@ -1391,7 +1418,7 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
           return run_menu_loop(window, session, title, true, true);
         }
       }
-      if (event.key.key == SDLK_F1 && !event.key.repeat) {
+      if (accelerator_key_down(event)) {
         // TranslateAccelerator: TOWER_MENU's one entry, VK_F1 -> 40021.
         (void)session.accelerator(simtower::kOriginalVirtualKeyF1);
         expose = true;

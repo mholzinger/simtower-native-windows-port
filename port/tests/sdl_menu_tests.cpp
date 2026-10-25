@@ -1,7 +1,8 @@
 // The SDL menu bar's layout, drawing and modal tracking (sdl/sdl_menu.hpp)
 // on TOWER_MENU from the pack, after WM_CREATE's ops: mouse picks
 // (including the Options > Sound cascade), grayed items, presses outside,
-// keyboard navigation and mnemonics, and the drawn highlight and border.
+// keyboard navigation and mnemonics, the drawn highlight and border, and
+// the caption's active and inactive (Win3.1 white / black) colours.
 // No SDL calls.
 //
 // Usage: simtower_sdl_menu_tests <original_resources.pack>
@@ -15,6 +16,7 @@
 
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -179,11 +181,55 @@ int main(int argc, char** argv) {
   view.bar = 2;
   view.item = 4;
   draw_main_caption_and_menu_bar(raster, menu, layout, view,
-                                 "SimTower - untitled");
+                                 "SimTower - untitled", true);
   draw_menu_popups(raster, menu, layout, view);
   const auto pixel = [&](int x, int y) {
     return raster.pixels[static_cast<std::size_t>(y) * raster.width + x];
   };
+  // The caption between the system-menu box and the title, and how many
+  // of its title pixels are in a colour.
+  const auto& metrics = kMainNonclientMetrics;
+  const int caption_x = layout.main_outer.x + metrics.frame_width;
+  const int caption_y = layout.main_outer.y + metrics.frame_height;
+  const int caption_width =
+      layout.main_outer.width - 2 * metrics.frame_width;
+  const auto title_pixels = [&](const OriginalWorldRaster& image,
+                                std::uint32_t rgb) {
+    int count = 0;
+    for (int y = caption_y; y < caption_y + metrics.caption_height; ++y) {
+      for (int x = caption_x + 3 * metrics.caption_height;
+           x < caption_x + caption_width - 3 * metrics.caption_height; ++x) {
+        if (image.pixels[static_cast<std::size_t>(y) * image.width + x] ==
+            rgb) {
+          ++count;
+        }
+      }
+    }
+    return count;
+  };
+  // Active: COLOR_ACTIVECAPTION (TEMP navy) with a white title.
+  assert(pixel(caption_x + metrics.caption_height + 2, caption_y + 2) ==
+         0x00000080U);
+  assert(title_pixels(raster, 0x00FFFFFFU) > 0);
+  assert(title_pixels(raster, 0x00000000U) == 0);
+  {
+    // Inactive (a palette, Elevator Control or a modal is active): the
+    // Win3.1 COLOR_INACTIVECAPTION white with a black title; no navy left.
+    OriginalWorldRaster inactive = raster;
+    draw_main_caption_and_menu_bar(inactive, menu, layout, view,
+                                   "SimTower - untitled", false);
+    assert(inactive.pixels[static_cast<std::size_t>(caption_y + 2) *
+                               inactive.width +
+                           caption_x + metrics.caption_height + 2] ==
+           0x00FFFFFFU);
+    assert(title_pixels(inactive, 0x00000000U) ==
+           title_pixels(raster, 0x00FFFFFFU));
+    assert(title_pixels(inactive, 0x00000080U) == 0);
+    // The menu strip does not depend on the caption's state.
+    assert(inactive.pixels[static_cast<std::size_t>(bar.titles[2].y + 1) *
+                               inactive.width +
+                           bar.titles[2].x + 1] == 0x00000080U);
+  }
   const auto open = menu_open_layout(menu, layout, view);
   assert(pixel(bar.titles[2].x + 1, bar.titles[2].y + 1) == 0x00000080U);
   assert(pixel(bar.titles[1].x + 1, bar.titles[1].y + 1) == 0x00FFFFFFU);

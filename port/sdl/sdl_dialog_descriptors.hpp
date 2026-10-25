@@ -58,7 +58,9 @@
 //   moves over the client (not the scroll bar) reach the procedure.
 // - The elevator popup (DIALOG 124, ELVPOPUP): 82x67, no frame, at its
 //   phase button raised by the mode rows, with SetCapture and ClipCursor;
-//   moves, left and right releases reach the procedure.
+//   moves, left and right releases reach the procedure. The painter reads
+//   the procedure's hover band through the hover_mode accessor the
+//   session passes in.
 //
 // Deferred (they keep their logged or auto-answered SDL behavior for a
 // later step): facility and person information, transport information
@@ -74,6 +76,8 @@
 #include "original_find.hpp"
 #include "original_resources.hpp"
 
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -138,9 +142,12 @@ inline constexpr int kCaptionFrameHeight = 18;
     std::string caption,
     DialogDescriptor::Painter client);
 // ELVPOPUP with its outer origin at (x, y) in window coordinates;
-// paint_state() - 1 is the hover band (0: none).
+// hover_mode reads the procedure's hover band for the painter
+// (OriginalElevatorPopupController::hover_mode, -1: none; an empty
+// function paints no hover).
 [[nodiscard]] DialogWindow make_elevator_popup_dialog(
-    const OriginalResources& resources, int x, int y);
+    const OriginalResources& resources, int x, int y,
+    std::function<std::int16_t()> hover_mode);
 
 // paint_state() != 0 draws the OK surface pressed (BITMAP/501).
 [[nodiscard]] DialogWindow make_finance_dialog(

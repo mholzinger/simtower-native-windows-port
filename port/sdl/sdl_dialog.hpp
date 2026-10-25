@@ -15,14 +15,20 @@
 // IsDialogMessage Esc rule, the painters of its frame and client, and hooks
 // for the input the manager does not consume (it reaches the dialog
 // procedure, e.g. ABOUTDLGPROC's close on any key or click). The ported
-// dialogs are three descriptors (sdl_dialog_descriptors.hpp): the event
-// dialogs, the message boxes and About.
+// dialogs are descriptors in sdl_dialog_descriptors.hpp: the event
+// dialogs, the message boxes, About, Find Person / Tenant, Rename Person /
+// Tenant, New Movie, Finance, the modeless Elevator Control panel and its
+// ELVPOPUP.
 //
 // Session::run_dialog_modal feeds a DialogWindow input and passes the
-// signals it produces (WM_COMMAND, WM_TIMER, the About close) to a
-// procedure that mirrors the Win32 dialog procedure; the procedure acts on
-// the dialog through OriginalDialogOps (show_item / invalidate / resize).
-// draw_dialog paints it.
+// signals it produces (WM_COMMAND, WM_TIMER, pointer and key messages the
+// manager does not consume, the About close) to a procedure that mirrors
+// the Win32 dialog procedure (for Find, Rename, New Movie, Finance and
+// ELVPOPUP, the shared controller of original_dialog_controllers.hpp or
+// original_elevator_control_controller.hpp that the Win32 host runs too;
+// the Elevator Control panel's controller runs modeless, below). The
+// procedure acts on the dialog only through OriginalDialogOps
+// (original_dialog_model.hpp has the full op set). draw_dialog paints it.
 //
 // Controls (their painting is in sdl_dialog_widgets.cpp, their behavior in
 // the DialogWindow members in sdl_dialog.cpp): push buttons, text statics,
@@ -218,7 +224,14 @@ struct DialogDescriptor {
                                      OriginalCanvasFont& font,
                                      const DialogWindow& dialog,
                                      const OriginalResources& resources)>;
-  Painter paint_frame{};
+  // The frame painter also gets whether the window is the active one
+  // (COLOR_ACTIVECAPTION; otherwise COLOR_INACTIVECAPTION).
+  using FramePainter = std::function<void(OriginalDrawContext& context,
+                                          OriginalCanvasFont& font,
+                                          const DialogWindow& dialog,
+                                          const OriginalResources& resources,
+                                          bool active)>;
+  FramePainter paint_frame{};
   Painter paint_client{};
   // IsDialogMessage(VK_ESCAPE): the WM_COMMAND id to send, or nullopt for
   // nothing. Null: IDCANCEL whether or not a control 2 exists (the dialog
@@ -663,9 +676,11 @@ void paint_dialog_controls(OriginalDrawContext& context,
                            const DialogWindow& dialog);
 
 // Paints the dialog at its placement into a window raster: the frame
-// painter, the client painter, then the controls bottom up.
+// painter (with its caption active or inactive), the client painter, then
+// the controls bottom up.
 void draw_dialog(OriginalWorldRaster& raster,
                  const DialogWindow& dialog,
-                 const OriginalResources& resources);
+                 const OriginalResources& resources,
+                 bool active = true);
 
 }  // namespace simtower::sdl

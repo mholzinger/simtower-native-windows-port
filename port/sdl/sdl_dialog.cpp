@@ -421,6 +421,11 @@ void DialogWindow::place(int desktop_width, int desktop_height) {
           descriptor_.requested_left);
       x_ = position.left;
       y_ = position.top;
+      // Owner decision D5, 2026-10-24: (8,160) stays. That is the outer
+      // origin 11e0:0b52 computes for the 202x448 Elevator Control frame
+      // on the 1024x768 desktop (the one-pixel border row is 160, the
+      // caption from 161); it covers most of the disabled Command palette,
+      // as the TOPMOST original did.
       // TEMP (owner decision): the original sat on a real 1024x768
       // desktop. A window too small for that position moves the panel up
       // (left) just enough to keep its outer bottom (right) edge inside;
@@ -1442,14 +1447,14 @@ bool DialogWindow::take_invalidated() {
 }
 
 void draw_dialog(OriginalWorldRaster& raster, const DialogWindow& dialog,
-                 const OriginalResources& resources) {
+                 const OriginalResources& resources, bool active) {
   auto& font = OriginalCanvasFont::bundled();
   const auto outer = dialog.outer();
   const auto& descriptor = dialog.descriptor();
   if (descriptor.paint_frame) {
     OriginalCanvasDrawContext frame(raster, font, outer.x, outer.y,
                                     {0, 0, outer.width, outer.height});
-    descriptor.paint_frame(frame, font, dialog, resources);
+    descriptor.paint_frame(frame, font, dialog, resources, active);
   }
   OriginalCanvasDrawContext context(
       raster, font, dialog.client_x(), dialog.client_y(),

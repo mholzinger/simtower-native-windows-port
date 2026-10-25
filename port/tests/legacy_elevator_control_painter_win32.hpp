@@ -103,7 +103,10 @@ void paint_original_elevator_control_grid(
     LineTo(dc, grid.right - 1, y);
   }
 
-  const auto old_alignment = SetTextAlign(dc, TA_LEFT | TA_TOP);
+  // Tracked change (cleanup, 1098:19a4-19d6): the labels' text-cell
+  // bottom at cell.bottom + vertical_inset (TA_BOTTOM), was TA_TOP at
+  // cell.top + vertical_inset.
+  const auto old_alignment = SetTextAlign(dc, TA_LEFT | TA_BOTTOM);
   const auto old_background_mode = SetBkMode(dc, TRANSPARENT);
   const auto old_text_color = GetTextColor(dc);
   const auto old_background_color = GetBkColor(dc);
@@ -144,7 +147,7 @@ void paint_original_elevator_control_grid(
                           &extent);
     const int x = cell.left + ((cell.right - cell.left - extent.cx) / 2) +
                   floor_plan.horizontal_inset;
-    const int y = cell.top + floor_plan.vertical_inset;
+    const int y = cell.bottom + floor_plan.vertical_inset;
     TextOutW(dc, x, y, label.data(), static_cast<int>(label.size()));
 
     if (!serviced) {

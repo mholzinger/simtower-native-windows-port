@@ -381,11 +381,13 @@ std::vector<ScriptCommand> parse_input_script(
       command.y = parse_coordinate(words[2], where);
       command.keys = words.size() == 4 ? 1U : 0U;
     } else if (verb == "panel-down" || verb == "panel-move" ||
-               verb == "panel-up" || verb == "panel-dblclick") {
-      command.op = verb == "panel-down"     ? ScriptOp::panel_down
-                   : verb == "panel-move"   ? ScriptOp::panel_move
-                   : verb == "panel-up"     ? ScriptOp::panel_up
-                                            : ScriptOp::panel_double_click;
+               verb == "panel-up" || verb == "panel-dblclick" ||
+               verb == "panel-click") {
+      command.op = verb == "panel-down"       ? ScriptOp::panel_down
+                   : verb == "panel-move"     ? ScriptOp::panel_move
+                   : verb == "panel-up"       ? ScriptOp::panel_up
+                   : verb == "panel-click"    ? ScriptOp::panel_click
+                                              : ScriptOp::panel_double_click;
       point(false);
     } else if (verb == "expect-served") {
       command.op = ScriptOp::expect_served;
@@ -397,6 +399,9 @@ std::vector<ScriptCommand> parse_input_script(
       command.value = words[3] == "yes" ? 1 : 0;
     } else if (verb == "expect-scroll") {
       command.op = ScriptOp::expect_scroll;
+      single_value();
+    } else if (verb == "expect-phase") {
+      command.op = ScriptOp::expect_phase;
       single_value();
     } else if (verb == "expect-waiting") {
       command.op = ScriptOp::expect_waiting;
@@ -804,19 +809,21 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
       check_expectation(command);
       break;
     case ScriptOp::open_dialog:
+      // Test shortcut: Person / Facility Information are not ported, so
+      // the script opens their child dialogs directly.
       if (command.text == "rename-person") {
         OriginalRenameTarget target{};
         target.person = true;
         target.person_index = static_cast<std::size_t>(command.numbers[0]);
-        (void)session_.open_rename_dialog_for_test(target);
+        (void)session_.run_rename_dialog(target);
       } else if (command.text == "rename-tenant") {
         OriginalRenameTarget target{};
         target.person = false;
         target.floor = static_cast<std::int16_t>(command.numbers[0]);
         target.tenant_index = static_cast<std::size_t>(command.numbers[1]);
-        (void)session_.open_rename_dialog_for_test(target);
+        (void)session_.run_rename_dialog(target);
       } else {
-        (void)session_.open_movie_dialog_for_test(
+        (void)session_.run_movie_dialog(
             static_cast<std::size_t>(command.numbers[0]));
       }
       break;
@@ -828,7 +835,8 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
     case ScriptOp::panel_down:
     case ScriptOp::panel_move:
     case ScriptOp::panel_up:
-    case ScriptOp::panel_double_click: {
+    case ScriptOp::panel_double_click:
+    case ScriptOp::panel_click: {
       const auto* panel = session_.elevator_control();
       if (!panel) {
         throw ScriptFailure(2, command.where +
@@ -844,7 +852,24 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
           session_.pointer_event(queued);
         }
       };
-      if (command.op == ScriptOp::panel_at) {
+      if (command.op == ScriptOp::panel_click) {
+        // The release is queued behind the press: the press's
+        // GetAsyncKeyState answer is "up" (primary_button_held), then the
+        // release is routed. A modal the press opened anyway would take
+        // the release, as for panel-at.
+        const auto dialogs = session_.host_requests().dialogs;
+        release_queued_ = true;
+        try {
+          deliver(InputKind::down);
+        } catch (...) {
+          release_queued_ = false;
+          throw;
+        }
+        release_queued_ = false;
+        if (session_.host_requests().dialogs == dialogs) {
+          deliver(InputKind::up);
+        }
+      } else if (command.op == ScriptOp::panel_at) {
         const bool right = command.keys != 0U;
         // A press that ran a modal (a phase button's ELVPOPUP) gave its
         // release to that modal: under USER's capture the popup ends on
@@ -887,6 +912,7 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
     case ScriptOp::expect_panel:
     case ScriptOp::expect_served:
     case ScriptOp::expect_scroll:
+    case ScriptOp::expect_phase:
     case ScriptOp::expect_waiting:
     case ScriptOp::expect_isolation:
     case ScriptOp::expect_idle_passes:
@@ -1012,6 +1038,7 @@ void ScriptPlayer::check_expectation(const ScriptCommand& command) const {
       break;
     }
     case ScriptOp::expect_scroll:
+    case ScriptOp::expect_phase:
     case ScriptOp::expect_waiting:
     case ScriptOp::expect_isolation: {
       const auto* controller = session_.elevator_controller();
@@ -1022,6 +1049,9 @@ void ScriptPlayer::check_expectation(const ScriptCommand& command) const {
       if (command.op == ScriptOp::expect_scroll) {
         actual = controller->state().scroll_position;
         what = "scroll position";
+      } else if (command.op == ScriptOp::expect_phase) {
+        actual = controller->state().day_phase;
+        what = "day phase";
       } else if (command.op == ScriptOp::expect_waiting) {
         const auto* document = session_.document();
         const auto& state = controller->state();

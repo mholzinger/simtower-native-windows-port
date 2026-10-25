@@ -166,6 +166,11 @@ class InputSource {
   }
   // The driven dialog on top closed (input meant for it is dropped).
   virtual void dialog_closed() {}
+  // GetAsyncKeyState of the primary button at this moment (1098:0c89):
+  // whether it is physically down now, counting a release the session has
+  // not been handed yet. nullopt: no state of its own (the session's
+  // tracked button answers).
+  virtual std::optional<bool> primary_button_held() { return std::nullopt; }
 };
 
 // A script error (exit 2) or a failed expectation (exit 3), with the
@@ -284,8 +289,11 @@ class Session : private OriginalIdlePassHost {
   // command was dispatched.
   bool choose_menu_command(std::uint16_t command);
   // TranslateAccelerator against TOWER_MENU's table (F1 -> 40021) for a
-  // Win16 virtual key; a grayed menu item suppresses the command. Returns
-  // whether a command was dispatched.
+  // Win16 virtual key; a grayed menu item suppresses the command, and while
+  // Elevator Control is open the WM_COMMAND goes to it (and is dropped).
+  // Returns whether the key matched an entry (TranslateAccelerator's
+  // nonzero: the message loop then skips IsDialogMessage); whether the
+  // command was dispatched is in the request log.
   bool accelerator(std::uint16_t virtual_key);
   // The Open / Save As sheets: a queued scripted result first, then the
   // input source's (a script's next "pick-file" line), then the installed
@@ -369,19 +377,22 @@ class Session : private OriginalIdlePassHost {
   }
   // Test shortcut (scripts' "set-balance"): replaces the live tower's cash
   // balance (header.balance), e.g. to reach the short-of-funds paths of the
-  // event dialogs. Nothing without a tower; the Info panel shows the new
-  // value on its next repaint.
+  // event dialogs. Nothing without a tower. The Info panel is repainted and
+  // a present requested, so a held frame shows the forced balance.
   void set_balance_for_test(std::int32_t balance) {
-    if (document_) document_->header.balance = balance;
+    if (!document_) return;
+    document_->header.balance = balance;
+    paint_info();
+    present_requested_ = true;
   }
-  // Test shortcuts (scripts' "open-dialog"): Rename Person / Tenant and New
-  // Movie as Person / Facility Information would open them (those windows
-  // are not ported yet), through the dialog runtime when the input source
-  // drives them, with the callers' result handling (a rename that changed
-  // a name, or any New Movie answer but Cancel, dirties the document).
-  // Undriven, they are logged and answered Cancel.
-  bool open_rename_dialog_for_test(const OriginalRenameTarget& target);
-  bool open_movie_dialog_for_test(std::size_t linked_record_index);
+  // Rename Person / Tenant and New Movie as Person / Facility Information
+  // open them, through the dialog runtime when the input source drives
+  // them, with the callers' result handling (a rename that changed a name,
+  // or any New Movie answer but Cancel, dirties the document). Undriven,
+  // they are logged and answered Cancel. Those windows are not ported yet:
+  // today only the scripts' "open-dialog" test shortcut calls these.
+  bool run_rename_dialog(const OriginalRenameTarget& target);
+  bool run_movie_dialog(std::size_t linked_record_index);
   // The Find marker (DS:77b4..77c0).
   [[nodiscard]] const OriginalFindMarkerState& find_marker() const {
     return find_marker_;

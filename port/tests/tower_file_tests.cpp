@@ -4,6 +4,12 @@
 // Save, the transition confirmation (cancel, proceed, save then proceed),
 // Open with a cancel, a successful load and failed loads falling back to
 // New. No assets.
+//
+// The basename rule measures to the first dot of the whole picked path
+// (10d0:0523), so the test runs with the temporary directory as the current
+// directory and picks RELATIVE paths. A dot in TMPDIR (or in a Wine temp
+// path) then cannot reach the rule; the only dots are the ones the test
+// puts in a pick. Nothing between the pick and the rule makes it absolute.
 
 #include "original_tower_file.hpp"
 
@@ -130,7 +136,12 @@ int main() {
                          "simtower_tower_file_tests";
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
+  const auto previous_directory = std::filesystem::current_path();
+  std::filesystem::current_path(directory);
+  // `saved` is the absolute file for existence checks; `saved_pick` is the
+  // relative name a sheet returns.
   const auto saved = directory / "TOWER.TDT";
+  const std::filesystem::path saved_pick{"TOWER.TDT"};
 
   RecordingHost host;
   // Save on an untitled tower is Save As; a cancel restores the palettes.
@@ -139,17 +150,18 @@ int main() {
         {"begin", "pick save", "end"}, "save as cancel");
   // A basename over eight characters reopens the sheet (begin again,
   // without end); the extension is replaced by .TDT before the check.
-  host.picks = {directory / "LONGERNAME.txt", directory / "TOWER.dat"};
+  host.picks = {std::filesystem::path{"LONGERNAME.txt"},
+                std::filesystem::path{"TOWER.dat"}};
   check(host, save_original_tower_as(host), true,
         {"begin", "pick save", "invalid", "begin", "pick save", "view",
          "commit TOWER.TDT", "end"},
         "save as retry");
   assert(std::filesystem::exists(saved));
-  assert(host.path == saved);
+  assert(std::filesystem::equivalent(host.path, saved));
   // The original measures to the first dot in the whole path, so under a
   // dotted directory a nine-character name passes; the file-name-only rule
   // used off Windows rejects it and reopens the sheet.
-  const auto dotted = directory / "my.dir";
+  const std::filesystem::path dotted{"my.dir"};
   std::filesystem::create_directories(dotted);
   host.picks = {dotted / "LONGERNAME.TDT"};
   check(host, save_original_tower_as(host), true,
@@ -162,17 +174,17 @@ int main() {
          "commit TOWER.TDT", "end"},
         "dotted directory, file-name-only rule");
   host.file_name_only = false;
-  host.picks = {saved};
+  host.picks = {saved_pick};
   host.replace_answer = true;
   check(host, save_original_tower_as(host), true,
         {"begin", "pick save", "replace?", "view", "commit TOWER.TDT", "end"},
         "back to the main save");
   // Save As onto an existing file asks; No keeps it and writes nothing.
-  host.picks = {saved};
+  host.picks = {saved_pick};
   host.replace_answer = false;
   check(host, save_original_tower_as(host), false,
         {"begin", "pick save", "replace?", "end"}, "replace no");
-  host.picks = {saved};
+  host.picks = {saved_pick};
   host.replace_answer = true;
   check(host, save_original_tower_as(host), true,
         {"begin", "pick save", "replace?", "view", "commit TOWER.TDT", "end"},
@@ -189,12 +201,12 @@ int main() {
   host.picks = {std::nullopt};
   check(host, open_original_tower(host), false, {"begin", "pick open", "end"},
         "open cancel");
-  host.picks = {saved};
+  host.picks = {saved_pick};
   check(host, open_original_tower(host), true,
         {"begin", "pick open", "recent", "empty", "loaded", "commit TOWER.TDT",
          "view", "end"},
         "open");
-  const auto broken = directory / "BROKEN.TDT";
+  const std::filesystem::path broken{"BROKEN.TDT"};
   {
     std::ofstream stream(broken, std::ios::binary);
     stream << "not a tower";
@@ -205,13 +217,13 @@ int main() {
   check(host, open_original_tower(host), false,
         {"begin", "pick open", "recent", "empty", "error 4", "new", "end"},
         "open broken");
-  check(host, load_original_tower_from_path(host, directory / "MISSING.TDT",
+  check(host, load_original_tower_from_path(host, "MISSING.TDT",
                                             {}),
         false, {"recent", "empty", "error 2", "new"}, "open missing");
 
   // No document: Save does nothing after the sheet.
   host.tower.reset();
-  host.path = saved;
+  host.path = saved_pick;
   host.title = "TOWER.TDT";
   check(host, save_original_tower(host), false, {}, "save without tower");
 
@@ -227,6 +239,7 @@ int main() {
   assert(!original_tdt_basename_is_valid("/dir/ABCDEFGH.TDT"));
   assert(original_tdt_basename_is_valid("C:\\dir\\ABCDEFGH.TDT"));
 
+  std::filesystem::current_path(previous_directory);
   std::filesystem::remove_all(directory);
   if (failures != 0) {
     std::fprintf(stderr, "tower_file_tests: %d failure(s)\n", failures);
