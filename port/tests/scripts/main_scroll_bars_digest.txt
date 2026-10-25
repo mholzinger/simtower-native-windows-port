@@ -1,0 +1,21 @@
+# The Main scroll bars send exactly the WM_HSCROLL / WM_VSCROLL messages
+# of main_scroll_messages.txt (bar geometry in main_scrollbars.txt): the
+# whole run, simulation and request log included, must match it.
+# args: --scenario busy --passes 40
+# same-digest-as: main_scroll_messages.txt
+pass 5
+click 991 616
+click 1007 300
+expect-view 1120 2986
+pass 10
+down 603 616
+move 700 616
+expect-view 1406 2986
+move 803 616
+up 803 616
+expect-view 1712 2986
+pass 20
+dblclick 216 616
+up 216 616
+expect-view 1696 2986
+pass 40

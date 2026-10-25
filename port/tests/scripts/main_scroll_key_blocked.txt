@@ -1,0 +1,10 @@
+# While Elevator Control is open its dialog manager takes the arrow keys
+# and the wheel reaches nothing: the Main scroll stand-ins are an error
+# (exit 2); panel-key drives the control.
+# args: --scenario busy --passes 3
+# expect-exit: 2
+# expect-stderr: stand-ins are off
+pass 2
+open-elevator-control 0
+key left
+pass 3

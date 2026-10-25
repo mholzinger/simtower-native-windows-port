@@ -2,8 +2,8 @@
 
 // Platform-free game session for the SDL3 frontend. It owns the state that
 // native_main.cpp keeps in Win32 globals (resources, tables, document, clock,
-// palette, sky decorations, transfer visuals) plus a plain viewport in place
-// of the Main window's scrollbars, and drives the shared idle pass
+// palette, sky decorations, transfer visuals) plus a viewport holding the
+// Main scroll bar positions, and drives the shared idle pass
 // (original_idle_pass.hpp: 1258:023a -> 1200:0196 -> 1090:03ab(1)) as its
 // host. The 1258:0195-023a prelude and 1258:0285-02d9 epilogue are host-owned
 // (see run_idle_pass). Host requests (dialogs, sounds, focus, Info/Map/Command
@@ -15,6 +15,7 @@
 #include "sdl_dialog.hpp"
 #include "sdl_digest.hpp"
 #include "sdl_layout.hpp"
+#include "sdl_main_scrollbars.hpp"
 
 #include "original_audio.hpp"
 #include "original_audio_device.hpp"
@@ -26,6 +27,7 @@
 #include "original_info.hpp"
 #include "original_information.hpp"
 #include "original_main_command.hpp"
+#include "original_main_scroll.hpp"
 #include "original_menu.hpp"
 #include "original_people.hpp"
 #include "original_resources.hpp"
@@ -57,8 +59,9 @@
 
 namespace simtower::sdl {
 
-// Replaces the scrollbar positions (current_original_view) and the
-// Main client size (GetClientRect). x/y are the world origin of the view.
+// The Main scroll bar positions (current_original_view: x is SB_HORZ's,
+// y SB_VERT's, the world origin of the view) and the Main client size
+// (GetClientRect). The ranges follow from the size (1080:00d7).
 struct Viewport {
   int x{};
   int y{};
@@ -238,6 +241,8 @@ class Session : private OriginalIdlePassHost {
   friend class MainCommandHost;
   class TowerFileHost;
   friend class TowerFileHost;
+  class MainScrollHost;
+  friend class MainScrollHost;
 
  public:
   // clock_ms replaces GetTickCount: every Win32 read maps to one call.
@@ -345,13 +350,20 @@ class Session : private OriginalIdlePassHost {
 
   // One empty-queue idle pass (run_original_idle_simulation).
   // Returns true when the main raster changed and should be presented.
-  // Does nothing while elevator_tracking() holds.
+  // Does nothing while scroll_tracking() holds.
   bool run_idle_pass();
   // Whether Elevator Control's scroll bar (SB_CTL 7) is being tracked. On
   // Win32 USER's own tracking loop runs then, so SimTower's PeekMessage
   // idle loop (and with it the simulation) does not.
   [[nodiscard]] bool elevator_tracking() const {
     return elevator_ && elevator_->window->scroll_tracking_active();
+  }
+  // The same for a press on Main's own scroll bars.
+  [[nodiscard]] bool main_scroll_tracking() const {
+    return main_scroll_bars_.tracking();
+  }
+  [[nodiscard]] bool scroll_tracking() const {
+    return elevator_tracking() || main_scroll_tracking();
   }
   // Idle passes run so far (held ones excluded).
   [[nodiscard]] std::uint64_t idle_passes() const { return idle_passes_; }
@@ -363,12 +375,36 @@ class Session : private OriginalIdlePassHost {
   // Position-only view restore (restore_original_derived_view_position):
   // clamp the origin without a rebuild. Used before New/Open.
   void restore_view(int x, int y) { set_viewport_origin(x, y); }
-  // Scrollbar path (scroll_original): clamp the requested origin and
-  // run 1058:05f8's synchronous 1080:0a1e(1) rebuild.
+  // Camera path (set_original_view): clamp the requested origin and run
+  // the synchronous 1080:0a1e(1) rebuild.
   void scroll_to(int x, int y);
-  // One line (codes 0/1) or page (codes 2/3) step through the exact
-  // original_main_scroll_request_position helper (1158:015b/01e7).
-  void scroll_by_code(bool horizontal, std::uint16_t scroll_code);
+  // One WM_HSCROLL / WM_VSCROLL to Main (code SB_LINEUP 0 .. SB_ENDSCROLL
+  // 8, position the thumb codes' LOWORD(lParam)) through the shared
+  // handle_original_main_scroll, the Win32 MAINWNDPROC path. The drawn
+  // scroll bars, the SDL-only stand-ins below and scripts all use it.
+  void main_scroll(OriginalMainScrollBar bar, std::uint16_t code,
+                   std::uint16_t position = 0U);
+  // SDL-only stand-ins for the scroll bars (MAINWNDPROC has no WM_KEYDOWN
+  // or WM_MOUSEWHEEL scrolling, so these are new input): an arrow key is a
+  // line, Page Up / Down a vertical page, each through main_scroll.
+  enum class ScrollKey : std::uint8_t {
+    left,
+    right,
+    up,
+    down,
+    page_up,
+    page_down,
+  };
+  void main_scroll_key(ScrollKey key);
+  // One line per wheel notch: positive vertical scrolls up, positive
+  // horizontal right (SDL's convention, already unflipped).
+  void main_wheel(int horizontal, int vertical);
+  // The Main scroll bars' ranges and positions (from the viewport), and
+  // USER's tracking of a press on them.
+  [[nodiscard]] MainScrollRanges main_scroll_ranges() const;
+  [[nodiscard]] const MainScrollBars& main_scroll_bars() const {
+    return main_scroll_bars_;
+  }
   // WM_SIZE path (main_window_proc). The first call stands in for window
   // creation (1128:08d6): it installs the initial view and only dirties the
   // backing. Every later call is a live restore/maximize: it clamps the
@@ -550,6 +586,8 @@ class Session : private OriginalIdlePassHost {
   // It also runs the audio pump, so it is not const.
   [[nodiscard]] std::uint32_t coarse_tick_now();
   void set_viewport_origin(int x, int y);
+  // Each scroll bar signal through main_scroll, in order.
+  void run_main_scroll_signals(const std::vector<MainScrollSignal>& signals);
   void reset_simulation_state();
   void reset_command_state();
   void install_document(OriginalTdtDocument document);
@@ -848,7 +886,7 @@ class Session : private OriginalIdlePassHost {
   std::unique_ptr<ElevatorControlHost> elevator_host_;
   // DestroyWindow requested by the procedure (done after it returns).
   bool elevator_destroy_pending_{};
-  // Whether the last run_idle_pass was held by elevator_tracking() (logs
+  // Whether the last run_idle_pass was held by scroll_tracking() (logs
   // the hold once per track).
   bool idle_held_{};
   // Oracle only: hash the control state once it has ever opened, so runs
@@ -874,6 +912,9 @@ class Session : private OriginalIdlePassHost {
   std::uint32_t last_auxiliary_tick_{};  // DS:31b0/31b2
 
   Viewport viewport_{};
+  // USER's tracking of a press on Main's scroll bars (presentation only,
+  // not in the digest: no baseline run presses them).
+  MainScrollBars main_scroll_bars_{};
   // Native mirror of the DS:3264 backing (g_original_main_backing).
   OriginalWorldRaster main_raster_{};
   bool main_backing_dirty_{true};

@@ -1,0 +1,34 @@
+# The original path to Elevator Control with no Map click: the Main
+# scroll bars bring shaft 0's pit into view (horizontal thumb dragged
+# from x 595 to 431, view x 615; nine down-arrow lines, view y 3627),
+# the Magnifier (Command cell at 182,228) is picked, and a click on the
+# pit below floor 1 opens the panel on that shaft.
+# args: --scenario busy --passes 60
+# expect-stderr: elevator control 0
+# reject-stderr: transport information
+pass 50
+down 603 616
+move 439 616
+up 439 616
+expect-view 615 3483
+click 1007 600
+click 1007 600
+click 1007 600
+click 1007 600
+click 1007 600
+click 1007 600
+click 1007 600
+click 1007 600
+click 1007 600
+expect-view 615 3627
+click-command 182 228
+expect-panel none
+click 440 443
+expect-panel elevator-control 0
+# Main is disabled while the panel is open: its scroll bars and the
+# scripted messages reach nothing.
+click 991 616
+expect-view 615 3627
+panel-at 148 413
+expect-panel none
+pass 60

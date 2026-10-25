@@ -1,8 +1,11 @@
 #include "sdl_input_script.hpp"
 
+#include "original_map.hpp"
 #include "original_world_input.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
@@ -203,10 +206,81 @@ std::vector<ScriptCommand> parse_input_script(
       }
     } else if (verb == "key") {
       command.op = ScriptOp::key;
-      if (words.size() != 2 || (words[1] != "f1" && words[1] != "F1")) {
-        throw fail("key takes f1");
+      static constexpr std::array<std::pair<const char*, Session::ScrollKey>,
+                                  6>
+          kScrollKeys{{{"left", Session::ScrollKey::left},
+                       {"right", Session::ScrollKey::right},
+                       {"up", Session::ScrollKey::up},
+                       {"down", Session::ScrollKey::down},
+                       {"pgup", Session::ScrollKey::page_up},
+                       {"pgdn", Session::ScrollKey::page_down}}};
+      const auto key = std::find_if(
+          kScrollKeys.begin(), kScrollKeys.end(), [&](const auto& entry) {
+            return words.size() == 2 && words[1] == entry.first;
+          });
+      if (key != kScrollKeys.end()) {
+        command.op = ScriptOp::scroll_key;
+        command.value = static_cast<std::int64_t>(key->second);
+      } else if (words.size() != 2 ||
+                 (words[1] != "f1" && words[1] != "F1")) {
+        throw fail("key takes f1, left, right, up, down, pgup or pgdn");
+      } else {
+        command.value = kOriginalVirtualKeyF1;
       }
-      command.value = kOriginalVirtualKeyF1;
+    } else if (verb == "wheel") {
+      command.op = ScriptOp::wheel;
+      if (words.size() != 3) throw fail("wheel takes DX DY");
+      command.x = static_cast<int>(parse_integer(words[1], where));
+      command.y = static_cast<int>(parse_integer(words[2], where));
+      if (std::abs(command.x) > 100 || std::abs(command.y) > 100) {
+        throw fail("wheel takes -100..100 notches");
+      }
+    } else if (verb == "scroll") {
+      command.op = ScriptOp::scroll;
+      if (words.size() < 3 || (words[1] != "h" && words[1] != "v")) {
+        throw fail("scroll takes h|v CODE [POS]");
+      }
+      // x: the bar (0 SB_HORZ, 1 SB_VERT), y: the code, value: POS.
+      command.x = words[1] == "h" ? 0 : 1;
+      static constexpr std::array<std::pair<const char*, std::uint16_t>, 9>
+          kCodes{{{"line-up", kOriginalScrollLineUp},
+                  {"line-down", kOriginalScrollLineDown},
+                  {"page-up", kOriginalScrollPageUp},
+                  {"page-down", kOriginalScrollPageDown},
+                  {"thumb-position", kOriginalScrollThumbPosition},
+                  {"thumb-track", kOriginalScrollThumbTrack},
+                  {"top", kOriginalScrollTop},
+                  {"bottom", kOriginalScrollBottom},
+                  {"end", kOriginalScrollEnd}}};
+      const auto code = std::find_if(
+          kCodes.begin(), kCodes.end(),
+          [&](const auto& entry) { return words[2] == entry.first; });
+      if (code == kCodes.end()) {
+        throw fail("unknown scroll code '" + words[2] + "'");
+      }
+      command.y = code->second;
+      const bool thumb = code->second == kOriginalScrollThumbPosition ||
+                         code->second == kOriginalScrollThumbTrack;
+      if (words.size() != (thumb ? 4U : 3U)) {
+        throw fail(thumb ? "scroll " + words[2] + " needs POS"
+                         : "scroll " + words[2] + " takes no POS");
+      }
+      if (thumb) {
+        command.value = parse_integer(words[3], where);
+        if (command.value < 0 || command.value > 0xFFFF) {
+          throw fail("scroll POS must be 0..65535");
+        }
+      }
+    } else if (verb == "expect-view") {
+      command.op = ScriptOp::expect_view;
+      point(false);
+    } else if (verb == "expect-map-view") {
+      command.op = ScriptOp::expect_map_view;
+      if (words.size() != 5) throw fail("expect-map-view takes L T R B");
+      for (std::size_t index = 1; index < 5; ++index) {
+        command.numbers.push_back(
+            static_cast<int>(parse_integer(words[index], where)));
+      }
     } else if (verb == "pick-file") {
       command.op = ScriptOp::pick_file;
       command.text = rest_of_line(line, verb);
@@ -838,6 +912,38 @@ void ScriptPlayer::execute(const ScriptCommand& command, bool in_modal) {
     case ScriptOp::key:
       (void)session_.accelerator(static_cast<std::uint16_t>(command.value));
       break;
+    case ScriptOp::scroll_key:
+    case ScriptOp::wheel:
+      // The window turns the stand-ins off while Elevator Control is open
+      // (its dialog manager takes the keys, the wheel reaches nothing).
+      if (session_.elevator_control()) {
+        throw ScriptFailure(2, command.where +
+                                   ": the Main scroll stand-ins are off "
+                                   "while Elevator Control is open");
+      }
+      if (command.op == ScriptOp::scroll_key) {
+        session_.main_scroll_key(
+            static_cast<Session::ScrollKey>(command.value));
+      } else {
+        session_.main_wheel(command.x, command.y);
+      }
+      break;
+    case ScriptOp::scroll:
+      if (!session_.panel_enabled(Panel::main)) {
+        throw ScriptFailure(2, command.where +
+                                   ": scroll: Main is disabled while "
+                                   "Elevator Control is open");
+      }
+      session_.main_scroll(command.x == 0
+                               ? OriginalMainScrollBar::horizontal
+                               : OriginalMainScrollBar::vertical,
+                           static_cast<std::uint16_t>(command.y),
+                           static_cast<std::uint16_t>(command.value));
+      break;
+    case ScriptOp::expect_view:
+    case ScriptOp::expect_map_view:
+      check_expectation(command);
+      break;
     case ScriptOp::pick_file:
       if (command.text.empty()) {
         session_.queue_picked_file(std::nullopt);
@@ -1189,6 +1295,38 @@ void ScriptPlayer::check_expectation(const ScriptCommand& command) const {
       actual = *rate;
       what = "rent rate";
       break;
+    }
+    case ScriptOp::expect_view: {
+      const auto& view = session_.viewport();
+      if (view.x != command.x || view.y != command.y) {
+        throw ScriptFailure(3, command.where + ": expected view " +
+                                   std::to_string(command.x) + " " +
+                                   std::to_string(command.y) + ", got " +
+                                   std::to_string(view.x) + " " +
+                                   std::to_string(view.y));
+      }
+      return;
+    }
+    case ScriptOp::expect_map_view: {
+      // What compose_window draws (1080:038e of the live view).
+      const auto& view = session_.viewport();
+      const auto rect =
+          original_map_view_rect(view.x, view.y, view.width, view.height);
+      const std::vector<int> actual_rect{rect.left, rect.top, rect.right,
+                                         rect.bottom};
+      if (actual_rect != command.numbers) {
+        throw ScriptFailure(
+            3, command.where + ": expected map view " +
+                   std::to_string(command.numbers[0]) + " " +
+                   std::to_string(command.numbers[1]) + " " +
+                   std::to_string(command.numbers[2]) + " " +
+                   std::to_string(command.numbers[3]) + ", got " +
+                   std::to_string(rect.left) + " " +
+                   std::to_string(rect.top) + " " +
+                   std::to_string(rect.right) + " " +
+                   std::to_string(rect.bottom));
+      }
+      return;
     }
     case ScriptOp::expect_title:
       if (session_.window_title() != command.text) {

@@ -356,37 +356,68 @@ OriginalRect dialog_combo_list_rect(const DialogControl& combo,
           field.bottom - 1 + std::max(line_height + 2, std::min(wanted, room))};
 }
 
+namespace {
+
+// A bar along its axis: start/end along it, the cross-axis edges.
+struct ScrollAxisSpan {
+  int start{};
+  int end{};
+  int cross_start{};
+  int cross_end{};
+};
+
+ScrollAxisSpan scroll_span(const OriginalRect& bar, DialogScrollAxis axis) {
+  return axis == DialogScrollAxis::vertical
+             ? ScrollAxisSpan{bar.top, bar.bottom, bar.left, bar.right}
+             : ScrollAxisSpan{bar.left, bar.right, bar.top, bar.bottom};
+}
+
+// The rectangle [from, to) along the axis, across the whole bar.
+OriginalRect scroll_axis_rect(const ScrollAxisSpan& span, int from, int to,
+                              DialogScrollAxis axis) {
+  return axis == DialogScrollAxis::vertical
+             ? OriginalRect{span.cross_start, from, span.cross_end, to}
+             : OriginalRect{from, span.cross_start, to, span.cross_end};
+}
+
+}  // namespace
+
 DialogScrollParts dialog_scroll_parts(const OriginalRect& bar, int min,
-                                      int max, int position) {
+                                      int max, int position,
+                                      DialogScrollAxis axis) {
   DialogScrollParts parts{};
-  const int width = bar.right - bar.left;
-  const int arrow = std::min(width, (bar.bottom - bar.top) / 2);
-  parts.up = {bar.left, bar.top, bar.right, bar.top + arrow};
-  parts.down = {bar.left, bar.bottom - arrow, bar.right, bar.bottom};
-  parts.track_top = parts.up.bottom;
-  parts.track_bottom = parts.down.top;
-  const int room = parts.track_bottom - parts.track_top - width;
+  const auto span = scroll_span(bar, axis);
+  const int thickness = span.cross_end - span.cross_start;
+  const int arrow = std::min(thickness, (span.end - span.start) / 2);
+  parts.up = scroll_axis_rect(span, span.start, span.start + arrow, axis);
+  parts.down = scroll_axis_rect(span, span.end - arrow, span.end, axis);
+  parts.track_start = span.start + arrow;
+  parts.track_end = span.end - arrow;
+  const int room = parts.track_end - parts.track_start - thickness;
   if (max > min && room >= 0) {
     const int clamped = std::clamp(position, min, max);
-    const int top = parts.track_top +
-                    static_cast<int>(static_cast<long long>(clamped - min) *
-                                     room / (max - min));
-    parts.thumb = {bar.left, top, bar.right, top + width};
+    const int start = parts.track_start +
+                      static_cast<int>(static_cast<long long>(clamped - min) *
+                                       room / (max - min));
+    parts.thumb = scroll_axis_rect(span, start, start + thickness, axis);
   }
   return parts;
 }
 
-namespace {
-
-int scroll_position_at(const DialogScrollParts& parts, int width, int min,
-                       int max, int thumb_top) {
-  const int room = parts.track_bottom - parts.track_top - width;
+int dialog_scroll_position_at(const OriginalRect& bar, int min, int max,
+                              int thumb_start, DialogScrollAxis axis) {
+  const auto parts = dialog_scroll_parts(bar, min, max, min, axis);
+  const auto span = scroll_span(bar, axis);
+  const int thickness = span.cross_end - span.cross_start;
+  const int room = parts.track_end - parts.track_start - thickness;
   if (room <= 0 || max <= min) return min;
-  const int offset = std::clamp(thumb_top - parts.track_top, 0, room);
+  const int offset = std::clamp(thumb_start - parts.track_start, 0, room);
   return min + static_cast<int>(
                    (static_cast<long long>(offset) * (max - min) + room / 2) /
                    room);
 }
+
+namespace {
 
 DialogSignal notify(std::uint16_t id, std::uint16_t code) {
   return DialogSignal{DialogSignal::Kind::command, id, code};
@@ -1059,9 +1090,8 @@ DialogStep DialogWindow::pointer(const DialogPointer& raw) {
             for_list ? std::max(0, static_cast<int>(bar->items.size()) -
                                        list_rows(*bar))
                      : bar->scroll_max;
-        const auto parts = dialog_scroll_parts(area, min, max, min);
-        const int position = scroll_position_at(
-            parts, area.right - area.left, min, max, y - scroll_drag_->grab);
+        const int position = dialog_scroll_position_at(
+            area, min, max, y - scroll_drag_->grab);
         if (position == scroll_drag_->position) break;
         scroll_drag_->position = position;
         step.redraw = true;

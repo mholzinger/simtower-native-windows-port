@@ -1,0 +1,22 @@
+# Reference for main_scroll_bars_digest.txt: the same scroll requests
+# as scripted messages. Each "move" leaves the pointer where the bar
+# script's last press left it (a move over a bar reaches no window
+# procedure; the sampled pointer is in the digest).
+# args: --scenario busy --passes 40
+pass 5
+scroll h line-down
+scroll h end
+scroll v page-up
+scroll v end
+move 1007 300
+pass 10
+scroll h thumb-track 1406
+scroll h thumb-track 1712
+scroll h thumb-position 1712
+scroll h end
+move 803 616
+pass 20
+scroll h line-up
+scroll h end
+move 216 616
+pass 40

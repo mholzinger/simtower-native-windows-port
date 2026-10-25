@@ -33,6 +33,28 @@
 //                          menu or Main is disabled (Elevator Control
 //                          open); a grayed item is logged and not sent
 //   key f1                 the F1 accelerator (TranslateAccelerator, 40021)
+//   key left|right|up|down|pgup|pgdn
+//                          the SDL-only Main scroll stand-ins (not original
+//                          input): a line, or a vertical page, through the
+//                          scroll bar path; exit 2 while Elevator Control
+//                          is open (use panel-key)
+//   wheel DX DY            the SDL-only wheel stand-in: DY notches up
+//                          (negative: down), DX notches right, one line
+//                          each; exit 2 while Elevator Control is open
+//   scroll h|v CODE [POS]  one WM_HSCROLL / WM_VSCROLL to Main, as its
+//                          scroll bar sends it: CODE line-up, line-down,
+//                          page-up, page-down, thumb-track POS,
+//                          thumb-position POS (POS 0..65535), top, bottom
+//                          or end; exit 2 while Main is disabled. The
+//                          bars themselves take down / move / up / click
+//                          at their window points (USER's tracking: an
+//                          arrow or trough press sends its code, a thumb
+//                          drag SB_THUMBTRACK per move, the release
+//                          SB_THUMBPOSITION and SB_ENDSCROLL)
+//   expect-view X Y        Main's view origin (the scroll bar positions)
+//   expect-map-view L T R B
+//                          the Map's view rectangle (Map client
+//                          coordinates below its frame row, as drawn)
 //   pick-file PATH|cancel  the result of an Open / Save As sheet (PATH is
 //                          the rest of the line). Right after the command
 //                          that opens the sheet it answers that sheet;
@@ -233,6 +255,11 @@ enum class ScriptOp : std::uint8_t {
   digest,
   menu,
   key,
+  scroll_key,
+  wheel,
+  scroll,
+  expect_view,
+  expect_map_view,
   pick_file,
   menu_show,
   menu_hide,

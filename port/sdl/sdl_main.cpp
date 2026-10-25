@@ -61,7 +61,10 @@
 //
 // Window keys: a lone Alt or F10 enters keyboard menu mode (arrows, Enter,
 // Esc, mnemonics), Alt+letter opens that title's drop-down, and F1 is the
-// TOWER_MENU accelerator (Help Contents).
+// TOWER_MENU accelerator (Help Contents). Main has its WS_HSCROLL /
+// WS_VSCROLL bars (sdl_main_scrollbars.hpp); the arrow keys, Page Up /
+// Down and the wheel are SDL-only stand-ins that scroll through the same
+// path (TEMP: keep or drop is the owner's decision).
 //
 // Headless mode (no window) is selected by any of --headless-frame,
 // --headless-window, --state-digest, --digest-every, --event,
@@ -1474,36 +1477,31 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
         expose = true;
         return run_menu_loop(window, session, 0, true);
       }
-      // SDL-only stand-ins for the Main scrollbars, which this frontend
-      // does not draw yet. MAINWNDPROC has no WM_KEYDOWN or WM_MOUSEWHEEL
-      // scrolling: only WM_HSCROLL/WM_VSCROLL reach scroll_original
-      // (main_window_proc). The bindings are new input, but they send the Win16
-      // scrollbar codes (0/1 line up/down, 2/3 page up/down) through the same
-      // original_main_scroll_request_position path.
-      switch (event.key.key) {
-        case SDLK_LEFT: session.scroll_by_code(true, 0U); break;
-        case SDLK_RIGHT: session.scroll_by_code(true, 1U); break;
-        case SDLK_UP: session.scroll_by_code(false, 0U); break;
-        case SDLK_DOWN: session.scroll_by_code(false, 1U); break;
-        case SDLK_PAGEUP: session.scroll_by_code(false, 2U); break;
-        case SDLK_PAGEDOWN: session.scroll_by_code(false, 3U); break;
-        default: break;
+      // SDL-only stand-ins for the Main scroll bars, kept as a convenience
+      // (TEMP, owner decision pending: keep or drop). MAINWNDPROC has no
+      // WM_KEYDOWN or WM_MOUSEWHEEL scrolling, so the bindings are new
+      // input, but they send the scroll bars' own WM_HSCROLL / WM_VSCROLL
+      // codes through the same Session::main_scroll path as the bars.
+      {
+        using Key = simtower::sdl::Session::ScrollKey;
+        switch (event.key.key) {
+          case SDLK_LEFT: session.main_scroll_key(Key::left); break;
+          case SDLK_RIGHT: session.main_scroll_key(Key::right); break;
+          case SDLK_UP: session.main_scroll_key(Key::up); break;
+          case SDLK_DOWN: session.main_scroll_key(Key::down); break;
+          case SDLK_PAGEUP: session.main_scroll_key(Key::page_up); break;
+          case SDLK_PAGEDOWN: session.main_scroll_key(Key::page_down); break;
+          default: break;
+        }
       }
       expose = true;
       break;
     case SDL_EVENT_MOUSE_WHEEL: {
-      // SDL-only, as above: one line-scroll request per wheel notch.
+      // SDL-only, as above: one line per wheel notch.
       const int flip =
           event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
-      const int vertical = event.wheel.integer_y * flip;
-      const int horizontal = event.wheel.integer_x * flip;
-      for (int step = 0; step < (vertical < 0 ? -vertical : vertical); ++step) {
-        session.scroll_by_code(false, vertical > 0 ? 0U : 1U);
-      }
-      for (int step = 0; step < (horizontal < 0 ? -horizontal : horizontal);
-           ++step) {
-        session.scroll_by_code(true, horizontal > 0 ? 1U : 0U);
-      }
+      session.main_wheel(event.wheel.integer_x * flip,
+                         event.wheel.integer_y * flip);
       expose = true;
       break;
     }

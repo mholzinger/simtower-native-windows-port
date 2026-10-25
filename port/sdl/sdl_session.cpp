@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -906,26 +907,109 @@ void Session::resize(int width, int height) {
 
 void Session::scroll_to(int x, int y) {
   set_viewport_origin(x, y);
-  // 1058:05f8: synchronous 1080:0a1e(1), which advances the sky and the
-  // visible facility people (both consume the document RNG). Like
-  // scroll_original this runs for every accepted request,
-  // including one that is clamped back to the current origin at a world edge.
+  // set_original_view's camera refresh: a synchronous 1080:0a1e(1), which
+  // advances the sky and the visible facility people (both consume the
+  // document RNG), then Map, Command and the Map focus, which the panels
+  // recompose from the live view.
   rebuild_main(OriginalMainSurfacePass::rebuild_with_sky, true);
   present_requested_ = true;
 }
 
-void Session::scroll_by_code(bool horizontal, std::uint16_t scroll_code) {
-  const int current = horizontal ? viewport_.x : viewport_.y;
-  const int extent = horizontal ? viewport_.width : viewport_.height;
-  const int world = horizontal ? kOriginalWorldWidth : kOriginalWorldHeight;
-  const auto position = original_main_scroll_request_position(
-      scroll_code, current, 0U, extent, world - extent);
-  if (!position) return;
-  if (horizontal) {
-    scroll_to(*position, viewport_.y);
-  } else {
-    scroll_to(viewport_.x, *position);
+// MAINWNDPROC's WM_HSCROLL / WM_VSCROLL effects on the session, for the
+// shared handle_original_main_scroll (Win32MainScrollHost on Win32).
+class Session::MainScrollHost final : public OriginalMainScrollHost {
+ public:
+  explicit MainScrollHost(Session& session) : s_(session) {}
+
+  bool modal_input_locked() override { return s_.modal_depth_ != 0; }
+  void invalidate_main() override {
+    s_.main_backing_dirty_ = true;
+    s_.present_requested_ = true;
   }
+  std::optional<int> scroll_position(OriginalMainScrollBar bar) override {
+    return bar == OriginalMainScrollBar::horizontal ? s_.viewport_.x
+                                                    : s_.viewport_.y;
+  }
+  int client_extent(OriginalMainScrollBar bar) override {
+    return bar == OriginalMainScrollBar::horizontal ? s_.viewport_.width
+                                                    : s_.viewport_.height;
+  }
+  void set_scroll_position(OriginalMainScrollBar bar,
+                           int position) override {
+    // SetScrollPos's clamp to the 1080:00d7 range; the bar redraws with
+    // the next present.
+    if (bar == OriginalMainScrollBar::horizontal) {
+      s_.set_viewport_origin(position, s_.viewport_.y);
+    } else {
+      s_.set_viewport_origin(s_.viewport_.x, position);
+    }
+    s_.present_requested_ = true;
+  }
+  void rebuild_main_with_sky() override {
+    // 1058:05f8: synchronous 1080:0a1e(1), which advances the sky and the
+    // visible facility people (both consume the document RNG).
+    s_.rebuild_main(OriginalMainSurfacePass::rebuild_with_sky, true);
+  }
+  void adjust_map_focus() override {
+    // 1080:055d: compose_window draws the Map focus from the live view.
+    s_.present_requested_ = true;
+  }
+
+ private:
+  Session& s_;
+};
+
+void Session::main_scroll(OriginalMainScrollBar bar, std::uint16_t code,
+                          std::uint16_t position) {
+  MainScrollHost host(*this);
+  handle_original_main_scroll(host, bar, code, position);
+}
+
+void Session::main_scroll_key(ScrollKey key) {
+  using Bar = OriginalMainScrollBar;
+  switch (key) {
+    case ScrollKey::left:
+      main_scroll(Bar::horizontal, kOriginalScrollLineUp);
+      break;
+    case ScrollKey::right:
+      main_scroll(Bar::horizontal, kOriginalScrollLineDown);
+      break;
+    case ScrollKey::up:
+      main_scroll(Bar::vertical, kOriginalScrollLineUp);
+      break;
+    case ScrollKey::down:
+      main_scroll(Bar::vertical, kOriginalScrollLineDown);
+      break;
+    case ScrollKey::page_up:
+      main_scroll(Bar::vertical, kOriginalScrollPageUp);
+      break;
+    case ScrollKey::page_down:
+      main_scroll(Bar::vertical, kOriginalScrollPageDown);
+      break;
+  }
+}
+
+void Session::main_wheel(int horizontal, int vertical) {
+  using Bar = OriginalMainScrollBar;
+  for (int notch = 0; notch < std::abs(vertical); ++notch) {
+    main_scroll(Bar::vertical, vertical > 0 ? kOriginalScrollLineUp
+                                            : kOriginalScrollLineDown);
+  }
+  for (int notch = 0; notch < std::abs(horizontal); ++notch) {
+    main_scroll(Bar::horizontal, horizontal > 0 ? kOriginalScrollLineDown
+                                                : kOriginalScrollLineUp);
+  }
+}
+
+MainScrollRanges Session::main_scroll_ranges() const {
+  // 1158:05ef / 1080:00d7: 0 .. world - client, the position the view.
+  const auto range = [](int position, int client, int world) {
+    const auto state =
+        original_main_scrollbar_resize_state(position, client, world);
+    return MainScrollRange{state.minimum, state.maximum, position};
+  };
+  return {range(viewport_.x, viewport_.width, kOriginalWorldWidth),
+          range(viewport_.y, viewport_.height, kOriginalWorldHeight)};
 }
 
 void Session::reset_simulation_state() {
@@ -1958,6 +2042,9 @@ std::optional<int> Session::run_dialog_modal(DialogWindow& dialog,
           session.elevator_->window->cancel_scroll_tracking()) {
         session.window_repaint_ = true;
       }
+      if (session.main_scroll_bars_.cancel()) {
+        session.present_requested_ = true;
+      }
       // A caption press on a palette or on Elevator Control ends with it:
       // the modal takes the release, so the next press there must not be
       // swallowed as that press's end.
@@ -2138,7 +2225,7 @@ bool Session::run_idle_pass() {
   // palettes), and the 1258:0285-02d9 epilogue is the Elevator Control
   // refresh and the 11c8:0135(0) audio finish. The shared pass runs
   // 1258:023a through 1090:03ab(1), calling back into the hooks below.
-  if (elevator_tracking()) {
+  if (scroll_tracking()) {
     // USER's scroll bar tracking loop owns the thread (Win32: no
     // PeekMessage idle pass until the release).
     if (!idle_held_) log_line("idle passes held: scroll bar tracking");
@@ -2528,6 +2615,19 @@ void Session::pointer_event(const InputEvent& event) {
     if (event.kind == InputKind::up) nonclient_press_ = false;
     return;
   }
+  // A press on Main's scroll bars: DefWindowProc's WM_NCLBUTTONDOWN runs
+  // USER's tracking loop, which takes every mouse message until the
+  // release and sends WM_HSCROLL / WM_VSCROLL to MAINWNDPROC.
+  if (main_scroll_bars_.tracking()) {
+    if (event.kind == InputKind::move) {
+      run_main_scroll_signals(main_scroll_bars_.move(
+          layout_, main_scroll_ranges(), event.x, event.y));
+    } else if (event.kind == InputKind::up) {
+      run_main_scroll_signals(main_scroll_bars_.release());
+    }
+    present_requested_ = true;
+    return;
+  }
 
   // SetCapture routes every mouse message to its owner, without
   // WM_NCHITTEST.
@@ -2538,18 +2638,36 @@ void Session::pointer_event(const InputEvent& event) {
     panel = Panel::map;
   } else {
     // Topmost first: the drawing order of compose_window, reversed. Main
-    // takes only its client; a palette takes its whole outer rectangle.
+    // takes its client, and a press its scroll bars too; a palette takes
+    // its whole outer rectangle.
+    const auto bars = main_scroll_bar_rects(layout_);
+    const bool on_main_bars = bars.horizontal.contains(event.x, event.y) ||
+                              bars.vertical.contains(event.x, event.y) ||
+                              bars.corner.contains(event.x, event.y);
     for (auto it = kPanelZOrder.rbegin(); it != kPanelZOrder.rend(); ++it) {
       const auto& area = *it == Panel::main      ? layout_.main_client
                          : *it == Panel::map     ? layout_.map_outer
                          : *it == Panel::info    ? layout_.info_outer
                                                  : layout_.command_outer;
-      if (panel_visible(*it) && area.contains(event.x, event.y)) {
+      if (panel_visible(*it) &&
+          (area.contains(event.x, event.y) ||
+           (*it == Panel::main && down && on_main_bars))) {
         panel = *it;
         break;
       }
     }
     if (panel == Panel::none) return;
+    if (panel == Panel::main &&
+        !layout_.main_client.contains(event.x, event.y)) {
+      // The press activates Main and starts the tracking.
+      active_panel_ = Panel::main;
+      if (auto signals = main_scroll_bars_.press(
+              layout_, main_scroll_ranges(), event.x, event.y)) {
+        run_main_scroll_signals(*signals);
+      }
+      present_requested_ = true;
+      return;
+    }
     if (panel != Panel::main) {
       const auto hit = palette_hit(panel, event.x, event.y);
       if (hit != PaletteHit::client) {
@@ -2565,6 +2683,13 @@ void Session::pointer_event(const InputEvent& event) {
   }
   if (down) active_panel_ = panel;
   route_pointer(panel, event, keys);
+}
+
+void Session::run_main_scroll_signals(
+    const std::vector<MainScrollSignal>& signals) {
+  for (const auto& signal : signals) {
+    main_scroll(signal.bar, signal.code, signal.position);
+  }
 }
 
 Session::PaletteHit Session::palette_hit(Panel panel, int x, int y) const {
@@ -3111,7 +3236,7 @@ std::uint32_t Session::milliseconds_until_due() const {
   };
   std::uint32_t wait = 100U;
   // Held passes are not due: wait for input instead of spinning.
-  if (elevator_tracking()) return wait;
+  if (scroll_tracking()) return wait;
   if (document_ && world_input_.build_mode_enabled) {
     wait = std::min(
         wait, flags_.fast_mode_enabled

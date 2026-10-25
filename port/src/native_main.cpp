@@ -21,6 +21,7 @@
 #include "original_information_paint.hpp"
 #include "original_information_win32.hpp"
 #include "original_main_command.hpp"
+#include "original_main_scroll.hpp"
 #include "original_map.hpp"
 #include "original_palette_frame_win32.hpp"
 #include "original_people.hpp"
@@ -5807,45 +5808,61 @@ simtower::OriginalMainWindowGeometry current_original_main_window_geometry() {
       });
 }
 
-void scroll_original(HWND window, int bar, WPARAM wparam, int world_extent) {
-  SCROLLINFO info{sizeof(info), SIF_ALL};
-  if (!GetScrollInfo(window, bar, &info)) {
-    return;
+// MAINWNDPROC's WM_HSCROLL / WM_VSCROLL effects for the shared
+// handle_original_main_scroll (original_main_scroll.hpp).
+class Win32MainScrollHost final : public simtower::OriginalMainScrollHost {
+ public:
+  explicit Win32MainScrollHost(HWND window) : window_(window) {}
+
+  bool modal_input_locked() override {
+    return original_main_modal_input_locked();
   }
-  RECT client{};
-  GetClientRect(window, &client);
-  const int client_extent =
-      bar == SB_HORZ ? client.right - client.left : client.bottom - client.top;
-  // Win16 carries the thumb position in LOWORD(lParam); Win32 carries the
-  // equivalent 16-bit field in HIWORD(wParam). Reading nTrackPos here loses
-  // the exact SB_THUMBPOSITION value delivered on button release.
-  const auto position = simtower::original_main_scroll_request_position(
-      LOWORD(wparam), info.nPos, static_cast<std::uint16_t>(HIWORD(wparam)),
-      client_extent, world_extent - client_extent);
-  if (!position) {
-    return;
+  void invalidate_main() override {
+    InvalidateRect(window_, nullptr, FALSE);
   }
-  info.fMask = SIF_POS;
-  info.nPos = *position;
-  SetScrollInfo(window, bar, &info, TRUE);
+  std::optional<int> scroll_position(
+      simtower::OriginalMainScrollBar bar) override {
+    SCROLLINFO info{sizeof(info), SIF_ALL};
+    if (!GetScrollInfo(window_, win32_bar(bar), &info)) {
+      return std::nullopt;
+    }
+    return info.nPos;
+  }
+  int client_extent(simtower::OriginalMainScrollBar bar) override {
+    RECT client{};
+    GetClientRect(window_, &client);
+    return bar == simtower::OriginalMainScrollBar::horizontal
+               ? client.right - client.left
+               : client.bottom - client.top;
+  }
+  void set_scroll_position(simtower::OriginalMainScrollBar bar,
+                           int position) override {
+    SCROLLINFO info{sizeof(info), SIF_POS};
+    info.nPos = position;
+    SetScrollInfo(window_, win32_bar(bar), &info, TRUE);
+  }
   // 1058:05f8 immediately performs Main's complete 1080:0a1e(1) rebuild and
   // then only 1080:055d's direct Map-focus XOR exchange. A full MAPWNDPROC
-  // repaint here would add backing, frame, and audio-pump work absent from the
-  // recovered scrollbar path.
-  for (const auto step : simtower::original_scrollbar_refresh_order()) {
-    switch (step) {
-      case simtower::OriginalScrollbarRefreshStep::main_rebuild_with_sky:
-        request_original_main_surface_pass(
-            simtower::OriginalMainSurfacePass::rebuild_with_sky, true);
-        break;
-      case simtower::OriginalScrollbarRefreshStep::map_focus_adjustment:
-        if (window == g_main_window) {
-          adjust_original_derived_map_focus_synchronously();
-        }
-        break;
+  // repaint here would add backing, frame, and audio-pump work absent from
+  // the recovered scrollbar path.
+  void rebuild_main_with_sky() override {
+    request_original_main_surface_pass(
+        simtower::OriginalMainSurfacePass::rebuild_with_sky, true);
+  }
+  void adjust_map_focus() override {
+    if (window_ == g_main_window) {
+      adjust_original_derived_map_focus_synchronously();
     }
   }
-}
+
+ private:
+  static int win32_bar(simtower::OriginalMainScrollBar bar) {
+    return bar == simtower::OriginalMainScrollBar::horizontal ? SB_HORZ
+                                                              : SB_VERT;
+  }
+
+  HWND window_{};
+};
 
 void select_original_map_mode(std::uint16_t mode) {
   simtower::select_original_map_mode(original_world_input_context(),
@@ -6959,19 +6976,19 @@ LRESULT CALLBACK main_window_proc(HWND window, UINT message,
       return 0;
     }
     case WM_HSCROLL:
-      if (original_main_modal_input_locked()) return 0;
-      // Both original scroll branches invalidate before decoding the request,
-      // so even an unsupported code retains this exposure side effect.
-      InvalidateRect(window, nullptr, FALSE);
-      scroll_original(window, SB_HORZ, wparam,
-                      simtower::kOriginalWorldWidth);
+    case WM_VSCROLL: {
+      // 1158:015b / 01e7 through the shared handler. Win16 carries the
+      // thumb position in LOWORD(lParam); Win32 carries the equivalent
+      // 16-bit field in HIWORD(wParam). Reading nTrackPos instead would
+      // lose the exact SB_THUMBPOSITION value delivered on button release.
+      Win32MainScrollHost host(window);
+      simtower::handle_original_main_scroll(
+          host,
+          message == WM_HSCROLL ? simtower::OriginalMainScrollBar::horizontal
+                                : simtower::OriginalMainScrollBar::vertical,
+          LOWORD(wparam), static_cast<std::uint16_t>(HIWORD(wparam)));
       return 0;
-    case WM_VSCROLL:
-      if (original_main_modal_input_locked()) return 0;
-      InvalidateRect(window, nullptr, FALSE);
-      scroll_original(window, SB_VERT, wparam,
-                      simtower::kOriginalWorldHeight);
-      return 0;
+    }
     case WM_SYSKEYDOWN:
     case WM_SYSKEYUP:
       // 1158:0492 preserves USER's default system-key handling normally, but
