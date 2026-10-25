@@ -556,7 +556,9 @@ int main(int argc, char** argv) {
        "busy",
        3000,
        {{100, true}},
-       0x415b7624078b163eULL,
+       // Re-pinned for development PR #2 (DS:779e balance-changed latch):
+       // 67 added sound:10013 cash-sound calls, nothing else changed.
+       0x3283928cc2fd2d4eULL,
        {"dialog:bomb_offer:", "dialog:bomb_followup:", "dialog:bomb_event:",
         "dialog:rating:", "focus:", "sound:", "rating_before:"}},
       // Fire offer, declined fire crew, its follow-up and the 2000 finish.
@@ -564,7 +566,9 @@ int main(int argc, char** argv) {
        "busy",
        1200,
        {{300, false}},
-       0x86eda93db271076fULL,
+       // Re-pinned for development PR #2 (DS:779e balance-changed latch):
+       // 68 added sound:10013 cash-sound calls, nothing else changed.
+       0x98b0df3d5f47ce13ULL,
        {"dialog:fire_offer:", "dialog:fire_crew_offer:",
         "dialog:fire_crew_followup:", "dialog:fire_event:", "fire_menu:"}},
   };
