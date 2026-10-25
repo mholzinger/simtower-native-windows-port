@@ -23,6 +23,9 @@
 #   "# same-tower-as: FILE"    only the final digest's tower and process
 #                              fields equal FILE's (host and request logs
 #                              may differ, e.g. a logged open and close)
+#   "# make-file: FILE"        (repeatable) an empty FILE, relative to WORK,
+#                              created before the run (e.g. a stand-in help
+#                              page); its directories are created too
 
 foreach(variable BIN PACK SCRIPT WORK)
   if(NOT DEFINED ${variable})
@@ -43,6 +46,7 @@ set(expect_exit 0)
 set(expect_patterns)
 set(reject_patterns)
 set(held_files)
+set(made_files)
 set(reference_script)
 set(compare_tower_only FALSE)
 foreach(line IN LISTS script_lines)
@@ -57,6 +61,8 @@ foreach(line IN LISTS script_lines)
     list(APPEND reject_patterns "${CMAKE_MATCH_1}")
   elseif(line MATCHES "^# held: (.+)$")
     list(APPEND held_files "${CMAKE_MATCH_1}")
+  elseif(line MATCHES "^# make-file: (.+)$")
+    list(APPEND made_files "${CMAKE_MATCH_1}")
   elseif(line MATCHES "^# same-digest-as: (.+)$")
     get_filename_component(script_directory "${SCRIPT}" DIRECTORY)
     set(reference_script "${script_directory}/${CMAKE_MATCH_1}")
@@ -73,6 +79,9 @@ endif()
 file(MAKE_DIRECTORY "${WORK}")
 foreach(held IN LISTS held_files)
   file(REMOVE "${WORK}/${held}")
+endforeach()
+foreach(made IN LISTS made_files)
+  file(WRITE "${WORK}/${made}" "")
 endforeach()
 
 # Sets <prefix>_result, <prefix>_digest and <prefix>_errors.

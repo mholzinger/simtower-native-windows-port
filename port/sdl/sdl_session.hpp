@@ -14,6 +14,7 @@
 
 #include "sdl_dialog.hpp"
 #include "sdl_digest.hpp"
+#include "sdl_help.hpp"
 #include "sdl_layout.hpp"
 #include "sdl_main_scrollbars.hpp"
 
@@ -340,6 +341,16 @@ class Session : private OriginalIdlePassHost {
   }
   [[nodiscard]] std::size_t queued_picked_files() const {
     return picked_files_.size();
+  }
+  // Help > Contents and F1 open the converted help (sdl_help.hpp) through
+  // the viewer; with none (headless) the request and its URL are only
+  // logged. The directory is --help-dir or "help" next to the executable.
+  void set_help_viewer(HelpViewer* viewer) { help_viewer_ = viewer; }
+  void set_help_directory(std::filesystem::path directory) {
+    help_directory_ = std::move(directory);
+  }
+  [[nodiscard]] const std::optional<HelpRequest>& last_help() const {
+    return last_help_;
   }
   // File > Exit destroyed Main (original_main_shutdown_plan).
   [[nodiscard]] bool quit_requested() const { return quit_requested_; }
@@ -812,6 +823,8 @@ class Session : private OriginalIdlePassHost {
   void log_request(RequestKind kind,
                    std::initializer_list<std::int64_t> fields);
   void tally(const std::string& key) { ++request_tally_[key]; }
+  // Resolves, logs and (with a viewer) opens a WinHelp command's page.
+  void open_help(std::uint16_t command);
 
   // The pack bytes must outlive resources_: find() returns spans into them.
   std::vector<std::byte> pack_;
@@ -859,6 +872,9 @@ class Session : private OriginalIdlePassHost {
   bool startup_hidden_{};
   bool quit_requested_{};
   FilePicker* file_picker_{};
+  HelpViewer* help_viewer_{};
+  std::filesystem::path help_directory_{};
+  std::optional<HelpRequest> last_help_{};
   std::deque<std::optional<std::filesystem::path>> picked_files_{};
   InputSource* input_source_{};
   bool left_button_down_{};

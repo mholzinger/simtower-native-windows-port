@@ -5,6 +5,22 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# The original help file. The Win32 host embeds it for WinHelp; the SDL
+# frontend's build converts it to HTML (tools/convert_winhelp.py) when it
+# and Python 3 are available. Both outputs stay in the build tree.
+set(simtower_extracted ${CMAKE_CURRENT_SOURCE_DIR}/../original/extracted)
+set(SIMTOWER_HELP_FILE ${simtower_extracted}/MAXIS/SIMTOWER/SIMTOWER.HLP
+    CACHE FILEPATH "The original SIMTOWER.HLP")
+find_package(Python3 COMPONENTS Interpreter)
+# SIMTOWER_ASSETS=OFF (the CI asset gate) builds as if the file were absent.
+if(EXISTS "${SIMTOWER_HELP_FILE}" AND NOT SIMTOWER_ASSETS STREQUAL "OFF")
+  set(SIMTOWER_HAVE_HELP_FILE ON)
+  set(simtower_help_input ${SIMTOWER_HELP_FILE})
+else()
+  set(SIMTOWER_HAVE_HELP_FILE OFF)
+  set(simtower_help_input "")
+endif()
+
 # Portable core: builds on every platform. The Win32 host modules
 # (*_win32, including the waveOut audio device) are added below on Windows
 # only.
@@ -82,8 +98,6 @@ if(WIN32)
   set(SIMTOWER_RESOURCE_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/original_resources.res.o)
   set(SIMTOWER_RESOURCE_PACK
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack)
-  set(SIMTOWER_HELP_FILE
-      ${CMAKE_CURRENT_SOURCE_DIR}/../original/extracted/MAXIS/SIMTOWER/SIMTOWER.HLP)
   file(TO_CMAKE_PATH "${SIMTOWER_RESOURCE_PACK}" SIMTOWER_RESOURCE_PACK_RC)
   file(TO_CMAKE_PATH "${SIMTOWER_HELP_FILE}" SIMTOWER_HELP_FILE_RC)
   configure_file(
@@ -172,7 +186,8 @@ target_link_libraries(simtower_test_support PUBLIC simtower_port_core)
 add_library(simtower_sdl_runtime STATIC sdl/sdl_dialog.cpp
                                         sdl/sdl_dialog_widgets.cpp
                                         sdl/sdl_dialog_descriptors.cpp
-                                        sdl/sdl_main_scrollbars.cpp)
+                                        sdl/sdl_main_scrollbars.cpp
+                                        sdl/sdl_help.cpp)
 target_include_directories(simtower_sdl_runtime PUBLIC
                            ${CMAKE_CURRENT_SOURCE_DIR}/sdl)
 target_link_libraries(simtower_sdl_runtime PUBLIC simtower_canvas)
@@ -185,6 +200,30 @@ if(SIMTOWER_BUILD_SDL)
                               sdl/sdl_menu.cpp)
   target_link_libraries(simtower_sdl PRIVATE simtower_test_support
                                              simtower_sdl_runtime SDL3::SDL3)
+
+  # Help: SIMTOWER.HLP as HTML in "help" next to simtower_sdl, where it
+  # looks by default. Derived from the user's copy of the game, so it is
+  # generated here and never committed. Skipped without the file or
+  # Python 3; help requests then log that no converted help exists.
+  set(SIMTOWER_HELP_DIR ${CMAKE_CURRENT_BINARY_DIR}/help)
+  if(SIMTOWER_HAVE_HELP_FILE AND Python3_Interpreter_FOUND)
+    set(SIMTOWER_HELP_CONVERTER
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools/convert_winhelp.py)
+    add_custom_command(
+      OUTPUT ${SIMTOWER_HELP_DIR}/help-map.json
+      COMMAND ${Python3_EXECUTABLE} ${SIMTOWER_HELP_CONVERTER} --quiet
+              ${SIMTOWER_HELP_FILE} ${SIMTOWER_HELP_DIR}
+      DEPENDS ${SIMTOWER_HELP_FILE} ${SIMTOWER_HELP_CONVERTER}
+      COMMENT "Converting SIMTOWER.HLP to HTML help"
+      VERBATIM)
+    add_custom_target(simtower_help ALL
+                      DEPENDS ${SIMTOWER_HELP_DIR}/help-map.json)
+    add_dependencies(simtower_sdl simtower_help)
+    message(STATUS "SimTower help: converted into ${SIMTOWER_HELP_DIR}")
+  else()
+    message(STATUS "SimTower help: not converted (needs SIMTOWER_HELP_FILE "
+                   "and Python 3)")
+  endif()
 endif()
 
 include(CTest)
@@ -618,6 +657,32 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
   )
 
+  # The help converter (tools/convert_winhelp.py) on synthetic WinHelp
+  # structures (no assets), then on the user's SIMTOWER.HLP: every topic
+  # must convert with nothing skipped (skipped without the file).
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME simtower_help_converter_tests
+             COMMAND ${Python3_EXECUTABLE}
+               ${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_convert_winhelp.py)
+    add_test(
+      NAME simtower_help_conversion
+      COMMAND ${CMAKE_COMMAND}
+        -DPYTHON=${Python3_EXECUTABLE}
+        -DTOOL=${CMAKE_CURRENT_SOURCE_DIR}/../tools/convert_winhelp.py
+        -DHELP=${simtower_help_input}
+        -DWORK=${CMAKE_CURRENT_BINARY_DIR}/help-conversion
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_help_conversion_test.cmake)
+    set_tests_properties(simtower_help_conversion PROPERTIES
+                         SKIP_REGULAR_EXPRESSION
+                         "cli_help_conversion_test: skipped")
+  endif()
+
+  # The SDL help lookup: pages and file URLs (portable, no assets; also
+  # under Wine).
+  add_executable(simtower_sdl_help_tests tests/sdl_help_tests.cpp)
+  target_link_libraries(simtower_sdl_help_tests PRIVATE simtower_sdl_runtime)
+  add_test(NAME simtower_sdl_help_tests COMMAND simtower_sdl_help_tests)
+
   # SdlAudioDevice on SDL's dummy audio driver with synthetic buffers (no
   # assets): U8/S16 playback, loop passes, partial frames, stop and teardown.
   # The test also forces the dummy driver itself, so it is never audible.
@@ -681,7 +746,8 @@ if(BUILD_TESTING)
                    transport_exit_latch transport_frames
                    main_scrollbars main_scroll_bars_digest
                    main_scroll_keys main_scroll_blocked
-                   main_scroll_key_blocked)
+                   main_scroll_key_blocked
+                   help_contents help_missing)
       add_test(
         NAME simtower_sdl_${script}
         COMMAND ${CMAKE_COMMAND}
@@ -779,6 +845,7 @@ if(BUILD_TESTING)
       simtower_dialog_paint_tests
       simtower_sdl_dialog_tests
       simtower_sdl_widget_tests
+      simtower_sdl_help_tests
       simtower_dialog_controller_tests
       simtower_facility_information_controller_tests
       simtower_person_information_controller_tests

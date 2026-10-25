@@ -53,6 +53,10 @@ The repository includes the analysis and packing tools, but not those inputs or
 generated outputs. Configure with `cmake -S port -B build/port-make`, then build
 with `cmake --build build/port-make --config Release`.
 
+With Python 3 available, the SDL frontend's build also converts
+`SIMTOWER.HLP` to HTML pages in `help/` next to `simtower_sdl`
+(`tools/convert_winhelp.py`); Help > Contents opens them in the browser.
+
 ## Porting rule
 
 A subsystem is not considered ported because a replacement implementation has tests. It is complete only when its original routines, data structures, resource consumers, and callers are mapped and translated into the native implementation.

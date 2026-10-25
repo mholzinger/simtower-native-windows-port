@@ -4,8 +4,9 @@
 // in the window (sdl_menu.hpp) and dispatched through the shared WM_COMMAND
 // dispatcher; New/Open/Save/Save As use the native file pickers. The event
 // dialogs, alerts and About run in the window through the dialog runtime
-// (sdl_dialog.hpp); the other dialogs and help are logged requests until
-// their runtimes exist.
+// (sdl_dialog.hpp); the other dialogs are logged requests until their
+// runtimes exist. Help opens the HTML converted from SIMTOWER.HLP in the
+// browser (sdl_help.hpp).
 //
 // Usage:
 //   simtower_sdl [--pack FILE] [--open FILE.TDT] [--size WxH] [--slow]
@@ -17,7 +18,13 @@
 //                [--event bomb|fire@PASS ...]
 //                [--input-script FILE] [--headless-window FILE.bmp]
 //                [--direct-build TYPE,FLOOR,LEFT[,VARIANT][,shift]@PASS ...]
-//                [--startup]
+//                [--help-dir DIR] [--startup]
+//
+// Help: Help > Contents and F1 open DIR/contents.html (default DIR: "help"
+// next to the executable, which the build fills from SIMTOWER.HLP) with
+// SDL_OpenURL. Headless runs and the dummy or offscreen video driver never
+// open it: the request and its file URL are logged ("expect-help" checks
+// it).
 //
 // Startup: the window starts like WinMain (Session::run_startup): the
 // BITMAP/128 then BITMAP/256 splash, WAVE/20000, then New / Load (DIALOG
@@ -190,6 +197,7 @@ struct Options {
   std::optional<std::filesystem::path> headless_window{};
   // --direct-build SPEC@PASS: Session::direct_build before that pass.
   std::vector<std::pair<simtower::DirectBuild, int>> direct_builds{};
+  std::filesystem::path help_dir{};
   // --startup: a headless run starts through Session::run_startup too.
   bool startup{false};
 
@@ -215,6 +223,7 @@ struct Options {
       " [--trace-requests] [--event bomb|fire@PASS ...]"
       " [--input-script FILE] [--headless-window FILE.bmp]"
       " [--direct-build TYPE,FLOOR,LEFT[,VARIANT][,shift]@PASS ...]"
+      " [--help-dir DIR]"
       " [--startup]"
       "\n--input-script exits 2 on a script error, 3 on a failed expect-*"
       " (see sdl_input_script.hpp)");
@@ -329,6 +338,8 @@ Options parse_options(int argc, char** argv) {
       if (at == std::string::npos) usage_error("bad --direct-build: " + text);
       options.direct_builds.emplace_back(parse_direct_build(text.substr(0, at)),
                                          parse_count(text.substr(at + 1)));
+    } else if (argument == "--help-dir") {
+      options.help_dir = value(index);
     } else if (argument == "--startup") {
       options.startup = true;
     } else if (argument == "--view") {
@@ -376,6 +387,11 @@ Options parse_options(int argc, char** argv) {
     const char* base = SDL_GetBasePath();
     options.pack = std::filesystem::path(base ? base : "") /
                    "original_resources.pack";
+  }
+  if (options.help_dir.empty()) {
+    // The build converts SIMTOWER.HLP into "help" next to the executable.
+    const char* base = SDL_GetBasePath();
+    options.help_dir = std::filesystem::path(base ? base : "") / "help";
   }
   return options;
 }
@@ -595,6 +611,8 @@ int run_headless(const Options& options) {
                                   .trace_requests = options.trace_requests},
                                  audio_device);
   session.resize(options.width, options.height);
+  // No help viewer: a help request is only logged with its URL.
+  session.set_help_directory(options.help_dir);
   // The "input" field is added only with a script, so the regression oracle
   // (no script) prints exactly what it printed before input existed.
   const bool scripted = options.input_script.has_value();
@@ -1511,6 +1529,23 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
   return true;
 }
 
+// Help pages in the user's browser. Not installed for the dummy or
+// offscreen video driver (a test run), so no browser opens there.
+class SdlHelpViewer final : public simtower::sdl::HelpViewer {
+ public:
+  bool open_url(const std::string& url) override {
+    if (SDL_OpenURL(url.c_str())) return true;
+    std::fprintf(stderr, "simtower_sdl: help: %s\n", SDL_GetError());
+    return false;
+  }
+};
+
+[[nodiscard]] bool test_video_driver() {
+  const char* driver = SDL_GetCurrentVideoDriver();
+  const std::string_view name = driver ? driver : "";
+  return name == "dummy" || name == "offscreen";
+}
+
 int run_window(const Options& options) {
   Window window(options);
   // Declared after the window (SDL_Quit runs last) and before the session,
@@ -1530,6 +1565,9 @@ int run_window(const Options& options) {
   session.set_input_source(&modal);
   SdlFilePicker picker(window, session);
   session.set_file_picker(&picker);
+  SdlHelpViewer help_viewer;
+  session.set_help_directory(options.help_dir);
+  if (!test_video_driver()) session.set_help_viewer(&help_viewer);
   // WinMain's startup: the splash, WAVE/20000, then New / Load (or the
   // --open tower) through the window's dialog runtime and picker.
   if (options.view) session.restore_view(options.view->x, options.view->y);
@@ -1596,6 +1634,7 @@ int run_window(const Options& options) {
     }
     window.set_cursor(session.cursor_id());
   }
+  session.set_help_viewer(nullptr);
   session.set_file_picker(nullptr);
   session.set_input_source(nullptr);
   return 0;
