@@ -5,6 +5,78 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Original game assets. They are extracted from a lawfully owned copy and are
+# never committed, so a clean checkout (and CI) has none of them:
+#   - the resource pack and its descriptor header (SIMTOWER_ASSET_DIR),
+#   - SIMTOWER.HLP, embedded with the pack into the Win32 simtower.exe,
+#   - the sample towers under references/tdt-samples.
+# SIMTOWER_ASSETS=AUTO (the default) uses the pack when both pack files
+# exist; OFF builds as if they were absent; ON requires them. Without the
+# pack, an empty stand-in descriptor header keeps the portable code
+# compiling, targets that embed the pack are not built, and tests that need
+# it are either not registered or skip (exit code 77).
+set(SIMTOWER_ASSET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/generated CACHE PATH
+    "Directory with original_resources.pack and original_resources.generated.hpp")
+set(SIMTOWER_HELP_FILE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../original/extracted/MAXIS/SIMTOWER/SIMTOWER.HLP
+    CACHE FILEPATH "The original SIMTOWER.HLP (embedded by the Win32 host)")
+set(SIMTOWER_TDT_SAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../references/tdt-samples
+    CACHE PATH "Directory with the sample .TDT towers used by some tests")
+set(SIMTOWER_ASSETS AUTO CACHE STRING
+    "Use the extracted resource pack: AUTO, ON or OFF")
+set_property(CACHE SIMTOWER_ASSETS PROPERTY STRINGS AUTO ON OFF)
+
+set(SIMTOWER_RESOURCE_PACK ${SIMTOWER_ASSET_DIR}/original_resources.pack)
+set(SIMTOWER_RESOURCE_HEADER ${SIMTOWER_ASSET_DIR}/original_resources.generated.hpp)
+if(EXISTS ${SIMTOWER_RESOURCE_PACK} AND EXISTS ${SIMTOWER_RESOURCE_HEADER})
+  set(SIMTOWER_ASSETS_FOUND ON)
+else()
+  set(SIMTOWER_ASSETS_FOUND OFF)
+endif()
+if(SIMTOWER_ASSETS STREQUAL "AUTO")
+  set(SIMTOWER_HAVE_ASSETS ${SIMTOWER_ASSETS_FOUND})
+elseif(SIMTOWER_ASSETS)
+  if(NOT SIMTOWER_ASSETS_FOUND)
+    message(FATAL_ERROR
+      "SIMTOWER_ASSETS=ON but ${SIMTOWER_RESOURCE_PACK} or "
+      "${SIMTOWER_RESOURCE_HEADER} is missing")
+  endif()
+  set(SIMTOWER_HAVE_ASSETS ON)
+else()
+  set(SIMTOWER_HAVE_ASSETS OFF)
+endif()
+
+if(SIMTOWER_HAVE_ASSETS)
+  set(SIMTOWER_RESOURCE_INCLUDE_DIR ${SIMTOWER_ASSET_DIR})
+else()
+  set(SIMTOWER_RESOURCE_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR}/asset-stub)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/original_resources.stub.hpp.in
+                 ${SIMTOWER_RESOURCE_INCLUDE_DIR}/original_resources.generated.hpp
+                 COPYONLY)
+endif()
+
+# The sample towers are all or nothing: the tests that read them take
+# several at once.
+set(SIMTOWER_HAVE_TDT_SAMPLES ON)
+foreach(sample s2b-exported.TDT ElDlux/ElDlux.TDT RoyalAbode/RoyalA.TDT
+               SimEmpire/SimEmpire.TDT)
+  if(NOT EXISTS ${SIMTOWER_TDT_SAMPLE_DIR}/${sample})
+    set(SIMTOWER_HAVE_TDT_SAMPLES OFF)
+  endif()
+endforeach()
+
+# The Win32 executable embeds the pack and the help file through windres.
+if(WIN32 AND SIMTOWER_HAVE_ASSETS AND EXISTS ${SIMTOWER_HELP_FILE}
+   AND EXISTS ${SIMTOWER_ASSET_DIR}/original_resources.rc.in)
+  set(SIMTOWER_HAVE_WIN32_RESOURCES ON)
+else()
+  set(SIMTOWER_HAVE_WIN32_RESOURCES OFF)
+endif()
+
+message(STATUS "SimTower assets: pack ${SIMTOWER_HAVE_ASSETS}, "
+               "TDT samples ${SIMTOWER_HAVE_TDT_SAMPLES}"
+               ", Win32 embedded resources ${SIMTOWER_HAVE_WIN32_RESOURCES}")
+
 # Portable core: builds on every platform. The Win32 host modules
 # (*_win32, including the waveOut audio device) are added below on Windows
 # only.
@@ -47,7 +119,7 @@ add_library(simtower_port_core STATIC
 )
 target_include_directories(simtower_port_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_SOURCE_DIR}/generated
+  ${SIMTOWER_RESOURCE_INCLUDE_DIR}
 )
 if(WIN32)
   target_compile_definitions(simtower_port_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -68,17 +140,15 @@ if(WIN32)
     src/original_world_win32.cpp
   )
   target_link_libraries(simtower_port_core PUBLIC user32 gdi32 winmm)
+endif()
 
+if(SIMTOWER_HAVE_WIN32_RESOURCES)
   find_program(SIMTOWER_WINDRES NAMES windres HINTS C:/Strawberry/c/bin REQUIRED)
   set(SIMTOWER_RESOURCE_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/original_resources.res.o)
-  set(SIMTOWER_RESOURCE_PACK
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack)
-  set(SIMTOWER_HELP_FILE
-      ${CMAKE_CURRENT_SOURCE_DIR}/../original/extracted/MAXIS/SIMTOWER/SIMTOWER.HLP)
   file(TO_CMAKE_PATH "${SIMTOWER_RESOURCE_PACK}" SIMTOWER_RESOURCE_PACK_RC)
   file(TO_CMAKE_PATH "${SIMTOWER_HELP_FILE}" SIMTOWER_HELP_FILE_RC)
   configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.rc.in
+    ${SIMTOWER_ASSET_DIR}/original_resources.rc.in
     ${CMAKE_CURRENT_BINARY_DIR}/original_resources.rc
     @ONLY
   )
@@ -88,7 +158,7 @@ if(WIN32)
             ${CMAKE_CURRENT_BINARY_DIR}/original_resources.rc
             ${SIMTOWER_RESOURCE_OBJECT}
     DEPENDS
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.rc.in
+      ${SIMTOWER_ASSET_DIR}/original_resources.rc.in
       ${SIMTOWER_RESOURCE_PACK}
       ${SIMTOWER_HELP_FILE}
     VERBATIM
@@ -184,16 +254,19 @@ if(BUILD_TESTING)
     target_link_libraries(simtower_resource_tests PRIVATE simtower_port_core)
     add_test(
       NAME simtower_resource_tests
-      COMMAND simtower_resource_tests ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      COMMAND simtower_resource_tests ${SIMTOWER_RESOURCE_PACK}
     )
 
-    add_executable(
-      simtower_embedded_resource_tests
-      tests/embedded_resource_tests.cpp
-      ${SIMTOWER_RESOURCE_OBJECT}
-    )
-    target_link_libraries(simtower_embedded_resource_tests PRIVATE simtower_port_core)
-    add_test(NAME simtower_embedded_resource_tests COMMAND simtower_embedded_resource_tests)
+    # Links the windres object, so it exists only with the embedded pack.
+    if(SIMTOWER_HAVE_WIN32_RESOURCES)
+      add_executable(
+        simtower_embedded_resource_tests
+        tests/embedded_resource_tests.cpp
+        ${SIMTOWER_RESOURCE_OBJECT}
+      )
+      target_link_libraries(simtower_embedded_resource_tests PRIVATE simtower_port_core)
+      add_test(NAME simtower_embedded_resource_tests COMMAND simtower_embedded_resource_tests)
+    endif()
   endif()
 
   add_executable(simtower_tdt_tests tests/tdt_tests.cpp)
@@ -206,10 +279,10 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_tdt_tests
     COMMAND simtower_tdt_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/../references/tdt-samples/s2b-exported.TDT
-      ${CMAKE_CURRENT_SOURCE_DIR}/../references/tdt-samples/ElDlux/ElDlux.TDT
-      ${CMAKE_CURRENT_SOURCE_DIR}/../references/tdt-samples/RoyalAbode/RoyalA.TDT
-      ${CMAKE_CURRENT_SOURCE_DIR}/../references/tdt-samples/SimEmpire/SimEmpire.TDT
+      ${SIMTOWER_TDT_SAMPLE_DIR}/s2b-exported.TDT
+      ${SIMTOWER_TDT_SAMPLE_DIR}/ElDlux/ElDlux.TDT
+      ${SIMTOWER_TDT_SAMPLE_DIR}/RoyalAbode/RoyalA.TDT
+      ${SIMTOWER_TDT_SAMPLE_DIR}/SimEmpire/SimEmpire.TDT
       ${CMAKE_CURRENT_BINARY_DIR}/tdt-roundtrip.TDT
   )
 
@@ -242,7 +315,7 @@ if(BUILD_TESTING)
   target_link_libraries(simtower_world_tests PRIVATE simtower_port_core)
   add_test(
     NAME simtower_world_tests
-    COMMAND simtower_world_tests ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+    COMMAND simtower_world_tests ${SIMTOWER_RESOURCE_PACK}
   )
 
   add_executable(simtower_command_palette_tests tests/command_palette_tests.cpp)
@@ -250,7 +323,7 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_command_palette_tests
     COMMAND simtower_command_palette_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
 
   add_executable(simtower_map_tests tests/map_tests.cpp)
@@ -258,7 +331,7 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_map_tests
     COMMAND simtower_map_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
 
   add_executable(simtower_info_tests tests/info_tests.cpp)
@@ -266,7 +339,7 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_info_tests
     COMMAND simtower_info_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
 
   # OriginalCanvasDrawContext primitives on synthetic input (no assets).
@@ -284,7 +357,7 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_information_tests
     COMMAND simtower_information_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
 
   add_executable(simtower_find_tests tests/find_tests.cpp)
@@ -292,9 +365,9 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_find_tests
     COMMAND simtower_find_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/../references/tdt-samples/ElDlux/ElDlux.TDT
-      ${CMAKE_CURRENT_SOURCE_DIR}/../references/tdt-samples/SimEmpire/SimEmpire.TDT
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_TDT_SAMPLE_DIR}/ElDlux/ElDlux.TDT
+      ${SIMTOWER_TDT_SAMPLE_DIR}/SimEmpire/SimEmpire.TDT
+      ${SIMTOWER_RESOURCE_PACK}
   )
 
   add_executable(simtower_about_tests tests/about_tests.cpp)
@@ -302,7 +375,7 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_about_tests
     COMMAND simtower_about_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
 
   add_executable(simtower_elevator_control_tests tests/elevator_control_tests.cpp)
@@ -310,7 +383,7 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_elevator_control_tests
     COMMAND simtower_elevator_control_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
 
   # The TOWER_MENU model and the menu op lists (original_menu.hpp). The
@@ -321,9 +394,11 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_menu_tests
     COMMAND simtower_menu_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
-  set_tests_properties(simtower_menu_tests PROPERTIES SKIP_RETURN_CODE 77)
+  if(NOT SIMTOWER_HAVE_ASSETS)
+    set_tests_properties(simtower_menu_tests PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 
   # The shared WM_COMMAND dispatcher against a recording host (no assets).
   add_executable(simtower_main_command_tests tests/main_command_tests.cpp)
@@ -352,9 +427,11 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_audio_tests
     COMMAND simtower_audio_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
-  set_tests_properties(simtower_audio_tests PROPERTIES SKIP_RETURN_CODE 77)
+  if(NOT SIMTOWER_HAVE_ASSETS)
+    set_tests_properties(simtower_audio_tests PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 
   # Locks the shared idle pass's host-hook order on a staged tower. The
   # scenario builder is portable (no SDL), so this runs on every platform.
@@ -364,7 +441,7 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_idle_pass_tests
     COMMAND simtower_idle_pass_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
 
   # The shared world input module (Main construction, edit tools, Command
@@ -381,7 +458,7 @@ if(BUILD_TESTING)
   add_test(
     NAME simtower_world_input_tests
     COMMAND simtower_world_input_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+      ${SIMTOWER_RESOURCE_PACK}
   )
 
   # SdlAudioDevice on SDL's dummy audio driver with synthetic buffers (no
@@ -407,7 +484,7 @@ if(BUILD_TESTING)
         NAME simtower_sdl_input_${script}
         COMMAND ${CMAKE_COMMAND}
           -DBIN=$<TARGET_FILE:simtower_sdl>
-          -DPACK=${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+          -DPACK=${SIMTOWER_RESOURCE_PACK}
           -DSCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/${script}.txt
           -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_input_test.cmake)
       set_tests_properties(simtower_sdl_input_${script} PROPERTIES
@@ -426,9 +503,11 @@ if(BUILD_TESTING)
     add_test(
       NAME simtower_sdl_menu_tests
       COMMAND simtower_sdl_menu_tests
-        ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack)
-    set_tests_properties(simtower_sdl_menu_tests PROPERTIES
-                         SKIP_RETURN_CODE 77)
+        ${SIMTOWER_RESOURCE_PACK})
+    if(NOT SIMTOWER_HAVE_ASSETS)
+      set_tests_properties(simtower_sdl_menu_tests PROPERTIES
+                           SKIP_RETURN_CODE 77)
+    endif()
 
     # Save As and Open through the scripted File menu and picker: a fresh
     # menu Open of the saved file must continue exactly like --open of it.
@@ -436,7 +515,7 @@ if(BUILD_TESTING)
       NAME simtower_sdl_save_load
       COMMAND ${CMAKE_COMMAND}
         -DBIN=$<TARGET_FILE:simtower_sdl>
-        -DPACK=${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+        -DPACK=${SIMTOWER_RESOURCE_PACK}
         -DWORK=${CMAKE_CURRENT_BINARY_DIR}/save-load
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_save_load_test.cmake)
     set_tests_properties(simtower_sdl_save_load PROPERTIES
@@ -453,13 +532,51 @@ if(BUILD_TESTING)
         NAME simtower_sdl_example_${script}
         COMMAND ${CMAKE_COMMAND}
           -DBIN=$<TARGET_FILE:simtower_sdl>
-          -DPACK=${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+          -DPACK=${SIMTOWER_RESOURCE_PACK}
           -DSCRIPT=${script_path}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_example_script_test.cmake)
       set_tests_properties(simtower_sdl_example_${script} PROPERTIES
                            ENVIRONMENT
                            "SDL_AUDIO_DRIVER=dummy;SDL_VIDEODRIVER=dummy")
     endforeach()
+  endif()
+
+  # Tests that cannot run without the extracted assets. They are still built
+  # (so a clean checkout compiles them) and registered, but are DISABLED when
+  # their inputs are absent: CTest lists them as "Not Run (Disabled)" and
+  # never counts them as failures. Tests that split into an asset-free half
+  # and a pack half (menu, audio, sdl_menu) instead run and exit 77 for the
+  # missing half (SKIP_RETURN_CODE above).
+  set(SIMTOWER_PACK_TESTS
+      simtower_world_tests
+      simtower_command_palette_tests
+      simtower_map_tests
+      simtower_info_tests
+      simtower_information_tests
+      simtower_find_tests
+      simtower_about_tests
+      simtower_elevator_control_tests
+      simtower_idle_pass_tests
+      simtower_world_input_tests)
+  if(WIN32)
+    list(APPEND SIMTOWER_PACK_TESTS simtower_resource_tests)
+  endif()
+  if(SIMTOWER_BUILD_SDL)
+    # Every simtower_sdl run loads the pack.
+    get_property(SIMTOWER_ALL_TESTS DIRECTORY PROPERTY TESTS)
+    foreach(test_name IN LISTS SIMTOWER_ALL_TESTS)
+      if(test_name MATCHES "^simtower_sdl_(input|example)_" OR
+         test_name STREQUAL "simtower_sdl_save_load")
+        list(APPEND SIMTOWER_PACK_TESTS ${test_name})
+      endif()
+    endforeach()
+  endif()
+  set(SIMTOWER_TDT_SAMPLE_TESTS simtower_tdt_tests simtower_find_tests)
+  if(NOT SIMTOWER_HAVE_ASSETS)
+    set_tests_properties(${SIMTOWER_PACK_TESTS} PROPERTIES DISABLED TRUE)
+  endif()
+  if(NOT SIMTOWER_HAVE_TDT_SAMPLES)
+    set_tests_properties(${SIMTOWER_TDT_SAMPLE_TESTS} PROPERTIES DISABLED TRUE)
   endif()
 
   # These executables intentionally use assert() as their test primitive.
@@ -490,9 +607,10 @@ if(BUILD_TESTING)
                                       simtower_sdl_menu_tests)
   endif()
   if(WIN32)
-    list(APPEND SIMTOWER_ASSERT_TESTS
-         simtower_resource_tests
-         simtower_embedded_resource_tests)
+    list(APPEND SIMTOWER_ASSERT_TESTS simtower_resource_tests)
+  endif()
+  if(TARGET simtower_embedded_resource_tests)
+    list(APPEND SIMTOWER_ASSERT_TESTS simtower_embedded_resource_tests)
   endif()
   foreach(test_target IN LISTS SIMTOWER_ASSERT_TESTS)
     if(MSVC)

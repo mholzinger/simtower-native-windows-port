@@ -1,0 +1,130 @@
+# Builds the port and runs its asset-free tests on macOS, Linux and Windows.
+#
+# The original game assets (resource pack, SIMTOWER.HLP, sample towers) are
+# never in the repository, so port/CMakeLists.txt detects them as absent:
+# the Win32 simtower.exe and the embedded-resource test are not built, and
+# every test that needs an asset is reported as Disabled or Skipped, never
+# failed. Nothing here downloads the game.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Release
+  # SDL3 is built from a pinned source tag (and checked against its commit)
+  # so macOS and Linux use the same, reproducible version.
+  SDL3_TAG: release-3.4.18
+  SDL3_COMMIT: 829a65d769d935c4852f8159e964312c0957260a
+
+jobs:
+  unix:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-latest
+          - name: Linux x86-64
+            os: ubuntu-latest
+    env:
+      SDL_AUDIO_DRIVER: dummy
+      SDL_VIDEODRIVER: dummy
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libasound2-dev libpulse-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+            libxi-dev libxss-dev libxtst-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev \
+            libegl-dev libgl-dev libgles-dev libdrm-dev libgbm-dev
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Cache SDL3
+        id: sdl3-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/sdl3
+          key: sdl3-${{ env.SDL3_COMMIT }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}
+
+      - name: Build SDL3 ${{ env.SDL3_TAG }}
+        if: steps.sdl3-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$SDL3_TAG" \
+            https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/sdl3-src"
+          test "$(git -C "$RUNNER_TEMP/sdl3-src" rev-parse HEAD)" = "$SDL3_COMMIT"
+          cmake -S "$RUNNER_TEMP/sdl3-src" -B "$RUNNER_TEMP/sdl3-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdl3" \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          cmake --build "$RUNNER_TEMP/sdl3-build"
+          cmake --install "$RUNNER_TEMP/sdl3-build"
+
+      - name: Configure
+        run: |
+          cmake -S port -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sdl3"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Windows x86-64 (MinGW)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # MINGW64 (msvcrt) matches the Strawberry-style MinGW the Win32 host was
+      # built with upstream. MSYS2 packages are rolling; the action is pinned.
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: MINGW64
+          # MINGW64 uses the msvcrt runtime like upstream's MinGW build; keep it
+          # and acknowledge the deprecation notice (owner decision 2026-10-23).
+          suppress-deprecation-warnings: msystem-mingw64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Toolchain versions
+        run: |
+          gcc --version | head -n 1
+          cmake --version | head -n 1
+
+      - name: Configure
+        run: cmake -S port -B build -G Ninja -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
