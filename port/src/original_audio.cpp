@@ -1,5 +1,6 @@
 #include "original_audio.hpp"
 
+#include <cstdint>
 #include <limits>
 
 namespace simtower {
@@ -17,7 +18,7 @@ bool OriginalAudioRuntime::initialize() noexcept {
   if (!sound_enabled_) {
     return true;
   }
-  initialized_ = waveOutGetNumDevs() != 0U;
+  initialized_ = device_.available();
   active_ = initialized_;
   return initialized_;
 }
@@ -25,7 +26,7 @@ bool OriginalAudioRuntime::initialize() noexcept {
 void OriginalAudioRuntime::shutdown() noexcept {
   // Exact lifecycle equivalent of 11c8:0a31: close every channel, release
   // retained wave state, close the session, and clear its live latch.
-  for (std::size_t channel = 0; channel < native_channels_.size(); ++channel) {
+  for (std::size_t channel = 0; channel < arbiter_.channels().size(); ++channel) {
     release_channel(channel);
   }
   arbiter_.stop_all();
@@ -35,7 +36,7 @@ void OriginalAudioRuntime::shutdown() noexcept {
 
 void OriginalAudioRuntime::activate() noexcept {
   // Exact 11c8:0aab activates the live WAVMIX device once and latches the
-  // active flag. waveOut remains only the native PCM backend.
+  // active flag. The device remains only the native PCM backend.
   if (!active_ && initialized_ && sound_enabled_) {
     active_ = true;
   }
@@ -51,9 +52,9 @@ void OriginalAudioRuntime::deactivate() noexcept {
 }
 
 void OriginalAudioRuntime::activate_mixer_backend() noexcept {
-  // A direct WAVEMIXACTIVATE(handle, 1) does not update DS:0252. waveOut has
-  // no corresponding session activation state, so preserving active_ is the
-  // exact native replacement.
+  // A direct WAVEMIXACTIVATE(handle, 1) does not update DS:0252. The device
+  // has no corresponding session activation state, so preserving active_ is
+  // the exact native replacement.
 }
 
 void OriginalAudioRuntime::deactivate_mixer_backend() noexcept {
@@ -70,8 +71,9 @@ void OriginalAudioRuntime::pump(std::uint32_t tick_count_ms) noexcept {
   pump_deadline_ = plan.next_deadline;
   if (plan.pump_backend) {
     // 11e0:0eae-0ee7 drains only WAVMIX callback message 0x03BD before
-    // WaveMixPump. waveOut posts no such window message; observing WHDR_DONE
-    // and retiring the matching channel state is its native equivalent.
+    // WaveMixPump. No device posts such a window message; observing the
+    // device's done state (waveOut: WHDR_DONE) and retiring the matching
+    // channel state is its native equivalent.
     reap_completed();
   }
 }
@@ -165,7 +167,7 @@ void OriginalAudioRuntime::stop_channel(std::size_t channel, bool force) noexcep
 
 void OriginalAudioRuntime::stop_all(bool force) noexcept {
   // Exact 11c8:0135 two-channel stop wrapper around 11c8:02c0.
-  for (std::size_t channel = 0; channel < native_channels_.size(); ++channel) {
+  for (std::size_t channel = 0; channel < arbiter_.channels().size(); ++channel) {
     stop_channel(channel, force);
   }
 }
@@ -177,10 +179,8 @@ bool OriginalAudioRuntime::channel_active(std::size_t channel) noexcept {
 }
 
 void OriginalAudioRuntime::reap_completed() noexcept {
-  for (std::size_t channel = 0; channel < native_channels_.size(); ++channel) {
-    auto& native = native_channels_[channel];
-    if (arbiter_.channels()[channel].active && native.prepared &&
-        (native.header.dwFlags & WHDR_DONE) != 0U) {
+  for (std::size_t channel = 0; channel < arbiter_.channels().size(); ++channel) {
+    if (arbiter_.channels()[channel].active && device_.done(channel)) {
       release_channel(channel);
       arbiter_.stop(channel);
     }
@@ -188,18 +188,11 @@ void OriginalAudioRuntime::reap_completed() noexcept {
 }
 
 void OriginalAudioRuntime::release_channel(std::size_t channel) noexcept {
-  if (channel >= native_channels_.size()) {
+  if (channel >= arbiter_.channels().size()) {
     return;
   }
-  auto& native = native_channels_[channel];
-  if (native.output) {
-    waveOutReset(native.output);
-    if (native.prepared) {
-      waveOutUnprepareHeader(native.output, &native.header, sizeof(native.header));
-    }
-    waveOutClose(native.output);
-  }
-  native = {};
+  device_.stop(channel);
+  muted_samples_[channel] = {};
 }
 
 bool OriginalAudioRuntime::begin_native_playback(std::size_t channel,
@@ -207,54 +200,39 @@ bool OriginalAudioRuntime::begin_native_playback(std::size_t channel,
                                                   std::uint16_t repeat_count) noexcept {
   // Native PCM transaction for 11c8:0920: bind a channel/wave/repeat count,
   // mark that channel active, and submit it to the platform audio backend.
-  if (channel >= native_channels_.size() ||
-      wave.samples.size() > std::numeric_limits<DWORD>::max()) {
+  // The 32-bit bound is waveOut's DWORD dwBufferLength, checked before any
+  // device call as the Win32 host always did.
+  if (channel >= arbiter_.channels().size() ||
+      wave.samples.size() > std::numeric_limits<std::uint32_t>::max()) {
     return false;
   }
 
-  WAVEFORMATEX format{};
-  format.wFormatTag = wave.format_tag;
-  format.nChannels = wave.channels;
-  format.nSamplesPerSec = wave.samples_per_second;
-  format.nAvgBytesPerSec = wave.average_bytes_per_second;
-  format.nBlockAlign = wave.block_align;
-  format.wBitsPerSample = wave.bits_per_sample;
-  format.cbSize = 0;
-
-  auto& native = native_channels_[channel];
-  if (waveOutOpen(&native.output, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-    native = {};
+  const OriginalPcmFormat format{
+      .format_tag = wave.format_tag,
+      .channels = wave.channels,
+      .samples_per_second = wave.samples_per_second,
+      .average_bytes_per_second = wave.average_bytes_per_second,
+      .block_align = wave.block_align,
+      .bits_per_sample = wave.bits_per_sample,
+  };
+  if (!device_.open(channel, format)) {
     return false;
   }
 
-  const std::byte* submitted_samples = wave.samples.data();
+  std::span<const std::byte> submitted_samples = wave.samples;
   if (host_output_muted_) {
     // PCM/8 is unsigned and rests at 0x80; wider PCM formats rest at zero.
-    // Only the validation smoke enables this branch. The same WAVEFORMATEX,
-    // byte count, loop flags, prepare, write, completion, and teardown paths
-    // remain production code.
+    // Only the validation smoke enables this branch. The same format, byte
+    // count, loop flags, open, submit, completion, and teardown paths remain
+    // production code.
     const std::byte silence =
         wave.bits_per_sample == 8U ? std::byte{0x80} : std::byte{0x00};
-    native.muted_samples.assign(wave.samples.size(), silence);
-    submitted_samples = native.muted_samples.data();
+    muted_samples_[channel].assign(wave.samples.size(), silence);
+    submitted_samples = muted_samples_[channel];
   }
-  native.header.lpData = reinterpret_cast<LPSTR>(
-      const_cast<std::byte*>(submitted_samples));
-  native.header.dwBufferLength = static_cast<DWORD>(wave.samples.size());
-  const auto loop = original_audio_loop_plan(repeat_count);
-  native.header.dwFlags = loop.flags;
-  native.header.dwLoops = loop.total_passes;
-  if (waveOutPrepareHeader(native.output, &native.header, sizeof(native.header)) !=
-      MMSYSERR_NOERROR) {
-    waveOutClose(native.output);
-    native = {};
-    return false;
-  }
-  native.prepared = true;
-  if (waveOutWrite(native.output, &native.header, sizeof(native.header)) != MMSYSERR_NOERROR) {
-    waveOutUnprepareHeader(native.output, &native.header, sizeof(native.header));
-    waveOutClose(native.output);
-    native = {};
+  if (!device_.submit(channel, submitted_samples,
+                      original_audio_loop_plan(repeat_count))) {
+    muted_samples_[channel] = {};
     return false;
   }
   return true;

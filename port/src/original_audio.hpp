@@ -1,6 +1,8 @@
 #pragma once
 
-// Win32 waveOut host for the portable rules in original_audio_rules.hpp.
+// Portable host for the rules in original_audio_rules.hpp. The PCM backend
+// is an OriginalAudioDevice (waveOut on Win32, SDL3, or the capture device).
+#include "original_audio_device.hpp"
 #include "original_audio_rules.hpp"
 #include "original_resources.hpp"
 #include "original_wave.hpp"
@@ -8,22 +10,23 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <utility>
 #include <vector>
-
-#include <windows.h>
-#include <mmsystem.h>
 
 namespace simtower {
 
-static_assert(kOriginalWaveBeginLoop == WHDR_BEGINLOOP);
-static_assert(kOriginalWaveEndLoop == WHDR_ENDLOOP);
-
 // Native replacement for the original 11c8 WAVMIX16 subsystem. Channel
 // arbitration, priority gates, the 600-coarse-tick saturation rule, and repeat-count
-// semantics are direct translations; waveOut is only the host PCM backend.
+// semantics are direct translations; the device is only the host PCM backend.
 class OriginalAudioRuntime {
  public:
-  explicit OriginalAudioRuntime(const OriginalResources& resources) : resources_(resources) {}
+  // `clock_ms` replaces GetTickCount for the overload without a tick
+  // argument. `device` must outlive the runtime (the destructor stops it).
+  OriginalAudioRuntime(const OriginalResources& resources,
+                       OriginalAudioDevice& device,
+                       std::function<std::uint32_t()> clock_ms)
+      : resources_(resources), device_(device), clock_ms_(std::move(clock_ms)) {}
   ~OriginalAudioRuntime();
 
   OriginalAudioRuntime(const OriginalAudioRuntime&) = delete;
@@ -34,7 +37,7 @@ class OriginalAudioRuntime {
   void activate() noexcept;
   void deactivate() noexcept;
   // Direct host-backend counterparts for WAVEMIXACTIVATE calls made outside
-  // the 11c8:0aab/0add wrappers. The waveOut replacement has no session-level
+  // the 11c8:0aab/0add wrappers. The device backends have no session-level
   // activation switch, so these intentionally preserve the original active
   // latch while documenting the distinct lifecycle boundary.
   void activate_mixer_backend() noexcept;
@@ -43,7 +46,7 @@ class OriginalAudioRuntime {
 
   void set_sound_enabled(bool enabled) noexcept;
   // Hardware-validation control: retain the exact resource format, buffer
-  // length, channel arbitration, repeat flags, and waveOut transaction while
+  // length, channel arbitration, repeat flags, and device transaction while
   // replacing only submitted sample values with digital silence. Ordinary
   // game execution never enables this switch.
   void set_host_output_muted(bool muted) noexcept {
@@ -63,7 +66,7 @@ class OriginalAudioRuntime {
   [[nodiscard]] bool play_resource(std::int32_t resource_id,
                                    std::uint16_t repeat_count,
                                    std::uint16_t priority) noexcept {
-    return play_resource(resource_id, repeat_count, priority, GetTickCount());
+    return play_resource(resource_id, repeat_count, priority, clock_ms_());
   }
   [[nodiscard]] bool play_reserved_if_idle(std::int32_t resource_id,
                                            std::uint16_t repeat_count,
@@ -74,13 +77,6 @@ class OriginalAudioRuntime {
   [[nodiscard]] const OriginalAudioArbiter& arbiter() const noexcept { return arbiter_; }
 
  private:
-  struct NativeChannel {
-    HWAVEOUT output{};
-    WAVEHDR header{};
-    bool prepared{};
-    std::vector<std::byte> muted_samples{};
-  };
-
   void reap_completed() noexcept;
   void release_channel(std::size_t channel) noexcept;
   [[nodiscard]] bool begin_native_playback(std::size_t channel,
@@ -88,8 +84,12 @@ class OriginalAudioRuntime {
                                            std::uint16_t repeat_count) noexcept;
 
   const OriginalResources& resources_;
+  OriginalAudioDevice& device_;
+  std::function<std::uint32_t()> clock_ms_;
   OriginalAudioArbiter arbiter_{};
-  std::array<NativeChannel, 2> native_channels_{};
+  // Per-voice digital-silence buffer for set_host_output_muted; it must stay
+  // valid until the device stops the voice.
+  std::array<std::vector<std::byte>, 2> muted_samples_{};
   std::array<bool, 3> category_enabled_{true, true, true};
   std::uint32_t last_play_tick_{};
   std::uint32_t pump_deadline_{};

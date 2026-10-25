@@ -7,12 +7,16 @@
 // (original_idle_pass.hpp: 1258:023a -> 1200:0196 -> 1090:03ab(1)) as its
 // host. The 1258:0195-023a prelude and 1258:0285-02d9 epilogue are host-owned
 // (see run_idle_pass). Host requests (dialogs, sounds, focus, Info/Map/Command
-// repaints) are logged instead of acted on. Nothing here includes SDL, so
-// the session can also drive headless runs with a virtual clock.
+// repaints) are logged instead of acted on; sounds are also played through
+// the shared OriginalAudioRuntime when the host supplies an audio device.
+// Nothing here includes SDL, so the session can also drive headless runs
+// with a virtual clock.
 
 #include "sdl_digest.hpp"
 #include "sdl_scenario.hpp"
 
+#include "original_audio.hpp"
+#include "original_audio_device.hpp"
 #include "original_command_palette.hpp"
 #include "original_idle_pass.hpp"
 #include "original_info.hpp"
@@ -31,6 +35,7 @@
 #include <functional>
 #include <initializer_list>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -54,9 +59,13 @@ struct SessionFlags {
   bool effects_animation_enabled{true}; // 1128:054b, DS:de32
   bool fast_mode_enabled{true};         // 1128:0551, DS:de34
   bool world_control_modifier{false};   // DS:3218
-  // Passed to select_original_ambient_sound (11c8:03ab). The Win32 host
-  // passes g_audio->sound_enabled(); this frontend has no audio yet, so the
-  // default false matches a Win32 run without a sound device (no RNG draw).
+  // The master sound switch (DS:02a8 after 1128:0443). It is passed to
+  // select_original_ambient_sound (11c8:03ab), as the Win32 host passes
+  // g_audio->sound_enabled(), so turning it on changes RNG consumption. The
+  // default false matches a Win32 run without a sound device (no RNG draw)
+  // and is what the regression oracle runs with. The audio runtime's master
+  // switch is set from this flag, never the other way round, except that a
+  // failed device initialization turns it off as in WinMain (11c8:006b).
   bool sound_enabled{false};
   // Log every sound request (elevator movement sounds fire every frame).
   bool log_sounds{false};
@@ -86,9 +95,35 @@ struct SessionDigest {
 class Session : private OriginalIdlePassHost {
  public:
   // clock_ms replaces GetTickCount: every Win32 read maps to one call.
+  // With flags.sound_enabled and a non-null audio_device (which must
+  // outlive the session), sound requests also play through an
+  // OriginalAudioRuntime on that device; otherwise they are only logged.
   Session(std::vector<std::byte> pack,
           std::function<std::uint32_t()> clock_ms,
-          SessionFlags flags = {});
+          SessionFlags flags = {},
+          OriginalAudioDevice* audio_device = nullptr);
+  // The audio runtime refers to resources_; the session never moves.
+  Session(const Session&) = delete;
+  Session& operator=(const Session&) = delete;
+
+  // Main window activation and minimized state, read by the
+  // 1258:0195-01c3 audio prelude of every idle pass. Headless runs keep
+  // the default: active and not minimized.
+  void set_window_activation(bool active, bool iconic) {
+    window_active_ = active;
+    window_iconic_ = iconic;
+  }
+  // 1128:00ce-00da: WAVE/20000 once at priority 1, before New/Open. Only
+  // the interactive window calls it; headless runs start with the first
+  // idle-pass request.
+  void play_startup_sound();
+  [[nodiscard]] const OriginalResources& resources() const {
+    return resources_;
+  }
+  // Null when sound is off or no device was supplied.
+  [[nodiscard]] const OriginalAudioRuntime* audio() const {
+    return audio_.get();
+  }
 
   // Win32 New path: begin_original_new_tower. The current viewport
   // origin is kept, as 10d0:086c leaves DS:b3f0/b3f2 untouched.
@@ -154,7 +189,8 @@ class Session : private OriginalIdlePassHost {
  private:
   // 1208:05e6 on a fresh clock read. Not the coarse_tick(now_ms) host hook,
   // which converts a time the shared pass already read.
-  [[nodiscard]] std::uint32_t coarse_tick_now() const;
+  // It also runs the audio pump, so it is not const.
+  [[nodiscard]] std::uint32_t coarse_tick_now();
   void set_viewport_origin(int x, int y);
   void reset_simulation_state();
   void reset_command_state();
@@ -171,6 +207,11 @@ class Session : private OriginalIdlePassHost {
                            std::uint16_t choice,
                            std::string_view meaning);
   void sound(std::int32_t resource, std::string_view source);
+  // 11c8:0167 / 11c8:0100 on the runtime, when there is one.
+  void play_audio(std::int32_t resource,
+                  std::uint16_t repeat,
+                  std::uint16_t priority,
+                  bool reserved_if_idle = false);
   void log_fire_menu(bool enabled);
   OriginalIdlePassContext idle_pass_context();
 
@@ -201,6 +242,7 @@ class Session : private OriginalIdlePassHost {
   void play_event_sounds(
       std::span<const OriginalEventSoundRequest> requests) override;
   void stop_all_audio(bool force) override;
+  void checkpoint(OriginalIdleCheckpoint) override;
   void fire_menu_enabled(bool enabled) override { log_fire_menu(enabled); }
   void idle_palette_changed() override;
   void rating_promoted_before_dialog(std::uint16_t rating) override;
@@ -233,6 +275,11 @@ class Session : private OriginalIdlePassHost {
   OriginalResources resources_;
   std::function<std::uint32_t()> clock_ms_;
   SessionFlags flags_;
+  // Declared after resources_ and clock_ms_, which it refers to, so it is
+  // destroyed (and stops its device) first.
+  std::unique_ptr<OriginalAudioRuntime> audio_{};
+  bool window_active_{true};   // Main/Elevator Control activation word
+  bool window_iconic_{false};  // IsIconic(Main)
 
   // validate_original_startup_data tables (load_original_startup_data).
   OriginalPartTable part_{};

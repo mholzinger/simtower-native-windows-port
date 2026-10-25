@@ -1,14 +1,26 @@
 // SDL3 frontend, first milestone: one window showing the main tower view,
 // driven by the same portable simulation and renderer as the Win32 host.
-// Menus, panels, dialogs, help, fonts, audio and file pickers come later.
+// Menus, panels, dialogs, help, fonts and file pickers come later.
 //
 // Usage:
 //   simtower_sdl [--pack FILE] [--open FILE.TDT] [--size WxH] [--slow]
-//                [--log-sounds]
+//                [--log-sounds] [--sound | --no-sound]
+//                [--audio-capture FILE.wav]
 //                [--headless-frame FILE.bmp [--passes N] [--view X,Y]]
 //                [--scenario none|busy|full] [--state-digest]
 //                [--digest-every K] [--trace-requests]
 //                [--event bomb|fire@PASS ...]
+//
+// Sound: the interactive window plays sound by default (--no-sound turns
+// it off); it also plays the startup WAVE/20000. Headless runs keep sound
+// OFF by default, so the regression oracle never changes. --sound turns it
+// on and plays through the SDL audio device (use SDL_AUDIO_DRIVER=dummy for
+// a silent run; device completion then follows wall time, so such runs are
+// not reproducible). --audio-capture FILE.wav selects headless mode, turns
+// sound on and replaces the SDL device with the deterministic capture
+// device: every voice the runtime starts is mixed on the virtual clock into
+// a 44100 Hz 16-bit mono WAV. Sound on changes the simulation (11c8:03ab's
+// ambient RNG draw), so digests then differ from sound-off runs by design.
 //
 // Regression oracle (headless only): --state-digest prints one stdout line
 // "digest <hex> ..." after the passes, --digest-every K one line every K
@@ -17,17 +29,22 @@
 // be below --passes); it may repeat.
 //
 // Headless mode (no window) is selected by any of --headless-frame,
-// --state-digest, --digest-every, --event, or --scenario other than none;
-// --headless-frame is then optional. No other flag selects it: without
-// those, --trace-requests or --log-sounds alone still open a window.
+// --state-digest, --digest-every, --event, --audio-capture, or --scenario
+// other than none; --headless-frame is then optional. No other flag selects
+// it: without those, --trace-requests, --log-sounds or --sound alone still
+// open a window.
 
+#include "sdl_audio.hpp"
 #include "sdl_session.hpp"
 
+#include "original_audio_capture.hpp"
+#include "original_resources.generated.hpp"
 #include "original_simulation.hpp"
 #include "original_tdt.hpp"
 #include "original_tdt_file.hpp"
 #include "original_time.hpp"
 #include "original_ui.hpp"
+#include "original_wave.hpp"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -39,6 +56,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -113,6 +131,10 @@ struct Options {
   int height{main_client_limits().initial_height};
   bool fast_mode{true};
   bool log_sounds{false};
+  // --sound / --no-sound; unset means the mode default (window on,
+  // headless off).
+  std::optional<bool> sound{};
+  std::optional<std::filesystem::path> audio_capture{};
   bool trace_requests{false};
   std::optional<std::filesystem::path> headless_frame{};
   int passes{200};
@@ -125,7 +147,11 @@ struct Options {
 
   [[nodiscard]] bool headless() const {
     return headless_frame || state_digest || digest_every > 0 ||
-           scenario != "none" || !events.empty();
+           scenario != "none" || !events.empty() || audio_capture;
+  }
+  [[nodiscard]] bool sound_enabled() const {
+    if (audio_capture) return true;
+    return sound.value_or(!headless());
   }
 };
 
@@ -133,7 +159,8 @@ struct Options {
   throw std::invalid_argument(
       message +
       "\nusage: simtower_sdl [--pack FILE] [--open FILE.TDT] [--size WxH]"
-      " [--slow] [--log-sounds]"
+      " [--slow] [--log-sounds] [--sound|--no-sound]"
+      " [--audio-capture FILE.wav]"
       " [--headless-frame FILE.bmp [--passes N] [--view X,Y]]"
       " [--scenario none|busy|full] [--state-digest] [--digest-every K]"
       " [--trace-requests] [--event bomb|fire@PASS ...]");
@@ -184,6 +211,12 @@ Options parse_options(int argc, char** argv) {
       options.fast_mode = false;
     } else if (argument == "--log-sounds") {
       options.log_sounds = true;
+    } else if (argument == "--sound") {
+      options.sound = true;
+    } else if (argument == "--no-sound") {
+      options.sound = false;
+    } else if (argument == "--audio-capture") {
+      options.audio_capture = value(index);
     } else if (argument == "--headless-frame") {
       options.headless_frame = value(index);
     } else if (argument == "--passes") {
@@ -209,6 +242,9 @@ Options parse_options(int argc, char** argv) {
     } else {
       usage_error("unknown option: " + std::string(argument));
     }
+  }
+  if (options.audio_capture && options.sound == false) {
+    usage_error("--audio-capture needs sound; drop --no-sound");
   }
   if (options.width <= 0 || options.height <= 0 || options.passes < 0) {
     usage_error("size and passes must be positive");
@@ -285,6 +321,150 @@ bool write_bmp(const simtower::OriginalWorldRaster& raster,
   return saved;
 }
 
+bool write_bytes(const std::filesystem::path& path,
+                 const std::vector<std::byte>& bytes) {
+  std::ofstream stream(path, std::ios::binary);
+  stream.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  return static_cast<bool>(stream);
+}
+
+// The WAVE resource ids whose PCM equals a captured buffer, in descriptor
+// order (several ids can share identical samples). Read from the pack,
+// never stored.
+std::vector<std::int32_t> matching_wave_ids(
+    const simtower::OriginalResources& resources,
+    const std::vector<std::byte>& samples) {
+  std::vector<std::int32_t> ids;
+  for (const auto& descriptor : simtower::generated::kResources) {
+    if (descriptor.type != "WAVE") continue;
+    const auto wave = simtower::parse_original_wave(
+        resources.find("WAVE", descriptor.numeric_id));
+    if (wave.logical_size != 0U &&
+        std::equal(wave.samples.begin(), wave.samples.end(), samples.begin(),
+                   samples.end())) {
+      ids.push_back(descriptor.numeric_id);
+    }
+  }
+  return ids;
+}
+
+std::string join_wave_ids(const std::vector<std::int32_t>& ids) {
+  if (ids.empty()) return "none";
+  std::string out;
+  for (const auto id : ids) {
+    out += (out.empty() ? "" : "/") + std::to_string(id);
+  }
+  return out;
+}
+
+// Writes --audio-capture and reports what was started. The first voice's
+// region is checked against its resource's PCM from the pack: every output
+// sample must be the zero-order-hold source frame as (u - 128) << 8 plus
+// whatever other voices overlap it.
+bool write_audio_capture(const Options& options,
+                         const simtower::sdl::Session& session,
+                         const simtower::OriginalAudioCaptureDevice& capture) {
+  const auto render = capture.render(44100U);
+  const auto& path = *options.audio_capture;
+  if (!write_bytes(path, simtower::OriginalAudioCaptureDevice::wav_file(render))) {
+    std::fprintf(stderr, "simtower_sdl: could not write %s\n",
+                 path.string().c_str());
+    return false;
+  }
+  const auto& submissions = capture.submissions();
+  std::map<std::string, std::size_t> by_resource;
+  std::size_t per_voice[2]{};
+  for (std::size_t index = 0; index < submissions.size(); ++index) {
+    const auto& submission = submissions[index];
+    const auto ids = join_wave_ids(
+        matching_wave_ids(session.resources(), submission.samples));
+    ++by_resource[ids];
+    ++per_voice[submission.voice];
+    if (!options.log_sounds) continue;
+    const auto [first, end] = render.regions[index];
+    std::string line =
+        "capture voice " + std::to_string(index) + " channel " +
+        std::to_string(submission.voice) + " resource " + ids + " at +" +
+        std::to_string(submission.start_ms - render.origin_ms) + " ms passes " +
+        std::to_string(submission.passes) + " samples [" +
+        std::to_string(first) + "," + std::to_string(end) + ")";
+    if (submission.stop_ms) {
+      line += " stop +" + std::to_string(*submission.stop_ms - render.origin_ms) +
+              " ms";
+    }
+    std::fprintf(stderr, "simtower_sdl: %s\n", line.c_str());
+  }
+  std::string tally;
+  for (const auto& [ids, count] : by_resource) {
+    tally += " " + ids + "=" + std::to_string(count);
+  }
+  std::fprintf(stderr,
+               "simtower_sdl: audio capture %s: voices started %zu (channel 0"
+               " %zu, channel 1 %zu); resources%s; origin %u ms; duration"
+               " %.3f s (%zu samples at %u Hz)\n",
+               path.string().c_str(), submissions.size(), per_voice[0],
+               per_voice[1], tally.c_str(), render.origin_ms,
+               static_cast<double>(render.samples.size()) / render.sample_rate,
+               render.samples.size(), render.sample_rate);
+  if (submissions.empty()) return true;
+
+  // First started voice versus its pack PCM.
+  const auto& first = submissions.front();
+  const auto [begin, end] = render.regions.front();
+  std::size_t overlapped = 0U;
+  for (std::size_t index = 1; index < submissions.size(); ++index) {
+    const auto [other_begin, other_end] = render.regions[index];
+    if (other_begin < end && other_end > begin) {
+      overlapped = std::max(overlapped, end - std::max(begin, other_begin));
+    }
+  }
+  const std::size_t clean_end = end - overlapped;
+  const auto first_ids = matching_wave_ids(session.resources(), first.samples);
+  if (first_ids.empty()) {
+    std::fprintf(stderr,
+                 "simtower_sdl: capture check: first voice (%zu bytes) matches"
+                 " no WAVE resource in the pack\n",
+                 first.samples.size());
+    return false;
+  }
+  const std::int32_t resource_id = first_ids.front();
+  const auto wave = simtower::parse_original_wave(
+      session.resources().find("WAVE", resource_id));
+  const simtower::OriginalPcmFormat format{
+      wave.format_tag, wave.channels, wave.samples_per_second,
+      wave.average_bytes_per_second, wave.block_align, wave.bits_per_sample};
+  const std::uint64_t frames =
+      wave.block_align == 0U ? 0U : wave.samples.size() / wave.block_align;
+  if (frames == 0U) {
+    std::fprintf(stderr,
+                 "simtower_sdl: capture check: first voice WAVE/%d has no"
+                 " whole frame (block_align %u, %zu bytes)\n",
+                 static_cast<int>(resource_id), wave.block_align,
+                 wave.samples.size());
+    return false;
+  }
+  std::size_t mismatches = 0U;
+  for (std::size_t at = begin; at < clean_end; ++at) {
+    const std::uint64_t source =
+        static_cast<std::uint64_t>(at - begin) * wave.samples_per_second /
+        render.sample_rate;
+    if (render.samples[at] !=
+        simtower::original_pcm_frame_s16(format, wave.samples,
+                                         static_cast<std::size_t>(source % frames))) {
+      ++mismatches;
+    }
+  }
+  std::fprintf(stderr,
+               "simtower_sdl: capture check: first voice WAVE/%d (%u Hz,"
+               " %zu bytes, %u passes) samples [%zu,%zu), %zu overlapped by"
+               " later voices, %zu compared, %zu mismatches\n",
+               static_cast<int>(resource_id), wave.samples_per_second,
+               wave.samples.size(), first.passes, begin, end, overlapped,
+               clean_end - begin, mismatches);
+  return mismatches == 0U;
+}
+
 int run_headless(const Options& options) {
   // A virtual clock makes every pass one full simulation frame: it advances
   // by the fast-mode host period (or the nominal six-tick gate when slow)
@@ -293,11 +473,23 @@ int run_headless(const Options& options) {
   const std::uint32_t pass_ms =
       options.fast_mode ? simtower::kNativeFastModeFramePeriodMs
                         : simtower::kOriginalSimulationGateNominalMs;
+  // Sound is off unless asked for. The devices outlive the session, whose
+  // runtime stops them on destruction.
+  std::optional<simtower::OriginalAudioCaptureDevice> capture;
+  std::optional<simtower::sdl::SdlAudioDevice> sdl_audio;
+  simtower::OriginalAudioDevice* audio_device = nullptr;
+  if (options.audio_capture) {
+    audio_device = &capture.emplace([&clock_ms] { return clock_ms; });
+  } else if (options.sound_enabled()) {
+    audio_device = &sdl_audio.emplace();
+  }
   simtower::sdl::Session session(read_file(options.pack),
                                  [&clock_ms] { return clock_ms; },
                                  {.fast_mode_enabled = options.fast_mode,
+                                  .sound_enabled = options.sound_enabled(),
                                   .log_sounds = options.log_sounds,
-                                  .trace_requests = options.trace_requests});
+                                  .trace_requests = options.trace_requests},
+                                 audio_device);
   session.resize(options.width, options.height);
   start_tower(session, options);
   if (options.scenario != "none") {
@@ -362,6 +554,7 @@ int run_headless(const Options& options) {
                    session.document()->post_elevator.finance.total_population),
                requests.dialogs, requests.sounds, requests.focus,
                requests.status, tally.c_str());
+  if (capture && !write_audio_capture(options, session, *capture)) return 1;
   if (!options.headless_frame) return 0;
 
   // Presentation only: no scheduler, palette or clock step.
@@ -416,6 +609,10 @@ class Window {
     return clamp_client(width, height);
   }
 
+  [[nodiscard]] SDL_WindowFlags flags() const {
+    return SDL_GetWindowFlags(window_);
+  }
+
   // Replaces draw_original_world_raster's SetDIBitsToDevice.
   void present(const simtower::OriginalWorldRaster& raster) {
     if (raster.width <= 0 || raster.height <= 0) return;
@@ -449,12 +646,38 @@ class Window {
   int texture_height_{};
 };
 
+// Main activation word and IsIconic for the idle-pass audio prelude.
+struct WindowActivation {
+  bool active{true};
+  bool iconic{false};
+};
+
+// The state the window opened in: one launched in the background has no
+// input focus and never receives FOCUS_LOST, so it must start inactive.
+WindowActivation initial_activation(SDL_WindowFlags flags) {
+  return {.active = (flags & SDL_WINDOW_INPUT_FOCUS) != 0U,
+          .iconic = (flags & SDL_WINDOW_MINIMIZED) != 0U};
+}
+
 // Returns false on quit.
 bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
-                  bool& expose) {
+                  bool& expose, WindowActivation& activation) {
   switch (event.type) {
     case SDL_EVENT_QUIT:
       return false;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+      activation.active = true;
+      break;
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+      activation.active = false;
+      break;
+    case SDL_EVENT_WINDOW_MINIMIZED:
+      activation.iconic = true;
+      break;
+    case SDL_EVENT_WINDOW_RESTORED:
+    case SDL_EVENT_WINDOW_MAXIMIZED:
+      activation.iconic = false;
+      break;
     case SDL_EVENT_WINDOW_RESIZED: {
       const auto [width, height] =
           clamp_client(event.window.data1, event.window.data2);
@@ -504,14 +727,23 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
 
 int run_window(const Options& options) {
   Window window(options);
+  // Declared after the window (SDL_Quit runs last) and before the session,
+  // whose audio runtime stops it on destruction.
+  std::optional<simtower::sdl::SdlAudioDevice> audio;
+  if (options.sound_enabled()) audio.emplace();
   simtower::sdl::Session session(
       read_file(options.pack),
       [] { return static_cast<std::uint32_t>(SDL_GetTicks()); },
       {.fast_mode_enabled = options.fast_mode,
-       .log_sounds = options.log_sounds});
+       .sound_enabled = options.sound_enabled(),
+       .log_sounds = options.log_sounds},
+      audio ? &*audio : nullptr);
   const auto [width, height] = window.client_size();
   session.resize(width, height);
+  // WinMain plays WAVE/20000 right before the new/load startup path.
+  session.play_startup_sound();
   start_tower(session, options);
+  WindowActivation activation = initial_activation(window.flags());
 
   // Replaces the PeekMessage busy loop (WinMain): wait for an event
   // or until the next pass has work, drain the queue, then run one idle pass.
@@ -521,12 +753,13 @@ int run_window(const Options& options) {
     SDL_Event event{};
     if (SDL_WaitEventTimeout(
             &event, static_cast<Sint32>(session.milliseconds_until_due()))) {
-      running = handle_event(event, session, expose);
+      running = handle_event(event, session, expose, activation);
       while (running && SDL_PollEvent(&event)) {
-        running = handle_event(event, session, expose);
+        running = handle_event(event, session, expose, activation);
       }
     }
     if (!running) break;
+    session.set_window_activation(activation.active, activation.iconic);
     if (session.run_idle_pass() || expose) window.present(session.main_raster());
   }
   return 0;
