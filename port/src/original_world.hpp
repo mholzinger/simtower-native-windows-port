@@ -4,8 +4,6 @@
 #include "original_tdt.hpp"
 #include "original_time.hpp"
 
-#include <windows.h>
-
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -232,13 +230,6 @@ step_original_sky_decorations(
 [[nodiscard]] OriginalLogicalPaletteEntries original_logical_palette_entries(
     const OriginalWorldPalette& palette) noexcept;
 
-// Exact 1020:0f4f allocation boundary after 1020:0e29. The temporary Win16
-// movable block is represented by fixed native storage, but LOGPALETTE
-// version 0x0300, count 0x0100, entry bytes, and CreatePalette call are
-// preserved. The returned object is owned by the caller and must be deleted.
-[[nodiscard]] HPALETTE create_original_logical_palette(
-    const OriginalWorldPalette& palette) noexcept;
-
 // DS:7772/77c2 and the persistent logical palette mutated by 1020:00cb.
 // Value ownership also replaces 1020:008f's GlobalUnlock/GlobalFree cleanup;
 // there is no palette allocation handle to release in the native port.
@@ -435,10 +426,5 @@ void composite_original_construction_preview(
     int view_x,
     int view_y,
     OriginalWorldRaster& raster);
-
-void draw_original_world_raster(HDC destination,
-                                const OriginalWorldRaster& raster,
-                                int x = 0,
-                                int y = 0);
 
 }  // namespace simtower

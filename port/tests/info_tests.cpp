@@ -5,6 +5,11 @@
 #include "original_resources.hpp"
 #include "original_tdt.hpp"
 
+#ifdef _WIN32
+#include "original_dib_win32.hpp"
+#include "original_info_win32.hpp"
+#endif
+
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +21,7 @@
 
 namespace {
 
+#ifdef _WIN32
 struct TestDibSurface {
   HDC dc{};
   HBITMAP bitmap{};
@@ -52,6 +58,7 @@ struct TestDibSurface {
   TestDibSurface(const TestDibSurface&) = delete;
   TestDibSurface& operator=(const TestDibSurface&) = delete;
 };
+#endif  // _WIN32
 
 std::vector<std::byte> read_file(const std::filesystem::path& path) {
   std::ifstream stream(path, std::ios::binary);
@@ -135,6 +142,7 @@ int main(int argc, char** argv) {
     assert(dib.bit_count == 8U);
   }
 
+#ifdef _WIN32
   {
     // Direct 1118:045d raster coverage. 1118:0ba4's 152x16 date field is
     // offset to client (151,13), filled with 0x999999, and leaves its
@@ -180,7 +188,9 @@ int main(int argc, char** argv) {
     }
     assert(weekend_red != 0U && weekend_dark != 0U);
   }
+#endif  // _WIN32
 
+#ifdef _WIN32
   {
     // Direct 1118:0044/0b67 and 1208:0a42 raster coverage. Ratings one through
     // five repaint only the five clipped 21x19 BITMAP/322-or-323 star cells at
@@ -219,7 +229,9 @@ int main(int argc, char** argv) {
     }
     assert(ordinary_changed && special_changed);
   }
+#endif  // _WIN32
 
+#ifdef _WIN32
   {
     // Direct 1118:0143 raster coverage: 1118:0bda's 70x14 balance rectangle
     // is offset by (10,8), filled with 0x999999, and receives right/baseline-
@@ -257,7 +269,9 @@ int main(int argc, char** argv) {
     }
     assert(changed_inside && positive_dark != 0U && negative_dark != 0U);
   }
+#endif  // _WIN32
 
+#ifdef _WIN32
   {
     // Direct 1118:026a raster coverage. 1118:0c0f supplies a 262x11 field at
     // (41,25); the painter offsets it by eight client pixels, fills 0xd9d9d9,
@@ -293,7 +307,9 @@ int main(int argc, char** argv) {
     }
     assert(changed_inside && dark_pixels != 0U);
   }
+#endif  // _WIN32
 
+#ifdef _WIN32
   {
     // Direct 1118:0368 raster coverage. 1118:0c44 supplies the 86x14 field at
     // client [337,423)x[31,45); population text is right-aligned by its
@@ -330,7 +346,9 @@ int main(int argc, char** argv) {
     }
     assert(changed_inside && one_dark != 0U && many_dark != 0U);
   }
+#endif  // _WIN32
 
+#ifdef _WIN32
   {
     // Direct 1118:073d/0c79/0cad and 1208:0d35 raster coverage. The retained
     // 31x31 clock face is presented at client [5,36)x[13,44); changing only
@@ -362,6 +380,7 @@ int main(int argc, char** argv) {
     }
     assert(changed_inside);
   }
+#endif  // _WIN32
 
   for (const int id : {500, 501}) {
     const auto dib = simtower::original_dib_view(
@@ -391,6 +410,7 @@ int main(int argc, char** argv) {
              {165, 283, 246, 297}, {165, 300, 246, 314},
          }));
 
+#ifdef _WIN32
   // The partial DIB path used for the Finance pressed state must preserve
   // every BITMAP/500 pixel outside DTMP rectangle one and reproduce the same
   // BITMAP/501 pixels inside it. This is a memory-DC test; no window opens.
@@ -429,6 +449,7 @@ int main(int argc, char** argv) {
     }
   }
   assert(finance_button_changed);
+#endif  // _WIN32
 
   // Direct 1118:0ce7 coverage: values outside 10..19 use signed IDIV by ten
   // and select STRL/713 entries 11..13 only for positive remainders 1..3;

@@ -52,7 +52,7 @@ class IndexedDib {
     const auto index = std::to_integer<std::uint8_t>(
         view_.pixels[static_cast<std::size_t>(source_y) * row_bytes_ +
                      static_cast<std::size_t>(x)]);
-    const RGBQUAD color = view_.info->bmiColors[index];
+    const OriginalRgbQuad color = view_.info->bmiColors[index];
     return (static_cast<std::uint32_t>(color.rgbRed) << 16U) |
            (static_cast<std::uint32_t>(color.rgbGreen) << 8U) |
            static_cast<std::uint32_t>(color.rgbBlue);
@@ -358,31 +358,6 @@ OriginalCommandRaster render_original_command_selector(
                 0, static_cast<int>(index) * 32, raster);
   }
   return raster;
-}
-
-void draw_original_command_raster(HDC destination,
-                                  const OriginalCommandRaster& raster,
-                                  int x,
-                                  int y) {
-  if (!destination || raster.width <= 0 || raster.height <= 0 ||
-      raster.pixels.empty()) {
-    return;
-  }
-  BITMAPINFO info{};
-  info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-  info.bmiHeader.biWidth = raster.width;
-  info.bmiHeader.biHeight = -raster.height;
-  info.bmiHeader.biPlanes = 1;
-  info.bmiHeader.biBitCount = 32;
-  info.bmiHeader.biCompression = BI_RGB;
-  const int result = SetDIBitsToDevice(
-      destination, x, y, static_cast<DWORD>(raster.width),
-      static_cast<DWORD>(raster.height), 0, 0, 0,
-      static_cast<UINT>(raster.height), raster.pixels.data(), &info,
-      DIB_RGB_COLORS);
-  if (result == 0) {
-    throw std::runtime_error("SetDIBitsToDevice failed for original command palette");
-  }
 }
 
 }  // namespace simtower

@@ -3,8 +3,6 @@
 #include "original_dtmp.hpp"
 #include "original_resources.hpp"
 
-#include <windows.h>
-
 namespace simtower {
 
 struct OriginalDtmpWindowSize {
@@ -40,21 +38,5 @@ original_dtmp_configuration_plan(const OriginalDtmp& dtmp) noexcept {
   }
   return {false, true, true, dtmp.width_or_header != 0U};
 }
-
-void configure_original_dtmp_window(HWND dialog,
-                                    const OriginalDtmp& dtmp,
-                                    const OriginalResources& resources,
-                                    HPALETTE logical_palette);
-
-void render_original_dtmp(HWND dialog,
-                          HDC destination,
-                          const OriginalDtmp& dtmp,
-                          const OriginalResources& resources);
-
-// Exact native GDI translation of the dialog-frame path at 1068:0567 and
-// its two recovered bevel routines at 11e0:06d9/0950.
-void paint_original_dialog_chrome(HWND dialog,
-                                  HDC destination,
-                                  const OriginalDtmp& dtmp);
 
 }  // namespace simtower

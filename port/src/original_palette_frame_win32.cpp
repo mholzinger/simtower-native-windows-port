@@ -1,4 +1,4 @@
-#include "original_palette_frame.hpp"
+#include "original_palette_frame_win32.hpp"
 
 #include <stdexcept>
 

@@ -1,7 +1,5 @@
 #include "original_dialog.hpp"
 
-#include <windows.h>
-
 #include <bit>
 #include <stdexcept>
 #include <string>
@@ -90,63 +88,6 @@ OriginalDialogValue read_value(Reader& reader, bool predefined_class = false) {
           reader.cstring(first, true), 0};
 }
 
-std::wstring cp1252_to_wide(std::string_view text) {
-  if (text.empty()) {
-    return {};
-  }
-  const int count = MultiByteToWideChar(
-      1252, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
-  if (count <= 0) {
-    throw std::runtime_error("Could not decode original dialog CP1252 text");
-  }
-  std::wstring result(static_cast<std::size_t>(count), L'\0');
-  MultiByteToWideChar(1252, 0, text.data(), static_cast<int>(text.size()),
-                      result.data(), count);
-  return result;
-}
-
-class TemplateWriter {
- public:
-  void align4() {
-    while (data_.size() % 4U) {
-      data_.push_back(std::byte{0});
-    }
-  }
-  void u16(std::uint16_t value) {
-    data_.push_back(static_cast<std::byte>(value & 0xFFU));
-    data_.push_back(static_cast<std::byte>(value >> 8U));
-  }
-  void i16(std::int16_t value) { u16(static_cast<std::uint16_t>(value)); }
-  void u32(std::uint32_t value) {
-    u16(static_cast<std::uint16_t>(value & 0xFFFFU));
-    u16(static_cast<std::uint16_t>(value >> 16U));
-  }
-  void wide(std::string_view text) {
-    for (const wchar_t character : cp1252_to_wide(text)) {
-      u16(static_cast<std::uint16_t>(character));
-    }
-    u16(0);
-  }
-  void value(const OriginalDialogValue& value) {
-    switch (value.kind) {
-      case OriginalDialogValue::Kind::none:
-        u16(0);
-        break;
-      case OriginalDialogValue::Kind::text:
-        wide(value.text);
-        break;
-      case OriginalDialogValue::Kind::ordinal:
-        u16(0xFFFFU);
-        u16(value.ordinal);
-        break;
-    }
-  }
-  [[nodiscard]] std::vector<std::byte> finish() && { return std::move(data_); }
-
- private:
-  std::vector<std::byte> data_;
-};
-
 }  // namespace
 
 OriginalDialogScreenPosition original_dialog_center_position(
@@ -180,7 +121,7 @@ OriginalDialog parse_original_dialog(std::span<const std::byte> resource) {
   result.menu = read_value(reader);
   result.window_class = read_value(reader);
   result.caption = read_value(reader);
-  if ((result.style & DS_SETFONT) != 0U) {
+  if ((result.style & kOriginalDialogStyleSetFont) != 0U) {
     result.font_point_size = reader.u16();
     result.font_face = reader.cstring();
   }
@@ -205,7 +146,7 @@ OriginalDialog parse_original_dialog(std::span<const std::byte> resource) {
 void apply_original_dialog_font_point_size(
     OriginalDialog& dialog,
     std::uint16_t point_size) noexcept {
-  dialog.style |= DS_SETFONT;
+  dialog.style |= kOriginalDialogStyleSetFont;
   dialog.font_point_size = point_size;
 }
 
@@ -307,44 +248,6 @@ OriginalDialogScreenPosition original_dialog_screen_position(
     top = original_dialog_subtract(desktop_bottom, height);
   }
   return {left, top};
-}
-
-std::vector<std::byte> build_native_dialog_template(
-    const OriginalDialog& dialog) {
-  if (dialog.items.size() > 0xFFFFU) {
-    throw std::runtime_error("Original dialog contains too many items");
-  }
-
-  TemplateWriter writer;
-  writer.u32(dialog.style);
-  writer.u32(0);  // no Win16 extended-style field exists
-  writer.u16(static_cast<std::uint16_t>(dialog.items.size()));
-  writer.i16(dialog.x);
-  writer.i16(dialog.y);
-  writer.i16(dialog.width);
-  writer.i16(dialog.height);
-  writer.value(dialog.menu);
-  writer.value(dialog.window_class);
-  writer.value(dialog.caption);
-  if ((dialog.style & DS_SETFONT) != 0U) {
-    writer.u16(dialog.font_point_size);
-    writer.wide(dialog.font_face);
-  }
-
-  for (const auto& item : dialog.items) {
-    writer.align4();
-    writer.u32(item.style);
-    writer.u32(0);
-    writer.i16(item.x);
-    writer.i16(item.y);
-    writer.i16(item.width);
-    writer.i16(item.height);
-    writer.u16(item.id);
-    writer.value(item.window_class);
-    writer.value(item.text);
-    writer.u16(0);  // every supplied Win16 item has zero creation bytes
-  }
-  return std::move(writer).finish();
 }
 
 std::optional<std::uint16_t> original_facility_information_dialog_id(

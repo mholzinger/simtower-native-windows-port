@@ -5,7 +5,11 @@
 #include "original_tables.hpp"
 #include "original_tdt.hpp"
 
+#ifdef _WIN32
+#include "original_dib_win32.hpp"
+#include "original_information_win32.hpp"
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -140,6 +144,7 @@ simtower::OriginalTdtDocument make_person_tower() {
   return tower;
 }
 
+#ifdef _WIN32
 struct TestDibSurface {
   HDC dc{};
   HBITMAP bitmap{};
@@ -170,6 +175,7 @@ struct TestDibSurface {
     if (dc) DeleteDC(dc);
   }
 };
+#endif  // _WIN32
 
 }  // namespace
 
@@ -376,6 +382,7 @@ int main(int argc, char** argv) {
            (Destination{10, 20, 210, 120}));
   }
 
+#ifdef _WIN32
   {
     // Direct 1100:4439 presentation coverage: fill the entire DTMP item-2
     // rectangle with exact 0xcccccc gray, center a COLORONCOLOR 200% stretch
@@ -437,6 +444,7 @@ int main(int argc, char** argv) {
     assert(DeleteObject(target));
     assert(DeleteDC(dc));
   }
+#endif  // _WIN32
 
   assert(argc == 2);
   const auto pack = read_file(argv[1]);
@@ -2134,6 +2142,7 @@ int main(int argc, char** argv) {
         resources.find("BITMAP", id));
     assert(dib.width == 96 && dib.height == 24 && dib.bit_count == 8U);
   }
+#ifdef _WIN32
   TestDibSurface portrait(16, 47);
   std::fill_n(portrait.pixels, 16U * 47U, 0x00abcdefU);
   simtower::draw_original_dib_region_scaled(
@@ -2143,5 +2152,6 @@ int main(int argc, char** argv) {
                      [](std::uint32_t pixel) {
                        return pixel != 0x00abcdefU;
                      }));
+#endif  // _WIN32
   return 0;
 }

@@ -3,8 +3,6 @@
 #include "original_palette_frame.hpp"
 #include "original_resources.hpp"
 
-#include <windows.h>
-
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -233,27 +231,6 @@ struct OriginalMainShutdownPlan {
   }
   return {true, true, true, false, false, false, 1};
 }
-
-// Native equivalents of the original Win16 MENU/ACCELERATOR/GROUP_ICON
-// resource consumers. The input remains the exact bytes embedded in the NE.
-[[nodiscard]] HMENU create_original_menu(std::span<const std::byte> resource);
-[[nodiscard]] HACCEL create_original_accelerators(
-    std::span<const std::byte> resource);
-[[nodiscard]] HICON create_original_icon(const OriginalResources& resources,
-                                          std::string_view group_name);
-
-// Exact 1208:05a9 auxiliary-surface clearing wrapper. The Win16 routine
-// creates a temporary COLORREF 0x00ffffff solid brush, fills the caller's
-// complete rectangle, and deletes that brush before returning.
-void fill_original_white_rect(HDC dc, const RECT& rectangle) noexcept;
-
-// Exact custom-cursor resource path initialized by 11e0:0cfb. Win16
-// GROUP_CURSOR entries use WORD width/height fields and point at one of the
-// four CURSOR resources; the returned Win32 cursor owns the same image and
-// hotspot and must be released with DestroyCursor.
-[[nodiscard]] HCURSOR create_original_cursor(
-    const OriginalResources& resources,
-    std::uint16_t group_id);
 
 // Exact main-client selector at 1258:0505 followed by the system/custom
 // dispatch at 11e0:0d80. Values 0 and 1000 are the Win16 Arrow and vertical
@@ -1288,15 +1265,6 @@ inline constexpr std::array<std::uint16_t, 10>
         0x0086U, 0x0111U, 0x0201U, 0x030fU, 0x0311U,
     };
 
-// The active, non-modal WM_ACTIVATE paths at CMDBTNWNDPROC 1050:008d,
-// INFOWNDPROC 1120:007d, and MAPWNDPROC 1168:009f call GetClientRect and then
-// overwrite only RECT.bottom with the literal 8 before ValidateRect. Thus the
-// title strip is validated while any pending content-area update survives.
-[[nodiscard]] constexpr RECT original_palette_activation_validation_rect(
-    RECT client) noexcept {
-  client.bottom = kOriginalPaletteFrameHeight;
-  return client;
-}
 inline constexpr std::array<std::uint16_t, 13>
     kOriginalMapWindowMessages = {
         0x0001U, 0x0002U, 0x0006U, 0x000fU, 0x001cU,

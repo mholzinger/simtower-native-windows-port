@@ -4,6 +4,10 @@
 #include "original_resources.hpp"
 #include "original_tables.hpp"
 
+#ifdef _WIN32
+#include "original_palette_frame_win32.hpp"
+#endif
+
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -40,7 +44,7 @@ std::uint32_t dib_pixel(std::span<const std::byte> resource, int x, int y) {
   const int source_y = dib.height > 0 ? height - 1 - y : y;
   const auto index = std::to_integer<std::uint8_t>(
       dib.pixels[static_cast<std::size_t>(source_y) * row_bytes + x]);
-  const RGBQUAD color = dib.info->bmiColors[index];
+  const simtower::OriginalRgbQuad color = dib.info->bmiColors[index];
   return (static_cast<std::uint32_t>(color.rgbRed) << 16U) |
          (static_cast<std::uint32_t>(color.rgbGreen) << 8U) |
          static_cast<std::uint32_t>(color.rgbBlue);
@@ -131,6 +135,7 @@ int main(int argc, char** argv) {
   // 1078:00c6 is called synchronously by CMDBTNWNDPROC 1050:00f8,
   // INFOWNDPROC 1120:00a5, and MAPWNDPROC 1168:00c7. Verify its exact
   // eight-pixel active/inactive raster in a memory DC—no window is created.
+#ifdef _WIN32
   {
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -162,6 +167,7 @@ int main(int argc, char** argv) {
     DeleteDC(dc);
     DeleteObject(bitmap);
   }
+#endif  // _WIN32
 
   assert(argc == 2);
   const auto pack = read_file(argv[1]);

@@ -4,8 +4,6 @@
 #include "original_tdt.hpp"
 #include "original_time.hpp"
 
-#include <windows.h>
-
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -110,13 +108,5 @@ struct OriginalInfoStatusState {
     const OriginalResources& resources,
     const OriginalTdtDocument* document,
     std::string_view status = {});
-
-// Native GDI presentation of the exact BITMAP/320..323/327 resource artwork
-// and the original live-text/clock overlays. The shared palette-window frame
-// occupies client rows 0..7; this routine paints the 1120:0215 content path.
-void draw_original_info(HDC destination,
-                        const OriginalResources& resources,
-                        const OriginalTdtDocument* document,
-                        std::string_view status = {});
 
 }  // namespace simtower
