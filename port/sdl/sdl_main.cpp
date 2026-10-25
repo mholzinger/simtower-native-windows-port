@@ -6,6 +6,20 @@
 //   simtower_sdl [--pack FILE] [--open FILE.TDT] [--size WxH] [--slow]
 //                [--log-sounds]
 //                [--headless-frame FILE.bmp [--passes N] [--view X,Y]]
+//                [--scenario none|busy|full] [--state-digest]
+//                [--digest-every K] [--trace-requests]
+//                [--event bomb|fire@PASS ...]
+//
+// Regression oracle (headless only): --state-digest prints one stdout line
+// "digest <hex> ..." after the passes, --digest-every K one line every K
+// passes. --scenario stages a deterministic test tower after New. --event
+// runs the hidden Bomb or Fire menu command before pass PASS (0-based, must
+// be below --passes); it may repeat.
+//
+// Headless mode (no window) is selected by any of --headless-frame,
+// --state-digest, --digest-every, --event, or --scenario other than none;
+// --headless-frame is then optional. No other flag selects it: without
+// those, --trace-requests or --log-sounds alone still open a window.
 
 #include "sdl_session.hpp"
 
@@ -99,9 +113,20 @@ struct Options {
   int height{main_client_limits().initial_height};
   bool fast_mode{true};
   bool log_sounds{false};
+  bool trace_requests{false};
   std::optional<std::filesystem::path> headless_frame{};
   int passes{200};
   std::optional<simtower::OriginalWorldPoint> view{};
+  std::string scenario{"none"};
+  bool state_digest{false};
+  int digest_every{0};
+  // --event NAME@PASS: run Session::trigger_event before that pass.
+  std::vector<std::pair<std::string, int>> events{};
+
+  [[nodiscard]] bool headless() const {
+    return headless_frame || state_digest || digest_every > 0 ||
+           scenario != "none" || !events.empty();
+  }
 };
 
 [[noreturn]] void usage_error(const std::string& message) {
@@ -109,7 +134,9 @@ struct Options {
       message +
       "\nusage: simtower_sdl [--pack FILE] [--open FILE.TDT] [--size WxH]"
       " [--slow] [--log-sounds]"
-      " [--headless-frame FILE.bmp [--passes N] [--view X,Y]]");
+      " [--headless-frame FILE.bmp [--passes N] [--view X,Y]]"
+      " [--scenario none|busy|full] [--state-digest] [--digest-every K]"
+      " [--trace-requests] [--event bomb|fire@PASS ...]");
 }
 
 // Parses "AxB" or "A,B" into two integers.
@@ -161,6 +188,21 @@ Options parse_options(int argc, char** argv) {
       options.headless_frame = value(index);
     } else if (argument == "--passes") {
       options.passes = parse_count(value(index));
+    } else if (argument == "--scenario") {
+      options.scenario = value(index);
+    } else if (argument == "--trace-requests") {
+      options.trace_requests = true;
+    } else if (argument == "--state-digest") {
+      options.state_digest = true;
+    } else if (argument == "--digest-every") {
+      options.digest_every = parse_count(value(index));
+      if (options.digest_every <= 0) usage_error("--digest-every must be > 0");
+    } else if (argument == "--event") {
+      const std::string text(value(index));
+      const auto at = text.find('@');
+      if (at == std::string::npos) usage_error("bad event: " + text);
+      options.events.emplace_back(text.substr(0, at),
+                                  parse_count(text.substr(at + 1)));
     } else if (argument == "--view") {
       const auto [x, y] = parse_pair(value(index), ',');
       options.view = simtower::OriginalWorldPoint{x, y};
@@ -170,6 +212,15 @@ Options parse_options(int argc, char** argv) {
   }
   if (options.width <= 0 || options.height <= 0 || options.passes < 0) {
     usage_error("size and passes must be positive");
+  }
+  for (const auto& [name, at_pass] : options.events) {
+    if (name != "bomb" && name != "fire") {
+      usage_error("unknown event: " + name + " (expected bomb or fire)");
+    }
+    if (at_pass < 0 || at_pass >= options.passes) {
+      usage_error("event " + name + "@" + std::to_string(at_pass) +
+                  " is outside --passes " + std::to_string(options.passes));
+    }
   }
   const auto [width, height] = clamp_client(options.width, options.height);
   if (width != options.width || height != options.height) {
@@ -205,7 +256,7 @@ std::vector<std::byte> read_file(const std::filesystem::path& path) {
 }
 
 // New, or Open with the Win32 host's fall-back to New on a load failure
-// (load_original_tower_from_path, N:3735-3742).
+// (load_original_tower_from_path).
 void start_tower(simtower::sdl::Session& session, const Options& options) {
   if (options.view) session.restore_view(options.view->x, options.view->y);
   if (options.open) {
@@ -245,16 +296,76 @@ int run_headless(const Options& options) {
   simtower::sdl::Session session(read_file(options.pack),
                                  [&clock_ms] { return clock_ms; },
                                  {.fast_mode_enabled = options.fast_mode,
-                                  .log_sounds = options.log_sounds});
+                                  .log_sounds = options.log_sounds,
+                                  .trace_requests = options.trace_requests});
   session.resize(options.width, options.height);
   start_tower(session, options);
+  if (options.scenario != "none") {
+    if (options.open) usage_error("--scenario builds on New, not --open");
+    const auto summary = session.apply_scenario(options.scenario);
+    std::string built;
+    for (const auto& [type, count] : summary.built_by_type) {
+      built += " " + simtower::sdl::scenario_type_name(type) + "=" +
+               std::to_string(count);
+    }
+    std::fprintf(stderr,
+                 "simtower_sdl: scenario %s built:%s; extra cars %zu, shaft"
+                 " extensions %zu, rating dialogs %zu, balance %d\n",
+                 options.scenario.c_str(), built.c_str(),
+                 summary.elevator_cars, summary.shaft_extensions,
+                 summary.rating_dialogs,
+                 static_cast<int>(summary.balance_after));
+  }
+  const auto print_digest = [&session](int pass) {
+    const auto digest = session.state_digest();
+    std::printf("digest %016llx pass %d tower %016llx process %016llx"
+                " host %016llx requests %016llx\n",
+                static_cast<unsigned long long>(digest.combined), pass,
+                static_cast<unsigned long long>(digest.tower),
+                static_cast<unsigned long long>(digest.process),
+                static_cast<unsigned long long>(digest.host),
+                static_cast<unsigned long long>(digest.requests));
+  };
   for (int pass = 0; pass < options.passes; ++pass) {
+    for (const auto& [name, at_pass] : options.events) {
+      if (at_pass != pass) continue;
+      const bool started = session.trigger_event(name);
+      std::fprintf(stderr, "simtower_sdl: event %s before pass %d: %s\n",
+                   name.c_str(), pass, started ? "started" : "not offered");
+    }
     clock_ms += pass_ms;
     (void)session.run_idle_pass();
+    if (options.digest_every > 0 && (pass + 1) % options.digest_every == 0) {
+      print_digest(pass + 1);
+    }
   }
+  // Taken before the presentation step below, which may rebuild the backing.
+  if (options.state_digest) print_digest(options.passes);
+  std::fflush(stdout);
+
+  const auto& header = session.document()->header;
+  const auto& requests = session.host_requests();
+  std::string tally;
+  for (const auto& [key, count] : session.request_tally()) {
+    tally += "; " + key + " " + std::to_string(count);
+  }
+  std::fprintf(stderr,
+               "simtower_sdl: after %d passes: frame_time %u day %d rating %u"
+               " balance %d people records %u population %d; logged dialogs"
+               " %zu sounds %zu focus %zu status %zu%s\n",
+               options.passes, static_cast<unsigned>(header.frame_time),
+               static_cast<int>(header.current_day),
+               static_cast<unsigned>(header.rating),
+               static_cast<int>(header.balance),
+               static_cast<unsigned>(session.document()->people_count),
+               static_cast<int>(
+                   session.document()->post_elevator.finance.total_population),
+               requests.dialogs, requests.sounds, requests.focus,
+               requests.status, tally.c_str());
+  if (!options.headless_frame) return 0;
+
   // Presentation only: no scheduler, palette or clock step.
   session.present();
-
   const auto& raster = session.main_raster();
   if (!write_bmp(raster, *options.headless_frame)) {
     std::fprintf(stderr, "simtower_sdl: could not write %s: %s\n",
@@ -262,17 +373,9 @@ int run_headless(const Options& options) {
     return 1;
   }
   const auto& view = session.viewport();
-  const auto& header = session.document()->header;
-  const auto& requests = session.host_requests();
-  std::fprintf(stderr,
-               "simtower_sdl: wrote %s (%dx%d) view %d,%d after %d passes;"
-               " frame_time %u day %d; logged dialogs %zu sounds %zu"
-               " focus %zu status %zu\n",
+  std::fprintf(stderr, "simtower_sdl: wrote %s (%dx%d) view %d,%d\n",
                options.headless_frame->string().c_str(), raster.width,
-               raster.height, view.x, view.y, options.passes,
-               static_cast<unsigned>(header.frame_time),
-               static_cast<int>(header.current_day), requests.dialogs,
-               requests.sounds, requests.focus, requests.status);
+               raster.height, view.x, view.y);
   return 0;
 }
 
@@ -365,7 +468,7 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
       // SDL-only stand-ins for the Main scrollbars, which this frontend
       // does not draw yet. MAINWNDPROC has no WM_KEYDOWN or WM_MOUSEWHEEL
       // scrolling: only WM_HSCROLL/WM_VSCROLL reach scroll_original
-      // (N:9536-9549). The bindings are new input, but they send the Win16
+      // (main_window_proc). The bindings are new input, but they send the Win16
       // scrollbar codes (0/1 line up/down, 2/3 page up/down) through the same
       // original_main_scroll_request_position path.
       switch (event.key.key) {
@@ -410,7 +513,7 @@ int run_window(const Options& options) {
   session.resize(width, height);
   start_tower(session, options);
 
-  // Replaces the PeekMessage busy loop (N:9932-9975): wait for an event
+  // Replaces the PeekMessage busy loop (WinMain): wait for an event
   // or until the next pass has work, drain the queue, then run one idle pass.
   bool running = true;
   while (running) {
@@ -434,8 +537,7 @@ int run_window(const Options& options) {
 int main(int argc, char** argv) {
   try {
     const auto options = parse_options(argc, argv);
-    return options.headless_frame ? run_headless(options)
-                                  : run_window(options);
+    return options.headless() ? run_headless(options) : run_window(options);
   } catch (const std::exception& error) {
     std::fprintf(stderr, "simtower_sdl: %s\n", error.what());
     return 1;
