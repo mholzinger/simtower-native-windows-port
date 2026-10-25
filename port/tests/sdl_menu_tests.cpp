@@ -2,7 +2,7 @@
 // on TOWER_MENU from the pack, after WM_CREATE's ops: mouse picks
 // (including the Options > Sound cascade), grayed items, presses outside,
 // keyboard navigation and mnemonics, the drawn highlight and border, and
-// the caption's active and inactive (Win3.1 white / black) colours.
+// the caption's active and inactive (Windows grey / light grey) colours.
 // No SDL calls.
 //
 // Usage: simtower_sdl_menu_tests <original_resources.pack>
@@ -214,15 +214,16 @@ int main(int argc, char** argv) {
   assert(title_pixels(raster, 0x00000000U) == 0);
   {
     // Inactive (a palette, Elevator Control or a modal is active): the
-    // Win3.1 COLOR_INACTIVECAPTION white with a black title; no navy left.
+    // grey COLOR_INACTIVECAPTION with a light grey title (owner decision
+    // 2026-10-24); no navy left.
     OriginalWorldRaster inactive = raster;
     draw_main_caption_and_menu_bar(inactive, menu, layout, view,
                                    "SimTower - untitled", false);
     assert(inactive.pixels[static_cast<std::size_t>(caption_y + 2) *
                                inactive.width +
                            caption_x + metrics.caption_height + 2] ==
-           0x00FFFFFFU);
-    assert(title_pixels(inactive, 0x00000000U) ==
+           0x00808080U);
+    assert(title_pixels(inactive, 0x00C0C0C0U) ==
            title_pixels(raster, 0x00FFFFFFU));
     assert(title_pixels(inactive, 0x00000080U) == 0);
     // The menu strip does not depend on the caption's state.
