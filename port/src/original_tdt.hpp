@@ -276,16 +276,31 @@ struct OriginalTdtDocument {
   // responder moves immediate. Event start/load reset it to zero and it is
   // deliberately absent from the TDT byte stream.
   bool security_event_accelerated{};
-  // Process-local words set by Hotel checkout 1178:0eac. DS:31b8 controls
-  // the exact even/eighth checkout cadence in DS:02aa; DS:779e is raised by
-  // every checkout. None is serialized in TDT.
+  // Process-local words. Hotel checkout 1178:0eac counts checkouts in
+  // DS:31b8, which selects the exact even/eighth cash-sound cadence in
+  // DS:02aa. DS:779e is the general balance-changed latch: every balance
+  // writer raises it (see mark_original_balance_changed) and 1090:0696 drains
+  // it through 1118:0143. None is serialized in TDT.
   std::uint16_t hotel_checkout_count{};
   bool hotel_checkout_effect_cadence{};
-  bool hotel_checkout_effect_active{};
+  bool balance_changed_effect_active{};
   // Process-local 7 * 0x16-byte table behind DS:dd68 (1170:06f7). Native
   // ownership replaces 1170:0014/1170:004e's GlobalAlloc/GlobalFree wrappers.
   std::array<std::byte, kOriginalMedicalRouteIndexBytes> medical_route_index{};
 };
+
+// DS:779e. The 1178 balance helpers (construction 01db/027c/0697/0703, other
+// spending 07e8, income 076f/126c, rent 0854/08ec, maintenance 097c/09ee/0a6a)
+// raise it only after a nonzero change to DS:b3ce. Elevator purchase
+// 11f8:0fea (at 11f8:11f2) and Hotel checkout 1178:0eac (at 1178:0f55) raise
+// it unconditionally; pass `unconditional` for those paths.
+inline void mark_original_balance_changed(OriginalTdtDocument& document,
+                                          std::int64_t amount,
+                                          bool unconditional = false) noexcept {
+  if (unconditional || amount != 0) {
+    document.balance_changed_effect_active = true;
+  }
+}
 
 // Preserve the process-global Microsoft C runtime RNG state when New/Open
 // replaces the native document model. Static call-graph recovery shows that

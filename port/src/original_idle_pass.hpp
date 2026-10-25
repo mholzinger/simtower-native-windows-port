@@ -161,6 +161,9 @@ class OriginalIdlePassHost : public OriginalHostServices {
   virtual void bomb_ransom_paid() {}
   virtual void rating_promoted_before_dialog(std::uint16_t /*rating*/) {}
   virtual void rating_promoted_after_dialog(std::uint16_t /*rating*/) {}
+  // The Cathedral's rating-six promotion 1140:00a8, after its 1148:003d
+  // modal: 1140:010d(1) Command refresh and the 1118:0044 Info repaint.
+  virtual void cathedral_rating_promoted() {}
   virtual void map_cadence_refresh() {}  // 1090:046f 1080:09c3
   virtual void restore_preview() {}      // 1090:04a7 11f8:3b94
   // 1090:0580 renderer and 1090:05ee outline. Returns whether the

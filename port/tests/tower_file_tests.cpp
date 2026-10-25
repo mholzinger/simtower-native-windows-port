@@ -32,6 +32,7 @@ class RecordingHost final : public OriginalTowerFileHost {
   std::deque<std::optional<std::filesystem::path>> picks{};
   bool replace_answer{true};
   int transition_answer{2};
+  bool file_name_only{false};
 
   void log(std::string text) { calls.push_back(std::move(text)); }
 
@@ -61,6 +62,9 @@ class RecordingHost final : public OriginalTowerFileHost {
   }
   [[nodiscard]] std::wstring_view path_separators() const override {
     return L"\\/";
+  }
+  [[nodiscard]] bool basename_rule_uses_file_name_only() const override {
+    return file_name_only;
   }
   bool confirm_replace(const std::filesystem::path&) override {
     log("replace?");
@@ -142,6 +146,27 @@ int main() {
         "save as retry");
   assert(std::filesystem::exists(saved));
   assert(host.path == saved);
+  // The original measures to the first dot in the whole path, so under a
+  // dotted directory a nine-character name passes; the file-name-only rule
+  // used off Windows rejects it and reopens the sheet.
+  const auto dotted = directory / "my.dir";
+  std::filesystem::create_directories(dotted);
+  host.picks = {dotted / "LONGERNAME.TDT"};
+  check(host, save_original_tower_as(host), true,
+        {"begin", "pick save", "view", "commit LONGERNAME.TDT", "end"},
+        "dotted directory, whole-path rule");
+  host.file_name_only = true;
+  host.picks = {dotted / "LONGERNAME.TDT", dotted / "TOWER.TDT"};
+  check(host, save_original_tower_as(host), true,
+        {"begin", "pick save", "invalid", "begin", "pick save", "view",
+         "commit TOWER.TDT", "end"},
+        "dotted directory, file-name-only rule");
+  host.file_name_only = false;
+  host.picks = {saved};
+  host.replace_answer = true;
+  check(host, save_original_tower_as(host), true,
+        {"begin", "pick save", "replace?", "view", "commit TOWER.TDT", "end"},
+        "back to the main save");
   // Save As onto an existing file asks; No keeps it and writes nothing.
   host.picks = {saved};
   host.replace_answer = false;
