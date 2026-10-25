@@ -7,6 +7,20 @@
 namespace simtower {
 
 static_assert(kOriginalDialogStyleSetFont == DS_SETFONT);
+static_assert(kOriginalWindowStyleChild == WS_CHILD);
+static_assert(kOriginalWindowStyleVisible == WS_VISIBLE);
+static_assert(kOriginalWindowStyleDisabled == WS_DISABLED);
+static_assert(kOriginalWindowStyleTabStop == WS_TABSTOP);
+static_assert(kOriginalButtonTypeMask == BS_TYPEMASK);
+static_assert(kOriginalButtonPushButton == BS_PUSHBUTTON);
+static_assert(kOriginalButtonDefPushButton == BS_DEFPUSHBUTTON);
+static_assert(kOriginalStaticTypeMask == SS_TYPEMASK);
+static_assert(kOriginalStaticLeft == SS_LEFT);
+static_assert(kOriginalStaticCenter == SS_CENTER);
+static_assert(kOriginalStaticRight == SS_RIGHT);
+static_assert(kOriginalStaticNoPrefix == SS_NOPREFIX);
+static_assert(kOriginalDialogIdOk == IDOK);
+static_assert(kOriginalDialogIdCancel == IDCANCEL);
 
 namespace {
 

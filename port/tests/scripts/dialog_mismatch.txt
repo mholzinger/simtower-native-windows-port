@@ -1,0 +1,7 @@
+# expect-dialog naming another dialog than the one that opens is exit 3.
+# args: --scenario busy --passes 320 --event bomb@300
+# expect-exit: 3
+# expect-stderr: expect-dialog event 3020, but event 3030 opened
+pass 301
+expect-dialog event 3020
+dialog-click 2

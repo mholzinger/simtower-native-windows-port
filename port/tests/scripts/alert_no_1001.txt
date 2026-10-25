@@ -1,0 +1,10 @@
+# The N mnemonic answers No on ALRT/1001 (2): the new tower replaces the
+# changed one without saving.
+# args: --scenario busy --passes 3
+# expect-stderr: alert 1001 "Save the tower "untitled" before closing\?" -> 2
+# expect-stderr: after 3 passes: frame_time [0-9]+ day [0-9]+ rating [0-9]+ balance 20000 people records 512
+pass 1
+menu 40005
+expect-dialog alert 1001
+dialog-key n
+pass 3

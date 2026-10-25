@@ -1,0 +1,6 @@
+# A dialog-* line where a dialog opens without expect-dialog is exit 2.
+# args: --scenario busy --passes 320 --event bomb@300
+# expect-exit: 2
+# expect-stderr: dialog-click without expect-dialog: event 3030 opened
+pass 301
+dialog-click 1

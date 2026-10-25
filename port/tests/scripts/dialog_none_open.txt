@@ -1,0 +1,6 @@
+# Dialog lines with no dialog open: dialog-* is exit 2.
+# args: --scenario none --passes 3
+# expect-exit: 2
+# expect-stderr: dialog-key with no dialog open
+pass 1
+dialog-key enter

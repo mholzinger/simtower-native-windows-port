@@ -5,7 +5,9 @@
 #include "original_construction.hpp"
 #include "original_dib_win32.hpp"
 #include "original_dialog_win32.hpp"
+#include "original_dialog_model.hpp"
 #include "original_dtmp.hpp"
+#include "original_draw_context_win32.hpp"
 #include "original_dtmp_runtime_win32.hpp"
 #include "original_elevator_control.hpp"
 #include "original_finance.hpp"
@@ -1222,10 +1224,6 @@ constexpr wchar_t kTdtFilter[] =
 constexpr wchar_t kOpenTdtTitle[] = L"Open SimTower data file";
 constexpr wchar_t kSaveTdtTitle[] = L"Save SimTower data file";
 constexpr wchar_t kTdtDefaultExtension[] = L"TDT";
-constexpr char kInvalidFilename[] = "That is not a valid filename.";
-constexpr char kSaveDialogTitle[] = "SimTower for Windows";
-constexpr char kReplaceExisting[] =
-    "This file name already exists. Do you want to replace it?";
 
 constexpr char kWaveMixFailureMessage[] =
     "SimTower did not detect a sound card or proper sound drivers on this "
@@ -1683,14 +1681,17 @@ class Win32TowerFileHost final : public simtower::OriginalTowerFileHost {
     return std::filesystem::path(sheet.selected.data());
   }
 
+  // The literal boxes come from the shared requests
+  // (original_dialog_model.hpp), as the SDL dialog runtime shows them.
   bool confirm_replace(const std::filesystem::path&) override {
-    MessageBeep(static_cast<UINT>(-1));
-    return MessageBoxA(window_, kReplaceExisting, "Save SimTower data file",
-                       MB_YESNO | MB_ICONEXCLAMATION) != IDNO;
+    // MessageBeep(-1), then MB_YESNO | MB_ICONEXCLAMATION.
+    return simtower::show_original_message_box(
+               window_, simtower::original_replace_existing_message_box()) !=
+           IDNO;
   }
   void invalid_filename() override {
-    MessageBoxA(nullptr, kInvalidFilename, kSaveDialogTitle,
-                MB_OK | MB_ICONEXCLAMATION);
+    (void)simtower::show_original_message_box(
+        nullptr, simtower::original_invalid_filename_message_box());
   }
   void file_error(std::uint16_t strl_index) override {
     show_original_file_error(strl_index);
@@ -2456,6 +2457,14 @@ struct OriginalEventDialogContext {
   std::int32_t argument{};
   bool use_ahotta_filter{};
   bool timer_fired{};
+  // From OriginalEventDialogModel for the event dialogs; the transport
+  // filters only read static_background_rgb (the same gray_cc).
+  std::uint16_t timer_id{simtower::kOriginalEventDialogTimerId};
+  std::uint32_t timer_ms{simtower::kOriginalEventDialogTimerMs};
+  std::int16_t ctlcolor_font_pixels{
+      simtower::kOriginalEventDialogCtlColorFontPixels};
+  std::uint32_t static_background_rgb{
+      simtower::kOriginalDialogStaticBackgroundRgb};
   HBRUSH static_background{};
   HFONT control_font{};
 };
@@ -2583,8 +2592,9 @@ INT_PTR CALLBACK event_dialog_proc(HWND dialog, UINT message,
     SetClassLongPtrW(dialog, GCLP_HCURSOR, 0);
     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
     if (context->use_ahotta_filter) {
-      context->control_font = make_original_dialog_font(14);
-      SetTimer(dialog, 10U, 0x93e0U, nullptr);
+      context->control_font =
+          make_original_dialog_font(context->ctlcolor_font_pixels);
+      SetTimer(dialog, context->timer_id, context->timer_ms, nullptr);
     } else if (context->transport_target) {
       // ELVINFODLOGFILTER 1100:0faf and ESCINFODLOGFILTER 1100:12e7
       // select the shared 13-pixel Arial font for their painted text and
@@ -2668,7 +2678,8 @@ INT_PTR CALLBACK event_dialog_proc(HWND dialog, UINT message,
         if (background ==
                 simtower::OriginalFacilityControlBackground::gray_cc &&
             !context->static_background) {
-          COLORREF color = RGB(0xcc, 0xcc, 0xcc);
+          COLORREF color = simtower::original_rgb_to_colorref(
+              context->static_background_rgb);
           if (g_logical_palette) {
             color = PALETTEINDEX(GetNearestPaletteIndex(g_logical_palette,
                                                        color));
@@ -2796,32 +2807,17 @@ int run_original_event_dialog(
     }
   }
 
-  auto original = simtower::parse_original_dialog(
-      g_resources.find("DIALOG", request.dialog_id));
-  // Exact 1068:0000 -> 1008:0085 event-dialog launcher path: after loading
-  // the resource template, the original forces its font point size to 8.
-  simtower::apply_original_dialog_font_point_size(original, 8U);
-  // 1068:0439 scans every original control before AHOTTADLOGFILTER's item-3
-  // fallback at 1068:0175. Apply the exact destructive caret-pair pass to all
-  // text controls, then apply the item-3 #0 fallback.
-  for (auto& item : original.items) {
-    if (item.text.kind != simtower::OriginalDialogValue::Kind::text) continue;
-    item.text.text = simtower::format_original_dialog_caret_arguments(
-        std::move(item.text.text), request.argument);
-  }
-  const auto item_three = std::ranges::find_if(
-      original.items, [](const auto& item) { return item.id == 3U; });
-  if (item_three != original.items.end() &&
-      item_three->text.kind == simtower::OriginalDialogValue::Kind::text) {
-    item_three->text.text = simtower::format_original_dialog_argument(
-        std::move(item_three->text.text), request.argument);
-  }
-  const auto native = simtower::build_native_dialog_template(original);
-  OriginalEventDialogContext context{
-      simtower::parse_original_dtmp(
-          g_resources.find("DTMP", request.dialog_id))};
+  // 1068:0000 -> 1008:0085 template, text and DTMP preparation, shared with
+  // the SDL dialog runtime (original_dialog_model.hpp).
+  auto model = simtower::prepare_original_event_dialog(g_resources, request);
+  const auto native = simtower::build_native_dialog_template(model.dialog);
+  OriginalEventDialogContext context{std::move(model.dtmp)};
   context.argument = request.argument;
   context.use_ahotta_filter = true;
+  context.timer_id = model.timer_id;
+  context.timer_ms = model.timer_ms;
+  context.ctlcolor_font_pixels = model.ctlcolor_font_pixels;
+  context.static_background_rgb = model.static_background_rgb;
   const int result = static_cast<int>(run_original_modal_dialog(
       g_instance, reinterpret_cast<const DLGTEMPLATE*>(native.data()),
       g_main_window, event_dialog_proc,
@@ -5582,6 +5578,9 @@ struct OriginalAboutDialogContext {
   simtower::OriginalDtmp chrome{};
   std::uint64_t timer_ticks{};
   bool timer_started{};
+  // From OriginalAboutDialogModel.
+  std::uint16_t timer_id{simtower::kOriginalAboutTimerId};
+  std::uint32_t background_rgb{simtower::kOriginalAboutBackgroundRgb};
   HBRUSH control_background{};
 };
 
@@ -5637,7 +5636,8 @@ void paint_original_about_dialog(HWND dialog,
 
 void close_original_about_dialog(HWND dialog,
                                  OriginalAboutDialogContext* context) {
-  KillTimer(dialog, 9U);
+  KillTimer(dialog, context ? context->timer_id
+                             : simtower::kOriginalAboutTimerId);
   if (context && context->control_background) {
     DeleteObject(context->control_background);
     context->control_background = nullptr;
@@ -5662,13 +5662,15 @@ INT_PTR CALLBACK about_dialog_proc(HWND dialog, UINT message,
     // explicitly selects IDC_ARROW for the current pointer.
     SetClassLongPtrW(dialog, GCLP_HCURSOR, 0);
     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+    const COLORREF background =
+        simtower::original_rgb_to_colorref(context->background_rgb);
     const UINT gray_index = g_logical_palette
                                 ? GetNearestPaletteIndex(
-                                      g_logical_palette, RGB(230, 230, 230))
+                                      g_logical_palette, background)
                                 : 0U;
     context->control_background =
         CreateSolidBrush(g_logical_palette ? PALETTEINDEX(gray_index)
-                                           : RGB(230, 230, 230));
+                                           : background);
     return TRUE;
   }
 
@@ -5682,11 +5684,11 @@ INT_PTR CALLBACK about_dialog_proc(HWND dialog, UINT message,
       EndPaint(dialog, &paint);
       if (context && !context->timer_started) {
         context->timer_started = true;
-        if (SetTimer(dialog, 9U, context->layout.timer_interval_ms,
-                     nullptr) == 0U) {
-          MessageBeep(static_cast<UINT>(-1));
-          MessageBoxA(dialog, "SetTimer failed", "SimTower - About",
-                      MB_OK | MB_ICONEXCLAMATION);
+        if (SetTimer(dialog, context->timer_id,
+                     context->layout.timer_interval_ms, nullptr) == 0U) {
+          // MessageBeep(-1), then MB_OK | MB_ICONEXCLAMATION.
+          (void)simtower::show_original_message_box(
+              dialog, simtower::original_about_timer_failed_message_box());
         }
       }
       return TRUE;
@@ -5733,13 +5735,15 @@ INT_PTR CALLBACK about_dialog_proc(HWND dialog, UINT message,
 }
 
 int run_original_about_dialog() {
-  const auto original = simtower::parse_original_dialog(
-      g_resources.find("DIALOG", "TOWER_TITLE"));
-  const auto native = simtower::build_native_dialog_template(original);
-  OriginalAboutDialogContext context{
-      simtower::derive_original_about_layout(g_resources),
-      simtower::original_about_credit_lines(g_resources)};
-  context.chrome.rectangles.push_back(context.layout.credits_outer);
+  // Template, layout, credits and chrome preparation shared with the SDL
+  // dialog runtime (original_dialog_model.hpp).
+  auto model = simtower::prepare_original_about_dialog(g_resources);
+  const auto native = simtower::build_native_dialog_template(model.dialog);
+  OriginalAboutDialogContext context{std::move(model.layout),
+                                     std::move(model.lines),
+                                     std::move(model.chrome)};
+  context.timer_id = model.timer_id;
+  context.background_rgb = model.background_rgb;
   int result = 0;
   for (const auto step : simtower::original_about_launcher_plan()) {
     using Step = simtower::OriginalAboutLauncherStep;

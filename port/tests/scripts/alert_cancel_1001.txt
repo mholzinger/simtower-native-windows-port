@@ -1,0 +1,14 @@
+# File > New on a changed tower shows ALRT/1001 formatted with the title and
+# the STRL/1001 action, Yes / No / Cancel. Cancel (2) keeps the tower:
+# 1208:0369 returns 3.
+# args: --scenario busy --passes 3
+# expect-stderr: alert 1001 "Save the tower "untitled" before closing\?" -> 3
+# expect-stderr: after 3 passes: frame_time [0-9]+ day [0-9]+ rating [0-9]+ balance 49767200 people records 3328
+pass 1
+menu 40005
+expect-dialog alert 1001
+dialog-key tab
+dialog-key tab
+dialog-click 2
+expect-title SimTower - untitled
+pass 3

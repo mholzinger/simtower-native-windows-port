@@ -12,12 +12,36 @@
 
 namespace simtower {
 
+// An OriginalRgb (0x00RRGGBB) as a GDI COLORREF (0x00BBGGRR).
+[[nodiscard]] constexpr COLORREF original_rgb_to_colorref(
+    OriginalRgb rgb) noexcept {
+  return RGB((rgb >> 16U) & 0xffU, (rgb >> 8U) & 0xffU, rgb & 0xffU);
+}
+
+// The std::runtime_error texts thrown when CreatePen / CreateSolidBrush
+// fail, so each painter keeps the message its direct GDI code had.
+struct OriginalGdiFailureText {
+  const char* pen{"CreatePen failed for info clock"};
+  const char* brush{"CreateSolidBrush failed for info window"};
+};
+
+// The texts of the old SelectedPen / fill_gray in the DTMP dialog chrome.
+inline constexpr OriginalGdiFailureText kOriginalDialogGdiFailureText{
+    "Could not create original dialog pen",
+    "Could not create original dialog brush"};
+
 class OriginalGdiDrawContext final : public OriginalDrawContext {
  public:
-  // The DC is borrowed; it must outlive this object.
-  explicit OriginalGdiDrawContext(HDC dc) noexcept : dc_(dc) {}
+  // The DC is borrowed; it must outlive this object. The default failure
+  // texts are the Info painter's.
+  explicit OriginalGdiDrawContext(HDC dc,
+                                  OriginalGdiFailureText failure = {}) noexcept
+      : dc_(dc), failure_(failure) {}
   OriginalGdiDrawContext(const OriginalGdiDrawContext&) = delete;
   OriginalGdiDrawContext& operator=(const OriginalGdiDrawContext&) = delete;
+  // Unwinds pens and fonts a painter left selected (an exception between
+  // a push and its pop): restores the previous objects, deletes the pens.
+  ~OriginalGdiDrawContext() override;
 
   int save() override;
   void restore(int saved) override;
@@ -45,6 +69,7 @@ class OriginalGdiDrawContext final : public OriginalDrawContext {
   };
 
   HDC dc_{};
+  OriginalGdiFailureText failure_{};
   // SelectObject results to restore, innermost last. A null previous font
   // means push_font selected nothing, so pop_font selects nothing either.
   std::vector<HGDIOBJ> previous_fonts_{};

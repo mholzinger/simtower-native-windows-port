@@ -12,6 +12,8 @@
 // Nothing here includes SDL, so the session can also drive headless runs
 // with a virtual clock.
 
+#include "sdl_dialog.hpp"
+#include "sdl_dialog_descriptors.hpp"
 #include "sdl_digest.hpp"
 #include "sdl_layout.hpp"
 
@@ -98,6 +100,25 @@ struct InputEvent {
   std::uint16_t keys{};
 };
 
+// One input for an open dialog (Session::dialogs().back()).
+struct DialogInput {
+  enum class Kind : std::uint8_t {
+    pointer,       // a mouse event in window coordinates
+    key,           // a key press
+    timer,         // fire the dialog's timer now (scripted WM_TIMER)
+    wait_elapsed,  // time passed (elapsed_ms); due timers fire
+  };
+  Kind kind{Kind::pointer};
+  InputEvent pointer{};
+  DialogKey key{DialogKey::other};
+  // A character key's lower-case letter (DialogKey::other), else 0.
+  char character{};
+  // Dialog-clock milliseconds that passed before this input (the window's
+  // wait, or a script's "dialog-wait MS"). The dialog timers run on this
+  // clock only, never on the session clock.
+  std::uint32_t elapsed_ms{};
+};
+
 // Supplies events while a modal loop owns input (the 1050:05a7 selector).
 // Win32 modals run their own message loop, so no idle pass runs until the
 // modal ends. The window host waits for SDL events; the script player reads
@@ -114,6 +135,22 @@ class InputSource {
   // line); the outer nullopt means it has none.
   virtual std::optional<std::optional<std::filesystem::path>>
   next_file_pick() {
+    return std::nullopt;
+  }
+  // Whether this source answers the dialog that is about to open (its
+  // ModalDialog::label() names it). False keeps the session's logged
+  // stand-in, exactly as before the dialog runtime existed, so runs without
+  // dialog input keep their digests by construction. The window host
+  // answers every dialog; the script player only one that the next line
+  // names with "expect-dialog" (it throws ScriptFailure for a mismatch).
+  virtual bool drives_dialog(const ModalDialog& /*dialog*/) { return false; }
+  // The next input for the open, driven dialog. wait_ms is the dialog-clock
+  // time until its timer is due (nullopt: no live timer). std::nullopt
+  // ends the dialog with its default answer. The window host waits for SDL
+  // events; the script player reads following "dialog-*" lines and returns
+  // nullopt at any other line.
+  virtual std::optional<DialogInput> next_dialog_input(
+      std::optional<std::uint32_t> /*wait_ms*/) {
     return std::nullopt;
   }
 };
@@ -289,6 +326,13 @@ class Session : private OriginalIdlePassHost {
   void set_input_source(InputSource* source) { input_source_ = source; }
   // Answer for the next alert (1 = OK/Yes, 2 = Cancel/No); then back to 1.
   void set_alert_answer(int answer) { alert_answer_ = answer; }
+  // Test shortcut (scripts' "set-balance"): replaces the live tower's cash
+  // balance (header.balance), e.g. to reach the short-of-funds paths of the
+  // event dialogs. Nothing without a tower; the Info panel shows the new
+  // value on its next repaint.
+  void set_balance_for_test(std::int32_t balance) {
+    if (document_) document_->header.balance = balance;
+  }
   // Test shortcut (scripts' "tool"): selects an edit mode (0 Bulldozer,
   // 1 Finger, 2 Magnifier) or a construction type. A type selects its
   // catalog cell (index + 3) when the active rating lists it, else mode 3.
@@ -300,6 +344,11 @@ class Session : private OriginalIdlePassHost {
   [[nodiscard]] const WindowLayout& layout() const { return layout_; }
   [[nodiscard]] bool panel_visible(Panel panel) const;
   [[nodiscard]] Panel active_panel() const { return active_panel_; }
+  // The open dialogs, bottom to top (a nested alert is above its event
+  // dialog). Empty unless an input source drives one.
+  [[nodiscard]] std::vector<const ModalDialog*> dialogs() const {
+    return {dialogs_.begin(), dialogs_.end()};
+  }
   // The running selector modal, or null.
   [[nodiscard]] const OriginalCommandSelectorSession* active_selector()
       const {
@@ -374,9 +423,41 @@ class Session : private OriginalIdlePassHost {
   // Presentation only: it reads no clock and changes no game state.
   void paint_info();
   void focus_event_coordinate(std::int16_t floor, std::int16_t x);
+  // play_dialog_sound: run_original_event_dialog's stop-all and WAVE
+  // request (false when run_event_dialog already made it before opening).
   std::uint16_t log_dialog(const OriginalEventDialogRequest& dialog,
                            std::uint16_t choice,
-                           std::string_view meaning);
+                           std::string_view meaning,
+                           bool play_dialog_sound = true);
+  // run_original_event_dialog: when the input source drives it the dialog
+  // runs modally (sdl_dialog.hpp) and its AHOTTADLOGFILTER answer
+  // (OriginalEventDialogController) is returned; otherwise, or when the
+  // source supplies no answer, default_choice, exactly as before.
+  std::uint16_t run_event_dialog(const OriginalEventDialogRequest& dialog,
+                                 std::uint16_t default_choice,
+                                 std::string_view meaning);
+  // One MessageBox through the dialog runtime: the raw button id (IDOK,
+  // IDYES, ...) when answered, nullopt when no input source drives it or it
+  // supplied no answer (the caller then uses its scripted default).
+  std::optional<int> run_message_box(const OriginalMessageBoxRequest& request,
+                                     std::string label);
+  // show_original_alert (1208:0133): ALRT/alert_id formatted with the
+  // substitutions, through the dialog runtime when driven and normalized by
+  // 1208:0369; otherwise the scripted "alert" answer. Logged and tallied
+  // either way with the same {id, answer} request.
+  int show_alert(int alert_id,
+                 const std::array<std::string_view, 4>& substitutions);
+  // run_original_about_dialog's 1010:049e launcher around the About modal.
+  void run_about_dialog();
+  // The dialog modal loop: input from input_source_, signals to procedure,
+  // which returns the EndDialog result to close (nullopt: no answer) and
+  // acts on the open dialog through ops.
+  using DialogProcedure = std::function<std::optional<int>(
+      const DialogSignal& signal, OriginalDialogOps& ops)>;
+  // Runs only when drives_dialog(dialog) was true.
+  std::optional<int> run_dialog_modal(ModalDialog& dialog,
+                                      const DialogProcedure& procedure);
+  [[nodiscard]] bool drives(const ModalDialog& dialog);
   void sound(std::int32_t resource, std::string_view source);
   // 11c8:0167 / 11c8:0100 on the runtime, when there is one.
   void play_audio(std::int32_t resource,
@@ -545,6 +626,7 @@ class Session : private OriginalIdlePassHost {
   bool nonclient_press_{};
   std::optional<OriginalInputSurface> capture_{};
   OriginalCommandSelectorSession* selector_{};
+  std::vector<ModalDialog*> dialogs_{};
   int modal_depth_{};              // DS:24b8
   int alert_answer_{1};
   std::uint16_t cursor_id_{};

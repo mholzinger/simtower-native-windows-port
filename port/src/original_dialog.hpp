@@ -14,6 +14,32 @@ namespace simtower {
 // original_dialog_win32.cpp).
 inline constexpr std::uint32_t kOriginalDialogStyleSetFont = 0x00000040U;
 
+// Win16 window, control-class and control-style values read from dialog
+// templates by the shared dialog models and the SDL dialog runtime. Pinned
+// against the <windows.h> macros in original_dialog_win32.cpp.
+inline constexpr std::uint32_t kOriginalWindowStyleChild = 0x40000000U;
+inline constexpr std::uint32_t kOriginalWindowStyleVisible = 0x10000000U;
+inline constexpr std::uint32_t kOriginalWindowStyleDisabled = 0x08000000U;
+inline constexpr std::uint32_t kOriginalWindowStyleTabStop = 0x00010000U;
+// DLGITEMTEMPLATE predefined class ordinals.
+inline constexpr std::uint16_t kOriginalDialogClassButton = 0x0080U;
+inline constexpr std::uint16_t kOriginalDialogClassEdit = 0x0081U;
+inline constexpr std::uint16_t kOriginalDialogClassStatic = 0x0082U;
+inline constexpr std::uint16_t kOriginalDialogClassListBox = 0x0083U;
+inline constexpr std::uint16_t kOriginalDialogClassScrollBar = 0x0084U;
+inline constexpr std::uint16_t kOriginalDialogClassComboBox = 0x0085U;
+inline constexpr std::uint32_t kOriginalButtonTypeMask = 0x0000000FU;
+inline constexpr std::uint32_t kOriginalButtonPushButton = 0x00000000U;
+inline constexpr std::uint32_t kOriginalButtonDefPushButton = 0x00000001U;
+inline constexpr std::uint32_t kOriginalStaticTypeMask = 0x0000001FU;
+inline constexpr std::uint32_t kOriginalStaticLeft = 0x00000000U;
+inline constexpr std::uint32_t kOriginalStaticCenter = 0x00000001U;
+inline constexpr std::uint32_t kOriginalStaticRight = 0x00000002U;
+inline constexpr std::uint32_t kOriginalStaticNoPrefix = 0x00000080U;
+// IDOK / IDCANCEL (kOriginalAlertResultOk / Cancel are the same values).
+inline constexpr std::uint16_t kOriginalDialogIdOk = 1U;
+inline constexpr std::uint16_t kOriginalDialogIdCancel = 2U;
+
 // Exact five-entry AHOTTADLOGFILTER parallel message table at
 // 1068:00b6/0421.
 [[nodiscard]] constexpr bool original_event_dialog_handles_message(

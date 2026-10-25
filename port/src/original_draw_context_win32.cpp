@@ -17,7 +17,7 @@ static_assert(kOriginalTaBaseline == TA_BASELINE);
 static_assert(TA_LEFT == 0 && TA_TOP == 0);
 
 constexpr COLORREF to_colorref(OriginalRgb rgb) noexcept {
-  return RGB((rgb >> 16U) & 0xffU, (rgb >> 8U) & 0xffU, rgb & 0xffU);
+  return original_rgb_to_colorref(rgb);
 }
 
 RECT to_rect(const OriginalRect& rect) noexcept {
@@ -26,6 +26,11 @@ RECT to_rect(const OriginalRect& rect) noexcept {
 
 }  // namespace
 
+OriginalGdiDrawContext::~OriginalGdiDrawContext() {
+  while (!pens_.empty()) pop_pen();
+  while (!previous_fonts_.empty()) pop_font();
+}
+
 int OriginalGdiDrawContext::save() { return SaveDC(dc_); }
 
 void OriginalGdiDrawContext::restore(int saved) { RestoreDC(dc_, saved); }
@@ -33,7 +38,7 @@ void OriginalGdiDrawContext::restore(int saved) { RestoreDC(dc_, saved); }
 void OriginalGdiDrawContext::fill_rect(const OriginalRect& rect,
                                        OriginalRgb rgb) {
   HBRUSH brush = CreateSolidBrush(to_colorref(rgb));
-  if (!brush) throw std::runtime_error("CreateSolidBrush failed for info window");
+  if (!brush) throw std::runtime_error(failure_.brush);
   const RECT rectangle = to_rect(rect);
   FillRect(dc_, &rectangle, brush);
   DeleteObject(brush);
@@ -50,17 +55,24 @@ void OriginalGdiDrawContext::draw_dib(std::span<const std::byte> resource,
 }
 
 void OriginalGdiDrawContext::push_solid_pen(OriginalRgb rgb) {
+  // The entry exists before SelectObject, so an allocation failure cannot
+  // leave the pen selected and leaked.
+  pens_.reserve(pens_.size() + 1U);
   HPEN pen = CreatePen(PS_SOLID, 1, to_colorref(rgb));
-  if (!pen) throw std::runtime_error("CreatePen failed for info clock");
-  HGDIOBJ previous = SelectObject(dc_, pen);
-  pens_.push_back({pen, previous});
+  if (!pen) throw std::runtime_error(failure_.pen);
+  pens_.push_back({pen, nullptr});
+  pens_.back().previous = SelectObject(dc_, pen);
 }
 
 void OriginalGdiDrawContext::pop_pen() {
   if (pens_.empty()) return;
   const SelectedPen selected = pens_.back();
   pens_.pop_back();
-  SelectObject(dc_, selected.previous);
+  // Restore only what SelectObject returned, as the old dialog SelectedPen
+  // did. A null previous means the pen never got selected; SelectObject
+  // with a null handle is a failing no-op, so the Info painter (which
+  // restored unconditionally) behaves the same either way.
+  if (selected.previous) SelectObject(dc_, selected.previous);
   DeleteObject(selected.pen);
 }
 
@@ -71,6 +83,7 @@ void OriginalGdiDrawContext::move_to(int x, int y) {
 void OriginalGdiDrawContext::line_to(int x, int y) { LineTo(dc_, x, y); }
 
 void OriginalGdiDrawContext::push_font(std::int16_t pixel_height) {
+  previous_fonts_.reserve(previous_fonts_.size() + 1U);
   HFONT font = original_cached_font(pixel_height);
   HGDIOBJ previous{};
   if (font) previous = SelectObject(dc_, font);
