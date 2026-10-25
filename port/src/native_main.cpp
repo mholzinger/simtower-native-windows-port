@@ -25,6 +25,7 @@
 #include "original_tdt_file.hpp"
 #include "original_time.hpp"
 #include "original_ui_win32.hpp"
+#include "original_world_input.hpp"
 #include "original_world_win32.hpp"
 
 #include <windows.h>
@@ -255,9 +256,7 @@ HWND g_elevator_control_window = nullptr;
 HWND g_startup_splash_window = nullptr;
 bool g_main_message_runtime_initialized = false;
 bool g_original_window_activation_latch = false;  // DS:31a6, Main/ELVDLOGMAIN
-bool g_main_paint_active = false;          // DS:0244
 bool g_original_main_caption_active = false;
-bool g_main_pointer_interaction_armed = false;  // DS:0242
 std::optional<simtower::OriginalMainSurfacePass>
     g_main_pending_surface_pass{};
 std::uint32_t g_original_modal_dialog_depth = 0U;  // DS:24b8 lock
@@ -309,45 +308,11 @@ bool g_info_visible = true;               // DS:31aa after window creation
 bool g_map_visible = true;                // DS:31ac after window creation
 std::uint32_t g_original_last_auxiliary_pointer_tick = 0U;  // DS:31b0/31b2
 int g_original_system_font_ascent = 0;     // 1128:1184, DS:31b6
-bool g_build_mode_enabled = true;         // DS:783e
-bool g_command_toggle_pressed = false;    // 1080:07a6 BITMAP/601 or 603 frame
 bool g_main_closing = false;              // DS:31c6
-bool g_original_map_pointer_down = false;  // DS:0248
-// Native mirror of DS:7796, the last focus rectangle XOR-presented on Map.
-std::optional<simtower::OriginalMapRect> g_original_map_focus_rectangle{};
-bool g_world_control_modifier = false;    // DS:3218, last mouse wParam & 8
-bool g_world_shift_modifier = false;      // DS:321a, last mouse wParam & 4
-std::uint16_t g_command_mode = 3U;        // DS:783c
-std::uint16_t g_map_mode = 0U;            // DS:7840
-bool g_map_drag_active = false;            // DS:3216 for MAPWNDPROC
-std::uint16_t g_selected_build_type = 24U;  // mandatory initial Lobby
 
-struct OriginalMainPointerState {
-  bool inside{};
-  int client_x{};
-  int client_y{};
-};
-
-OriginalMainPointerState g_main_pointer{};
-// Native mirror of DS:77ac, the last construction-outline rectangle derived
-// by 11f8:3c13. 1090:03ab compares this rectangle—not the raw mouse point—to
-// decide whether its preview-only pass has any pixels to present.
-std::optional<simtower::OriginalConstructionPreviewRect>
-    g_original_main_preview_rect{};
-// Native mirror of DS:025c, the scratch-backing latch shared by
-// 11f8:3b94/3c13. It matters even when the final outline pixels are derived
-// directly into the native retained RGB surface.
-simtower::OriginalConstructionPreviewScratchState
-    g_original_main_preview_scratch{};
-std::array<simtower::OriginalCommandRatingState, 6> g_command_ratings{};
-// Native resource-handle equivalent of DS:7960. 10d0:086c resets the
-// document rating before Open I/O but does not replace this table until the
-// successful 10d0:0ac2 -> 1140:010d reconstruction boundary.
-std::uint16_t g_active_command_rating = 1U;
-std::uint16_t g_office_variant = 0U;      // DS:7954, cycles modulo six
-// Build type is the raw original type byte (currently through 0x2c). Keep
-// selectors addressable by that byte even for one-variant composite types.
-std::array<std::uint16_t, 256> g_facility_variants{};
+// Command, Main pointer, preview and Map input state shared with the SDL
+// host (original_world_input.hpp); each field names the DS word it mirrors.
+simtower::OriginalWorldInputState g_world_input{};
 simtower::OriginalSimulationState g_simulation_state{};
 simtower::OriginalPaletteRuntime g_palette_runtime{};
 simtower::OriginalSkyDecorationState g_sky_decorations{};
@@ -429,6 +394,18 @@ void present_original_info_surface_direct(
 void request_original_main_surface_pass(
     simtower::OriginalMainSurfacePass pass,
     bool synchronous);
+
+simtower::OriginalWorldInputHost& original_world_input_host();
+simtower::OriginalWorldInputContext original_world_input_context();
+
+// The LPARAM/WPARAM decode of a mouse message: signed 16-bit client
+// coordinates and the MK_* key state.
+simtower::OriginalWorldInputPoint original_world_input_point(WPARAM wparam,
+                                                             LPARAM lparam) {
+  return {static_cast<std::int16_t>(LOWORD(lparam)),
+          static_cast<std::int16_t>(HIWORD(lparam)),
+          static_cast<std::uint16_t>(wparam)};
+}
 
 void invalidate_original_main_surface() {
   g_original_main_backing.dirty = true;
@@ -674,7 +651,7 @@ void update_original_main_cursor_from_screen_point(POINT screen_point) {
       point_in_info, g_info_visible,
       point_in_command, g_toolbar_visible,
       point_in_main, g_main_window && IsIconic(g_main_window),
-      g_build_mode_enabled, g_command_mode,
+      g_world_input.build_mode_enabled, g_world_input.command_mode,
       g_main_window && GetCapture() == g_main_window);
   if (plan.set_cursor) {
     SetCursor(resolve_original_cursor(plan.selector));
@@ -724,99 +701,13 @@ void show_original_command_status(std::uint16_t code) {
   }
 }
 
-struct OriginalLobbyDragState {
-  bool active{};
-  std::int16_t floor{};
-  std::int32_t anchor_left{};
-  std::int32_t anchor_right{};
-};
-
-OriginalLobbyDragState g_lobby_drag{};
-
-struct OriginalFloorDragState {
-  bool active{};
-  std::int16_t floor{};
-  std::int32_t anchor_left{};
-  std::int32_t anchor_right{};
-};
-
-OriginalFloorDragState g_floor_drag{};
-
-enum class OriginalParkingDragKind : std::uint8_t {
-  none,
-  parking,
-  ramp,
-};
-
-struct OriginalParkingDragState {
-  OriginalParkingDragKind kind{OriginalParkingDragKind::none};
-  std::int16_t press_floor{};
-  std::int32_t snapped_left{};
-  std::int32_t snapped_right{};
-  simtower::OriginalParkingDragRunState parking{};
-  simtower::OriginalParkingRampDragRunState ramp{};
-};
-
-OriginalParkingDragState g_parking_drag{};
-
-// Native mirrors of 11f8's shared 24cc successful-step counter and 24ce
-// down-time balance snapshot. They span Floor, Lobby, Parking, and Ramp and
-// are consumed only by the common button-up completion boundary.
-struct OriginalConstructionDragCompletionState {
-  bool active{};
-  std::uint16_t type{};
-  std::uint16_t successful_steps{};
-  std::int32_t balance_at_press{};
-  bool priority_sound_latch_armed{};  // DS:24ca
-};
-
-OriginalConstructionDragCompletionState g_construction_drag_completion{};
-LPARAM g_retained_construction_press_position{};
-bool g_retained_construction_press_position_valid{};
-std::optional<simtower::OriginalLobbyPlacement>
-    g_retained_construction_placement{};
-
-enum class OriginalElevatorShaftDragDirection : std::uint8_t {
-  none,
-  upper,
-  lower,
-};
-
-struct OriginalElevatorShaftDragState {
-  bool capture_active{};  // DS:02a6, set by every 10a0:0544 finger press
-  OriginalElevatorShaftDragDirection direction{
-      OriginalElevatorShaftDragDirection::none};
-  std::size_t elevator_index{};
-};
-
-OriginalElevatorShaftDragState g_elevator_shaft_drag{};
+using simtower::OriginalElevatorShaftDragDirection;
+using simtower::OriginalParkingDragKind;
 
 simtower::OriginalCommandRatingState& active_original_command_rating(
     std::uint16_t rating) {
-  const std::uint16_t bounded = std::clamp<std::uint16_t>(rating, 1U, 6U);
-  auto& state = g_command_ratings[bounded - 1U];
-  if (state.encoded_entries.empty()) {
-    state = simtower::original_command_rating_state(g_resources, bounded);
-  }
-  return state;
-}
-
-void resize_original_command_window(std::uint16_t rating) {
-  if (!g_command_window) {
-    return;
-  }
-  const auto count = simtower::original_command_catalog(
-                         g_resources, active_original_command_rating(rating))
-                         .size();
-  RECT outer{};
-  GetWindowRect(g_command_window, &outer);
-  // 1140:010d passes the result of 1140:03f8 directly to MoveWindow as the
-  // outer height, preserving the existing screen position and width.
-  MoveWindow(g_command_window, outer.left, outer.top,
-             outer.right - outer.left,
-             simtower::original_rating_window_height(
-                 static_cast<std::uint16_t>(count)),
-             TRUE);
+  return simtower::active_original_command_rating(
+      original_world_input_context(), rating);
 }
 
 void reset_original_command_state(bool startup_suppressed = false) {
@@ -825,21 +716,8 @@ void reset_original_command_state(bool startup_suppressed = false) {
   // index 3 is what the original command surface highlights. At
   // 10d0:08cc-08e1, DS:31c4 keeps construction disabled only for the
   // pre-dialog bootstrap invoked by 1128:00c4.
-  g_build_mode_enabled = !startup_suppressed;
-  g_command_toggle_pressed = false;
-  g_command_mode = 3U;
-  g_map_mode = 0U;
-  g_map_drag_active = false;
-  g_selected_build_type = 24U;
-  g_office_variant = 0U;
-  g_facility_variants.fill(0U);
-  g_lobby_drag = {};
-  g_floor_drag = {};
-  g_parking_drag = {};
-  g_construction_drag_completion = {};
-  g_retained_construction_press_position_valid = false;
-  g_retained_construction_placement.reset();
-  g_original_main_preview_scratch = {};
+  simtower::reset_original_world_input_state(g_world_input,
+                                             startup_suppressed);
   g_info_status = {};
   simtower::reset_original_find_marker(g_find_marker);
   // 10d0:086c changes the document/edit globals only. Rating resource
@@ -852,34 +730,9 @@ void reset_original_command_state(bool startup_suppressed = false) {
 void refresh_original_rating_command(std::uint16_t rating,
                                      std::uint16_t argument,
                                      bool command_composition_allowed = true) {
-  const bool elevator_isolation_active =
-      g_elevator_control_context &&
-      g_elevator_control_context->state.isolation_active;
-  const auto plan = simtower::original_rating_command_refresh_plan(
-      argument, elevator_isolation_active,
-      g_original_main_preview_rect.has_value());
-
-  // Native keeps immutable value views for 1140:010d's rating TABL and
-  // 11f8:06cd's rating-dependent facility sheets, so selecting the cached
-  // rating state replaces both Win16 resource-handle transactions.
-  auto& rating_state = active_original_command_rating(rating);
-  g_active_command_rating = rating_state.rating;
-  resize_original_command_window(g_active_command_rating);
-  if (plan.force_command_mode_two) g_command_mode = 2U;
-  if (plan.present_command_synchronously && command_composition_allowed &&
-      g_command_window) {
-    InvalidateRect(g_command_window, nullptr, FALSE);
-    UpdateWindow(g_command_window);
-  }
-  if (plan.restore_preview_scratch) {
-    g_original_main_preview_rect.reset();
-  }
-  if (plan.rebuild_visible_tile_scratch) {
-    // 1038:0000 rebuilds a transient indexed tile cache. Native derives that
-    // cache from the document on demand, so invalidate only its retained RGB
-    // transport; do not invent a synchronous Main presentation here.
-    g_original_main_backing.dirty = true;
-  }
+  simtower::refresh_original_rating_command(
+      original_world_input_context(), original_world_input_host(), rating,
+      argument, command_composition_allowed);
 }
 
 void draw_original_map_focus_rectangle(
@@ -903,9 +756,9 @@ void adjust_original_derived_map_focus_synchronously() {
   for (const auto step : simtower::original_derived_map_focus_order()) {
     switch (step) {
       case simtower::OriginalDerivedMapFocusStep::erase_previous_focus:
-        if (g_original_map_focus_rectangle) {
+        if (g_world_input.map_focus) {
           draw_original_map_focus_rectangle(
-              dc, *g_original_map_focus_rectangle);
+              dc, *g_world_input.map_focus);
         }
         break;
       case simtower::OriginalDerivedMapFocusStep::recompute_focus: {
@@ -920,7 +773,7 @@ void adjust_original_derived_map_focus_synchronously() {
       case simtower::OriginalDerivedMapFocusStep::draw_recomputed_focus:
         if (recomputed) {
           draw_original_map_focus_rectangle(dc, *recomputed);
-          g_original_map_focus_rectangle = *recomputed;
+          g_world_input.map_focus = *recomputed;
         }
         break;
     }
@@ -930,7 +783,7 @@ void adjust_original_derived_map_focus_synchronously() {
 
 void reset_original_simulation_state() {
   g_elevator_transfer_visuals.clear();
-  g_original_main_preview_rect.reset();
+  g_world_input.preview_rect.reset();
   g_original_main_backing = {};
   g_original_main_backing.dirty = true;
   g_main_pending_surface_pass.reset();
@@ -1019,9 +872,11 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
       apply_original_construction_toggle();
     }
   }
-  bool build_mode_enabled() override { return g_build_mode_enabled; }
+  bool build_mode_enabled() override {
+    return g_world_input.build_mode_enabled;
+  }
   bool elevator_finger_capture_active() override {
-    return g_elevator_shaft_drag.capture_active;
+    return g_world_input.shaft_drag.capture_active;
   }
   bool fast_mode_enabled() override { return g_fast_mode_enabled; }
   bool elevator_isolation_active() override {
@@ -1105,55 +960,45 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
       if (GetCursorPos(&cursor) && ScreenToClient(g_main_window, &cursor)) {
         // 1258:0256 passes the converted point even when it lies outside the
         // client. 11f8:3c13 performs the later client intersection itself.
-        g_main_pointer.inside = true;
-        g_main_pointer.client_x = cursor.x;
-        g_main_pointer.client_y = cursor.y;
+        g_world_input.pointer.inside = true;
+        g_world_input.pointer.client_x = cursor.x;
+        g_world_input.pointer.client_y = cursor.y;
       }
     }
     // 1090:03ab saves DS:77ac before either its preview-only derivation or
     // its complete frame. A stationary point can still produce a different
     // shape after tool, mode, or viewport state changes, so preserve the
     // rectangle.
-    previous_preview_rect_ = g_original_main_preview_rect;
+    previous_preview_rect_ = g_world_input.preview_rect;
   }
 
   void preview_only_pass() override {
-    // 1090:03bf-0427 always restores/derives DS:77ac, then EQUALRECT alone
-    // decides whether 1158:0ae5 presents the changed rectangle. Keep this
-    // repaint out of the full-frame RNG/person-animation path.
+    // 1090:03bf-0427 (original_preview_only_pass_plan). The direct present
+    // owns a Main DC and calls 1158:0ae5 immediately; it is not a queued
+    // WM_PAINT. Its rebuild derives the native RGB transport without
+    // presentation-state advancement and stores the new DS:77ac. The plan
+    // and current_original_main_preview_rect (a read-only GetScrollInfo)
+    // are evaluated before the restore checkpoints, which cannot change
+    // their inputs (see original_preview_only_pass_plan).
     const bool isolation_active =
         g_elevator_control_context &&
         g_elevator_control_context->state.isolation_active;
-    const auto restore =
-        simtower::original_construction_preview_restore_plan(
-            g_original_main_preview_scratch, isolation_active,
-            previous_preview_rect_.has_value());
-    run_original_runtime_audio_checkpoints(restore.audio_checkpoints);
-    if (restore.clear_previous_rectangle) {
-      g_original_main_preview_rect.reset();
+    const auto plan = simtower::original_preview_only_pass_plan(
+        g_world_input, isolation_active, previous_preview_rect_,
+        current_original_main_preview_rect());
+    run_original_runtime_audio_checkpoints(plan.checkpoints_before);
+    if (plan.clear_previous) {
+      g_world_input.preview_rect.reset();
     }
-    const auto current_preview_rect = current_original_main_preview_rect();
-    const auto draw = simtower::original_construction_preview_draw_plan(
-        g_original_main_preview_scratch, g_build_mode_enabled,
-        g_command_mode);
-    const auto preview_presentation =
-        simtower::original_preview_only_presentation_plan(
-            previous_preview_rect_ == current_preview_rect);
-    if (preview_presentation.present_main_direct) {
-      // 1090:03fb-0427 owns a Main DC and calls 1158:0ae5 immediately;
-      // this is not a queued WM_PAINT. Rebuild the native RGB transport
-      // cache without presentation-state advancement, then synchronously
-      // present the changed result before the idle pass returns.
+    if (plan.present_main_direct) {
       g_main_pending_surface_pass.reset();
       rebuild_original_main_backing(
           simtower::OriginalMainSurfacePass::preview_repaint, false);
     } else {
-      g_original_main_preview_rect = current_preview_rect;
+      g_world_input.preview_rect = plan.new_rect;
     }
-    // 11f8:3c99/3cd2/3d19 surround the scratch capture and outline draw;
-    // all three still run when EQUALRECT later suppresses presentation.
-    run_original_runtime_audio_checkpoints(draw.audio_checkpoints);
-    if (preview_presentation.present_main_direct) {
+    run_original_runtime_audio_checkpoints(plan.checkpoints_after);
+    if (plan.present_main_direct) {
       present_original_main_backing_direct();
     }
   }
@@ -1203,12 +1048,12 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
         g_elevator_control_context->state.isolation_active;
     const auto preview_restore =
         simtower::original_construction_preview_restore_plan(
-            g_original_main_preview_scratch, elevator_isolation_active,
+            g_world_input.preview_scratch, elevator_isolation_active,
             previous_preview_rect_.has_value());
     run_original_runtime_audio_checkpoints(
         preview_restore.audio_checkpoints);
     if (preview_restore.clear_previous_rectangle) {
-      g_original_main_preview_rect.reset();
+      g_world_input.preview_rect.reset();
     }
   }
 
@@ -1221,8 +1066,8 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
         renderer_surface_dirty);
     const auto preview_draw =
         simtower::original_construction_preview_draw_plan(
-            g_original_main_preview_scratch, g_build_mode_enabled,
-            g_command_mode);
+            g_world_input.preview_scratch, g_world_input.build_mode_enabled,
+            g_world_input.command_mode);
     run_original_runtime_audio_checkpoints(preview_draw.audio_checkpoints);
     return preview_changed;
   }
@@ -1231,7 +1076,7 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
         simtower::OriginalMainSurfacePass::palette_repaint, false);
   }
   void commit_full_frame_preview() override {
-    g_original_main_preview_rect = current_preview_rect_;
+    g_world_input.preview_rect = current_preview_rect_;
   }
   void palette_recolor_invalidate_map() override {
     InvalidateRect(g_map_window, nullptr, FALSE);
@@ -1240,8 +1085,12 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
     // Keep this out of WM_PAINT so exposure handling stays independent.
     present_original_main_backing_direct();
   }
+  // OriginalHostServices, shared with Win32WorldInputHost through
+  // services(). The null guard was added with the world input move:
+  // InvalidateRect(nullptr) would invalidate every window, and Command
+  // exists from startup, so the guard never changes a real run.
   void invalidate_command() override {
-    InvalidateRect(g_command_window, nullptr, FALSE);
+    if (g_command_window) InvalidateRect(g_command_window, nullptr, FALSE);
   }
   void present_info_direct(simtower::OriginalIdleInfoLatches& latches)
       override {
@@ -1257,8 +1106,8 @@ class Win32IdlePassHost final : public simtower::OriginalIdlePassHost {
  private:
   // Per-pass locals of the former inline pass: DS:77ac at entry, and the
   // 1090:05ee rectangle committed after the simulation mirror resync.
-  decltype(g_original_main_preview_rect) previous_preview_rect_{};
-  decltype(g_original_main_preview_rect) current_preview_rect_{};
+  decltype(g_world_input.preview_rect) previous_preview_rect_{};
+  decltype(g_world_input.preview_rect) current_preview_rect_{};
 };
 
 Win32IdlePassHost g_idle_pass_host;
@@ -1390,14 +1239,9 @@ simtower::OriginalWorldPoint current_original_view(HWND window) {
 
 std::optional<simtower::OriginalConstructionPreviewRect>
 current_original_main_preview_rect() {
-  if (!g_main_window || !g_main_pointer.inside ||
-      !g_build_mode_enabled || g_command_mode < 3U) {
-    return std::nullopt;
-  }
-  const auto view = current_original_view(g_main_window);
-  return simtower::original_construction_preview_rect(
-      g_selected_build_type, g_main_pointer.client_x,
-      g_main_pointer.client_y, view.x, view.y);
+  if (!g_main_window) return std::nullopt;
+  return simtower::original_world_input_preview_rect(
+      g_world_input, current_original_view(g_main_window));
 }
 
 void present_original_document_transition_synchronously() {
@@ -1491,323 +1335,6 @@ void restore_original_derived_view_position(HWND window, int x, int y) {
   g_original_main_backing.dirty = true;
 }
 
-void keep_original_pointer_visible(HWND window,
-                                   int client_x,
-                                   int client_y,
-                                   bool horizontal_axis) {
-  RECT client{};
-  if (!GetClientRect(window, &client)) return;
-  const auto view = current_original_view(window);
-  const auto adjusted = simtower::original_keep_pointer_visible(
-      view,
-      {client.left, client.top, client.right, client.bottom},
-      {client_x, client_y}, horizontal_axis);
-  if (adjusted == view) return;
-
-  // 1080:0054 commits through 1080:00d7 (the scrollbar clamps the raw
-  // position) and immediately executes 1080:055d's focus transaction.
-  set_original_view(window, adjusted.x, adjusted.y);
-}
-
-void play_original_construction_success_audio(std::uint16_t type) {
-  const auto plan = simtower::original_construction_success_audio_plan(
-      type, g_original_beep_only);
-  // 11f8:0e21-0e67 clears the status first, then tests DS:de28 for the exact
-  // BeepOnly value one before applying the five-type WAVE/7000 exclusion.
-  if (plan.beep) {
-    MessageBeep(static_cast<UINT>(-1));
-  }
-  if (plan.play_general_wave && g_audio) {
-    (void)g_audio->play_resource(7000, 0, 4);
-  }
-}
-
-void apply_original_construction_mutation_presentation(
-    HWND window,
-    bool document_changed,
-    bool balance_changed) {
-  const auto plan =
-      simtower::original_world_mutation_presentation_plan(
-          document_changed, balance_changed);
-  if (plan.mark_document_dirty) {
-    g_tower_dirty = true;
-  }
-  if (plan.invalidate_main_surface) {
-    // 1038:002f marks the affected cells in the Win16 tile caches. Native's
-    // retained RGB transport derives those cells from the document on demand.
-    invalidate_original_surface(window);
-  }
-  if (plan.repaint_info_balance_synchronously) {
-    invalidate_original_info_status();
-  }
-  if (plan.invalidate_map_surface && g_map_window) {
-    InvalidateRect(g_map_window, nullptr, FALSE);
-  }
-}
-
-bool apply_original_lobby_result(
-    HWND window,
-    const simtower::OriginalConstructionResult& result,
-    std::int32_t old_balance,
-    std::uint16_t old_lobby_height,
-    bool continuous_drag = false) {
-  const bool priority_sound_latch_armed =
-      continuous_drag && g_construction_drag_completion.active &&
-      g_construction_drag_completion.priority_sound_latch_armed;
-  const auto helper_completion =
-      simtower::original_floor_lobby_helper_completion_plan(
-          result.succeeded(), result.construction_sound_requested,
-          priority_sound_latch_armed);
-  if (helper_completion.sound ==
-          simtower::OriginalCapturedHelperSound::priority_five &&
-      g_audio) {
-    (void)g_audio->play_resource(7001, 0, 5);
-  } else if (helper_completion.sound ==
-                 simtower::OriginalCapturedHelperSound::reserved_if_idle &&
-             g_audio) {
-    (void)g_audio->play_reserved_if_idle(7001, 0, GetTickCount());
-  }
-  if (helper_completion.clear_priority_sound_latch) {
-    g_construction_drag_completion.priority_sound_latch_armed = false;
-  }
-  if (!result.succeeded()) {
-    if (result.construction_status_code != 0U) {
-      show_original_construction_status(result.construction_status_code);
-    }
-    // 11f8:0ec0 uses WAVE/7002 for a rejected single-click command. The
-    // continuous Floor/Lobby/Parking/Ramp branches return through 11f8:0e09 and
-    // defer one WAVE/7002 to button-up only if 24cc has no accepted step.
-    if (!continuous_drag && g_audio) {
-      (void)g_audio->play_resource(7002, 0, 4);
-    }
-    const bool changed = result.document_changed ||
-        g_tower_document &&
-        (g_tower_document->header.balance != old_balance ||
-         g_tower_document->header.lobby_height != old_lobby_height);
-    if (changed) {
-      const bool balance_changed =
-          g_tower_document && g_tower_document->header.balance != old_balance;
-      apply_original_construction_mutation_presentation(
-          window, true, balance_changed);
-    }
-    return changed;
-  }
-  if (continuous_drag && g_construction_drag_completion.active &&
-      helper_completion.increment_successful_step) {
-    ++g_construction_drag_completion.successful_steps;
-  }
-  if (!continuous_drag) {
-    // 11f8:0e21 clears STRL/1003, 0e29 applies BeepOnly, and 0e58 plays the
-    // type-filtered command-success sound.
-    show_original_construction_status(0U);
-    play_original_construction_success_audio(g_selected_build_type);
-  }
-  // 1148:0163 is downstream of 07d8's common success boundary. Captured
-  // tools return at 0e02 after each accepted step and reach that boundary
-  // only once, on their successful button-up.
-  const auto rating_completion =
-      !continuous_drag && g_tower_document
-          ? simtower::complete_original_rating_construction(
-                *g_tower_document, g_part, g_selected_build_type)
-          : simtower::OriginalRatingConstructionResult{};
-  if (rating_completion.dialog.valid()) {
-    (void)run_original_event_dialog(rating_completion.dialog);
-  }
-  if (!continuous_drag && g_tower_document &&
-      simtower::original_construction_rebuilds_routes(
-          g_selected_build_type)) {
-    // Literal 0ed8 table: 1148:0163 precedes 11b0:049f then 11b0:00f2.
-    simtower::rebuild_original_transport_route_graphs(*g_tower_document);
-  }
-  const bool changed = result.document_changed || rating_completion.changed ||
-      g_tower_document &&
-      (g_tower_document->header.balance != old_balance ||
-       g_tower_document->header.lobby_height != old_lobby_height);
-  if (changed) {
-    const bool balance_changed =
-        g_tower_document && g_tower_document->header.balance != old_balance;
-    apply_original_construction_mutation_presentation(
-        window, true, balance_changed);
-  }
-  return changed;
-}
-
-void mark_original_world_interaction_changed(HWND window) {
-  const auto plan = simtower::original_world_mutation_presentation_plan(
-      true, false);
-  if (plan.mark_document_dirty) g_tower_dirty = true;
-  if (plan.invalidate_main_surface) invalidate_original_surface(window);
-  if (plan.repaint_info_balance_synchronously) {
-    invalidate_original_info_status();
-  }
-  if (plan.invalidate_map_surface && g_map_window) {
-    InvalidateRect(g_map_window, nullptr, FALSE);
-  }
-}
-
-void run_original_facility_bulldozer(HWND window, LPARAM position) {
-  if (!g_tower_document) return;
-  const auto old_balance = g_tower_document->header.balance;
-  const auto view = current_original_view(window);
-  const int client_x = static_cast<std::int16_t>(LOWORD(position));
-  const int client_y = static_cast<std::int16_t>(HIWORD(position));
-
-  // Exact 1058:0084/0097/00aa precedence: an Elevator or vertical transport
-  // owns the click before 11f8:0793 is allowed to inspect floor facilities.
-  // Elevator demolition owns the click before vertical/facility handling.
-  const auto elevator_hit = simtower::original_elevator_hit_from_client(
-      *g_tower_document, client_x, client_y, view.x, view.y);
-  if (elevator_hit.hit) {
-    const auto& elevator =
-        g_tower_document->elevators[elevator_hit.elevator_index];
-    const auto action = simtower::original_elevator_bulldozer_action(
-        true, elevator_hit.car_index, elevator.cars, elevator_hit.floor,
-        elevator.bottom_floor, elevator.top_floor, elevator.word_3c);
-    if (action == simtower::OriginalElevatorBulldozerAction::consume) {
-      return;
-    }
-    if (action == simtower::OriginalElevatorBulldozerAction::remove_car ||
-        action == simtower::OriginalElevatorBulldozerAction::remove_shaft) {
-      simtower::OriginalElevatorDemolitionResult demolition{};
-      if (action == simtower::OriginalElevatorBulldozerAction::remove_car) {
-        demolition = simtower::remove_original_elevator_car(
-            *g_tower_document, elevator_hit.elevator_index,
-            static_cast<std::size_t>(elevator_hit.car_index), g_part,
-            g_rent_income);
-      } else {
-        // A cap click, a click outside the stored span, or a click on the
-        // last car enters 0179's serviced-floor connectivity confirmation.
-        if (simtower::
-                original_elevator_shaft_demolition_requires_confirmation(
-                    *g_tower_document, elevator_hit.elevator_index)) {
-          const auto text = simtower::original_strl_entry(
-              g_resources.find("STRL", 1005), 5U);
-          if (simtower::show_original_alert(
-                  window, g_resources, 1005, {text, {}, {}, {}}) != 1) {
-            return;
-          }
-        }
-        demolition = simtower::remove_original_elevator_shaft(
-            *g_tower_document, elevator_hit.elevator_index, g_part,
-            g_rent_income);
-      }
-      if (demolition.removed) {
-        consume_original_person_family_dispatches(
-            demolition.family_dispatches);
-        if (g_audio) {
-          (void)g_audio->play_resource(7003, 0, 4);
-        }
-        mark_original_world_interaction_changed(window);
-        if (g_tower_document->header.balance != old_balance) {
-          invalidate_original_info_status();
-        }
-      }
-      return;
-    }
-    // The pass-through result is the literal zero returned by 0201 when an
-    // in-span shaft-body hit has word_3c == 0. Preserve 1058's next two legs.
-  }
-  const auto vertical_hit =
-      simtower::original_vertical_transport_hit_from_client(
-          *g_tower_document, client_x, client_y, view.x, view.y);
-  if (vertical_hit.hit) {
-    const auto demolition = simtower::remove_original_vertical_transport(
-        *g_tower_document, vertical_hit.transport_index, g_part,
-        g_rent_income);
-    if (demolition.removed) {
-      consume_original_person_family_dispatches(
-          demolition.family_dispatches);
-      if (g_audio) {
-        (void)g_audio->play_resource(7003, 0, 4);
-      }
-      mark_original_world_interaction_changed(window);
-      if (g_tower_document->header.balance != old_balance) {
-        invalidate_original_info_status();
-      }
-    }
-    return;
-  }
-  const auto click = simtower::apply_original_facility_click_damage(
-      *g_tower_document, g_rent_income, client_x, client_y, view.x, view.y);
-  if (!click.hit.hit) return;
-  const auto& result = click.damage;
-  play_original_event_sounds(result.sound_requests);
-  if (result.alert_code != 0) {
-    show_original_construction_status(
-        static_cast<std::uint16_t>(result.alert_code));
-  }
-  for (const auto code : result.notification_codes) {
-    show_original_notification_status(code);
-  }
-  if (result.changed) {
-    mark_original_world_interaction_changed(window);
-    if (g_tower_document->header.balance != old_balance) {
-      // Exact 1178:0697 direct demolition/structure debit repaint.
-      invalidate_original_info_status();
-    }
-  }
-}
-
-void run_original_magnifying_glass(HWND window, LPARAM position) {
-  if (!g_tower_document) return;
-  const auto view = current_original_view(window);
-  const auto target = simtower::select_original_magnifier_target(
-      *g_tower_document,
-      static_cast<std::int16_t>(LOWORD(position)),
-      static_cast<std::int16_t>(HIWORD(position)), view.x, view.y);
-  switch (target.kind) {
-    case simtower::OriginalMagnifierTargetKind::elevator_car_information:
-    case simtower::OriginalMagnifierTargetKind::vertical_transport_information:
-      (void)run_original_transport_information_dialog(target);
-      break;
-    case simtower::OriginalMagnifierTargetKind::elevator_control:
-      open_original_elevator_control(
-          target.elevator_index,
-          static_cast<std::int16_t>(LOWORD(position)),
-          static_cast<std::int16_t>(HIWORD(position)));
-      break;
-    case simtower::OriginalMagnifierTargetKind::facility_information:
-      (void)run_original_facility_information_dialog(
-          window, target.floor, target.tenant_index);
-      break;
-    case simtower::OriginalMagnifierTargetKind::none:
-      break;
-    case simtower::OriginalMagnifierTargetKind::waiting_person_information:
-      (void)run_original_person_information_dialog(
-          window, target.person_index);
-      break;
-  }
-}
-
-bool apply_original_shift_replacement(
-    HWND window,
-    WPARAM keys,
-    std::uint16_t selected_type,
-    const simtower::OriginalLobbyPlacement& placement) {
-  if (!g_tower_document || (keys & MK_SHIFT) == 0U) return true;
-  const auto old_balance = g_tower_document->header.balance;
-  const auto result = simtower::apply_original_replacement_demolition(
-      *g_tower_document, g_rent_income, selected_type, placement.floor,
-      static_cast<std::int16_t>(placement.left),
-      static_cast<std::int16_t>(placement.right));
-  play_original_event_sounds(result.sound_requests);
-  for (const auto code : result.alert_codes) {
-    if (code != 0) {
-      show_original_construction_status(static_cast<std::uint16_t>(code));
-    }
-  }
-  for (const auto code : result.notification_codes) {
-    show_original_notification_status(code);
-  }
-  if (result.changed != 0U) {
-    mark_original_world_interaction_changed(window);
-    if (g_tower_document->header.balance != old_balance) {
-      invalidate_original_info_status();
-    }
-  }
-  return result.completed;
-}
-
 void consume_original_person_family_dispatches(
     const std::vector<simtower::OriginalPersonFamilyDispatchResult>&
         dispatches) {
@@ -1823,946 +1350,6 @@ void consume_original_person_family_dispatch(
     const simtower::OriginalPersonFamilyDispatchResult& dispatch) {
   simtower::consume_original_person_family_dispatch(g_idle_pass_host,
                                                     dispatch);
-}
-
-void run_original_elevator_finger(HWND window, LPARAM position) {
-  if (!g_tower_document) return;
-  const auto view = current_original_view(window);
-  const int client_x = static_cast<std::int16_t>(LOWORD(position));
-  const int client_y = static_cast<std::int16_t>(HIWORD(position));
-  const auto hit = simtower::original_elevator_hit_from_client(
-      *g_tower_document, client_x, client_y, view.x, view.y);
-  if (!hit.hit) return;
-
-  if (simtower::add_original_elevator_service_floor(
-          *g_tower_document, hit.elevator_index, hit.floor)) {
-    // 1038:0000 only rebuilds the original's transient per-view tile cache.
-    // The native renderer derives those frames directly, so invalidation is
-    // its equivalent after the persisted graph mutation.
-    mark_original_world_interaction_changed(window);
-    return;
-  }
-
-  const auto& elevator =
-      g_tower_document->elevators[hit.elevator_index];
-  if (hit.floor < 0 || hit.floor >= 120 ||
-      elevator.serviced_floors[static_cast<std::size_t>(hit.floor)] ==
-          std::byte{0}) {
-    return;
-  }
-
-  const auto warning = simtower::original_elevator_service_floor_warning_code(
-      *g_tower_document, hit.elevator_index, hit.floor);
-  if (warning != 0U) {
-    const auto text = simtower::original_strl_entry(
-        g_resources.find("STRL", 1005), warning);
-    if (simtower::show_original_alert(
-            window, g_resources, 1005, {text, {}, {}, {}}) == 2) {
-      return;
-    }
-  }
-  const auto removal = simtower::remove_original_elevator_service_floor(
-      *g_tower_document, hit.elevator_index, hit.floor, g_part,
-      g_rent_income);
-  if (removal.cleanup.status ==
-      simtower::OriginalElevatorFloorPeopleCleanupStatus::cleaned) {
-    consume_original_person_family_dispatches(removal.family_dispatches);
-    mark_original_world_interaction_changed(window);
-  }
-}
-
-void begin_original_elevator_finger(HWND window, LPARAM position) {
-  if (!g_tower_document) return;
-  const auto view = current_original_view(window);
-  const int client_x = static_cast<std::int16_t>(LOWORD(position));
-  const int client_y = static_cast<std::int16_t>(HIWORD(position));
-  const auto hit = simtower::original_elevator_hit_from_client(
-      *g_tower_document, client_x, client_y, view.x, view.y);
-  const auto* elevator = hit.hit
-      ? &g_tower_document->elevators[hit.elevator_index]
-      : nullptr;
-  const auto path = simtower::original_elevator_finger_press_path(
-      hit.hit, elevator && elevator->word_3c != 0U, hit.floor,
-      elevator ? elevator->bottom_floor : 0,
-      elevator ? elevator->top_floor : 0);
-  if (path == simtower::OriginalElevatorFingerPressPath::service_floor) {
-    // 1058:00d9 first gives an in-span, initialized shaft to 10a0:0000.
-    // That path consumes the click even when a service-floor mutation is
-    // rejected, so it never enters 10a0:0544's capture transaction.
-    run_original_elevator_finger(window, position);
-    return;
-  }
-
-  // 10a0:0562-059f captures every otherwise-unhandled Finger press and sets
-  // DS:02a6 before scanning the shaft caps. Even a press in empty space keeps
-  // the idle scheduler suppressed until the matching button-up.
-  g_elevator_shaft_drag.capture_active = true;
-  SetCapture(window);
-  if (path ==
-      simtower::OriginalElevatorFingerPressPath::capture_upper_cap) {
-    // 10a0:0544 stores direction one for the upper cap, captures the mouse,
-    // and feeds every subsequent point through 07b7 -> 0819.
-    g_elevator_shaft_drag = {
-        true, OriginalElevatorShaftDragDirection::upper, hit.elevator_index};
-    SetCursor(resolve_original_cursor(1000U));
-    return;
-  }
-  if (path ==
-      simtower::OriginalElevatorFingerPressPath::capture_lower_cap) {
-    g_elevator_shaft_drag = {
-        true, OriginalElevatorShaftDragDirection::lower, hit.elevator_index};
-    SetCursor(resolve_original_cursor(1000U));
-    return;
-  }
-}
-
-void update_original_elevator_finger(HWND window, LPARAM position) {
-  if (!g_tower_document ||
-      g_elevator_shaft_drag.direction ==
-          OriginalElevatorShaftDragDirection::none) {
-    return;
-  }
-  const auto index = g_elevator_shaft_drag.elevator_index;
-  if (index >= g_tower_document->elevators.size()) return;
-
-  const auto view = current_original_view(window);
-  const int client_x = static_cast<std::int16_t>(LOWORD(position));
-  const int client_y = static_cast<std::int16_t>(HIWORD(position));
-  // Exact 10a0:07b7 captured-shaft pointer transform: add the live view,
-  // convert world y through the 120-story/36-pixel grid, then offset one floor
-  // inward before dispatching the 0819/0b87 upper/lower transaction.
-  const auto pointer = simtower::original_floor_placement_from_client(
-      client_x, client_y, view.x, view.y);
-  const auto target = static_cast<std::int16_t>(
-      pointer.floor +
-      (g_elevator_shaft_drag.direction ==
-               OriginalElevatorShaftDragDirection::upper
-           ? -1
-           : 1));
-  const auto old_top = g_tower_document->elevators[index].top_floor;
-  const auto old_bottom = g_tower_document->elevators[index].bottom_floor;
-  const auto old_balance = g_tower_document->header.balance;
-  bool succeeded = false;
-  if (g_elevator_shaft_drag.direction ==
-      OriginalElevatorShaftDragDirection::upper) {
-    if (target > old_top) {
-      succeeded = simtower::extend_original_elevator_shaft(
-          *g_tower_document, index, target, g_construction_costs).succeeded();
-    } else {
-      const auto shrink = simtower::shrink_original_elevator_shaft(
-          *g_tower_document, index,
-          simtower::OriginalElevatorShaftEnd::upper, target, g_part,
-          g_rent_income);
-      succeeded = shrink.succeeded();
-      if (succeeded) {
-        consume_original_person_family_dispatches(shrink.family_dispatches);
-      }
-    }
-  } else {
-    if (target < old_bottom) {
-      succeeded = simtower::extend_original_elevator_shaft(
-          *g_tower_document, index, target, g_construction_costs).succeeded();
-    } else {
-      const auto shrink = simtower::shrink_original_elevator_shaft(
-          *g_tower_document, index,
-          simtower::OriginalElevatorShaftEnd::lower, target, g_part,
-          g_rent_income);
-      succeeded = shrink.succeeded();
-      if (succeeded) {
-        consume_original_person_family_dispatches(shrink.family_dispatches);
-      }
-    }
-  }
-  if (succeeded &&
-      (g_tower_document->elevators[index].top_floor != old_top ||
-       g_tower_document->elevators[index].bottom_floor != old_bottom)) {
-    mark_original_world_interaction_changed(window);
-    if (g_tower_document->header.balance != old_balance) {
-      invalidate_original_info_status();
-    }
-    keep_original_pointer_visible(window, client_x, client_y, true);
-  }
-}
-
-void continue_original_elevator_finger(HWND window, LPARAM position) {
-  if (!g_tower_document) return;
-  if (g_elevator_shaft_drag.direction !=
-      OriginalElevatorShaftDragDirection::none) {
-    update_original_elevator_finger(window, position);
-    return;
-  }
-
-  // 10a0:0667-079a scans for a cap on every armed left-button move while
-  // DS:0080 has no direction. This can begin a shaft drag after the initial
-  // press occurred in empty space or was consumed by 10a0:0000 in-span.
-  const auto view = current_original_view(window);
-  const auto hit = simtower::original_elevator_hit_from_client(
-      *g_tower_document,
-      static_cast<std::int16_t>(LOWORD(position)),
-      static_cast<std::int16_t>(HIWORD(position)), view.x, view.y);
-  if (!hit.hit) return;
-  const auto& elevator = g_tower_document->elevators[hit.elevator_index];
-  const auto path = simtower::original_elevator_finger_press_path(
-      true, elevator.word_3c != 0U, hit.floor,
-      elevator.bottom_floor, elevator.top_floor);
-  if (path ==
-      simtower::OriginalElevatorFingerPressPath::capture_upper_cap) {
-    g_elevator_shaft_drag.direction =
-        OriginalElevatorShaftDragDirection::upper;
-  } else if (path ==
-             simtower::OriginalElevatorFingerPressPath::capture_lower_cap) {
-    g_elevator_shaft_drag.direction =
-        OriginalElevatorShaftDragDirection::lower;
-  } else {
-    return;
-  }
-  g_elevator_shaft_drag.elevator_index = hit.elevator_index;
-  SetCursor(resolve_original_cursor(1000U));
-  update_original_elevator_finger(window, position);
-}
-
-void double_click_original_elevator_finger(HWND window, LPARAM position) {
-  // 10a0:05bf-062c opens Elevator Control for any shaft hit. Both branches
-  // clear direction, restore the Finger cursor, and release capture, but the
-  // miss branch deliberately leaves DS:02a6 armed until the following up.
-  std::optional<std::size_t> hit_index{};
-  if (g_tower_document) {
-    const auto view = current_original_view(window);
-    const auto hit = simtower::original_elevator_hit_from_client(
-        *g_tower_document,
-        static_cast<std::int16_t>(LOWORD(position)),
-        static_cast<std::int16_t>(HIWORD(position)), view.x, view.y);
-    if (hit.hit) {
-      SetCursor(resolve_original_cursor(0U));
-      hit_index = hit.elevator_index;
-    }
-  }
-  const auto plan = simtower::original_elevator_finger_double_click_plan(
-      hit_index.has_value());
-  if (plan.open_control) {
-    open_original_elevator_control(
-        *hit_index,
-        static_cast<std::int16_t>(LOWORD(position)),
-        static_cast<std::int16_t>(HIWORD(position)));
-  }
-  if (plan.clear_capture_latch) {
-    g_elevator_shaft_drag = {};
-  } else {
-    g_elevator_shaft_drag.direction =
-        OriginalElevatorShaftDragDirection::none;
-  }
-  SetCursor(resolve_original_cursor(1004U));
-  ReleaseCapture();
-}
-
-void update_original_parking_drag(HWND window,
-                                  LPARAM position,
-                                  bool refresh_horizontal_snap = true);
-
-void begin_original_lobby_drag(HWND window, WPARAM keys, LPARAM position,
-                               bool setup_press = true) {
-  if (!g_tower_document) return;
-  // Exact 1058:0000 edit-mode dispatch. Mode zero is the Bulldozer, one is
-  // the elevator Finger tool, and two is the Magnifying Glass. Only modes
-  // three and above enter 11f8:07d8 construction.
-  if (g_command_mode == 0U) {
-    if (g_build_mode_enabled) run_original_facility_bulldozer(window, position);
-    return;
-  }
-  if (g_command_mode == 1U) {
-    if (g_build_mode_enabled) begin_original_elevator_finger(window, position);
-    return;
-  }
-  if (g_command_mode == 2U) {
-    run_original_magnifying_glass(window, position);
-    return;
-  }
-  if (g_command_mode < 3U || !g_build_mode_enabled) return;
-  const auto view = current_original_view(window);
-  const int client_x = static_cast<std::int16_t>(LOWORD(position));
-  const int client_y = static_cast<std::int16_t>(HIWORD(position));
-  std::optional<simtower::OriginalLobbyPlacement> bonus_placement;
-  if (g_selected_build_type == 0U) {
-    bonus_placement = simtower::original_floor_placement_from_client(
-        client_x, client_y, view.x, view.y);
-  } else if (g_selected_build_type == 7U) {
-    bonus_placement = simtower::original_office_placement_from_client(
-        client_x, client_y, view.x, view.y);
-  } else if (g_selected_build_type == 24U) {
-    bonus_placement = simtower::original_lobby_placement_from_client(
-        client_x, client_y, view.x, view.y);
-  } else if (simtower::original_facility_width_cells(
-                 g_selected_build_type) != 0U) {
-    bonus_placement = simtower::original_facility_placement_from_client(
-        g_selected_build_type, client_x, client_y, view.x, view.y);
-  }
-
-  // 11f8:090e-0950 resets 24cc and arms every continuous tool before the
-  // hidden 0955 initial-balance branch and before Shift replacement. Keep the
-  // capture alive even when either later prepass returns early.
-  if (setup_press) {
-    g_retained_construction_press_position = position;
-    g_retained_construction_press_position_valid = true;
-    g_retained_construction_placement = bonus_placement;
-    g_construction_drag_completion = {};
-    if (simtower::original_continuous_construction_type(
-            g_selected_build_type) && bonus_placement) {
-      g_construction_drag_completion = {
-          true, g_selected_build_type, 0U,
-          g_tower_document->header.balance, true};
-      const auto& placement = *bonus_placement;
-      if (g_selected_build_type == 0U) {
-        g_floor_drag = {
-            true, placement.floor, placement.left, placement.right};
-      } else if (g_selected_build_type == 24U) {
-        g_lobby_drag = {
-            true, placement.floor, placement.left, placement.right};
-      }
-      SetCapture(window);
-    }
-  }
-  if (bonus_placement && simtower::apply_original_initial_balance_bonus(
-                             *g_tower_document, bonus_placement->floor,
-                             bonus_placement->left)) {
-    // 11f8:0980 calls 1178:076f directly. This changes only finance state and
-    // immediately paints Info; it does not dirty Main or Map pixels.
-    g_tower_dirty = true;
-    invalidate_original_info_status();
-    return;
-  }
-  if (g_selected_build_type == 0U) {
-    const auto placement = simtower::original_floor_placement_from_client(
-        client_x, client_y, view.x, view.y);
-    const auto old_balance = g_tower_document->header.balance;
-    const auto old_height = g_tower_document->header.lobby_height;
-    const auto result = simtower::build_original_floor(
-        *g_tower_document, placement.floor,
-        static_cast<std::uint16_t>(placement.left),
-        static_cast<std::uint16_t>(placement.right), g_construction_costs);
-    (void)apply_original_lobby_result(window, result, old_balance, old_height,
-                                      true);
-    if (result.succeeded()) {
-      keep_original_pointer_visible(window, client_x, client_y, true);
-    }
-    return;
-  }
-  if (g_selected_build_type == 22U || g_selected_build_type == 27U) {
-    const auto type = static_cast<std::uint8_t>(g_selected_build_type);
-    const auto placement = simtower::original_facility_placement_from_client(
-        type, client_x, client_y, view.x, view.y);
-    const auto old_balance = g_tower_document->header.balance;
-    const auto old_height = g_tower_document->header.lobby_height;
-    simtower::OriginalConstructionResult result{
-        simtower::OriginalConstructionStatus::invalid_span, 0, 20U};
-    result = simtower::build_original_vertical_transport(
-        *g_tower_document, type, placement.floor,
-        static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    (void)apply_original_lobby_result(window, result, old_balance, old_height);
-    return;
-  }
-  if (g_selected_build_type == 11U || g_selected_build_type == 0x2cU) {
-    const auto type = g_selected_build_type;
-    const auto placement = simtower::original_facility_placement_from_client(
-        type, client_x, client_y, view.x, view.y);
-    if (setup_press && !apply_original_shift_replacement(
-            window, keys, type, placement)) {
-      return;
-    }
-
-    // Unlike Floor/Lobby, 0946 captures Parking/Ramp without setting DS:3216.
-    // Their 240d/25a2 helpers initialize only when actually reached. The floor
-    // remains 08ce's down-time snap, while a later move refreshes c6/c8 first.
-    if (g_parking_drag.kind == OriginalParkingDragKind::none) {
-      g_parking_drag.kind = type == 11U ? OriginalParkingDragKind::parking
-                                        : OriginalParkingDragKind::ramp;
-      g_parking_drag.press_floor =
-          g_retained_construction_placement
-              ? g_retained_construction_placement->floor
-              : placement.floor;
-      g_parking_drag.snapped_left = placement.left;
-      g_parking_drag.snapped_right = placement.right;
-    }
-    update_original_parking_drag(window, position, true);
-    return;
-  }
-  if ((g_selected_build_type >= 3U && g_selected_build_type <= 5U) ||
-      g_selected_build_type == 6U || g_selected_build_type == 9U ||
-      g_selected_build_type == 10U || g_selected_build_type == 12U ||
-      g_selected_build_type == 13U || g_selected_build_type == 14U ||
-      g_selected_build_type == 15U || g_selected_build_type == 17U ||
-      g_selected_build_type == 18U || g_selected_build_type == 20U ||
-      g_selected_build_type == 29U || g_selected_build_type == 31U ||
-      g_selected_build_type == 36U) {
-    const auto type = static_cast<std::uint8_t>(g_selected_build_type);
-    const auto placement = simtower::original_facility_placement_from_client(
-        type, client_x, client_y, view.x, view.y);
-    const auto old_balance = g_tower_document->header.balance;
-    const auto old_height = g_tower_document->header.lobby_height;
-    simtower::OriginalConstructionResult result{
-        simtower::OriginalConstructionStatus::invalid_span, 0, 20U};
-    // 11f8:09c1-09e3 runs Shift replacement before the type jump table. The
-    // constructor itself owns span validation and any preceding type limit.
-    if (setup_press &&
-        !apply_original_shift_replacement(window, keys, type, placement)) {
-      return;
-    }
-    if (type == 9U) {
-      result = simtower::build_original_condo(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left),
-          static_cast<std::uint8_t>(g_facility_variants[type]),
-          g_construction_costs);
-    } else if (type == 10U) {
-      result = simtower::build_original_retail_shop(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 6U) {
-      result = simtower::build_original_restaurant(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 12U) {
-      result = simtower::build_original_fast_food(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 14U) {
-      result = simtower::build_original_security(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 15U) {
-      result = simtower::build_original_housekeeping(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 17U) {
-      result = simtower::build_original_secom_center(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 18U) {
-      result = simtower::build_original_movie_theater(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 20U) {
-      result = simtower::build_original_recycling_center(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 29U) {
-      result = simtower::build_original_party_hall(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 31U) {
-      result = simtower::build_original_metro_station(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 36U) {
-      result = simtower::build_original_cathedral(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left), g_construction_costs);
-    } else if (type == 13U) {
-      result = simtower::build_original_medical_center(
-          *g_tower_document, placement.floor,
-          static_cast<std::uint16_t>(placement.left),
-          static_cast<std::uint8_t>(g_facility_variants[type]),
-          g_construction_costs);
-    } else {
-      result = simtower::build_original_hotel_room(
-          *g_tower_document, type, placement.floor,
-          static_cast<std::uint16_t>(placement.left),
-          static_cast<std::uint8_t>(g_facility_variants[type]),
-          g_construction_costs);
-    }
-    if (type == 13U) {
-      // 11f8:0c46-0c7f checks the ten-center sentinel before entering the
-      // constructor/variant path; all attempted constructors advance 795c.
-      if (result.construction_status_code != 30U) {
-        g_facility_variants[type] = static_cast<std::uint16_t>(
-            (g_facility_variants[type] + 1U) % 3U);
-      }
-    } else if (type != 6U && type != 10U && type != 12U && type != 14U &&
-               type != 15U && type != 17U && type != 18U && type != 20U &&
-               type != 29U && type != 31U && type != 36U) {
-      // 11f8:0b21/0b57/0b8d/0bf9 advances these selectors even after a
-      // rejected attempt. Retail has no appearance selector to advance.
-      const std::uint16_t cycle = type == 4U ? 4U : (type == 9U ? 3U : 2U);
-      g_facility_variants[type] = static_cast<std::uint16_t>(
-          (g_facility_variants[type] + 1U) % cycle);
-    }
-    (void)apply_original_lobby_result(window, result, old_balance, old_height);
-    return;
-  }
-  if (g_selected_build_type == 7U) {
-    const auto placement = simtower::original_office_placement_from_client(
-        client_x, client_y, view.x, view.y);
-    const auto old_balance = g_tower_document->header.balance;
-    const auto old_height = g_tower_document->header.lobby_height;
-    simtower::OriginalConstructionResult result{
-        simtower::OriginalConstructionStatus::invalid_span, 0, 20U};
-    if (setup_press &&
-        !apply_original_shift_replacement(window, keys, 7U, placement)) {
-      return;
-    }
-    result = simtower::build_original_office(
-        *g_tower_document, placement.floor,
-        static_cast<std::uint16_t>(placement.left),
-        static_cast<std::uint8_t>(g_office_variant),
-        g_construction_costs);
-    // 11f8:0bc3-0bd0 advances DS:7954 after every type-7 attempt, including
-    // rejected placement, and keeps the command palette on Office.
-    g_office_variant = static_cast<std::uint16_t>((g_office_variant + 1U) % 6U);
-    (void)apply_original_lobby_result(window, result, old_balance, old_height);
-    return;
-  }
-  if (g_selected_build_type == 1U || g_selected_build_type == 42U ||
-      g_selected_build_type == 43U) {
-    const auto placement = simtower::original_facility_placement_from_client(
-        g_selected_build_type, client_x, client_y, view.x, view.y);
-    const auto old_balance = g_tower_document->header.balance;
-    const auto old_height = g_tower_document->header.lobby_height;
-    const auto result = simtower::build_original_elevator(
-        *g_tower_document, g_selected_build_type, placement.floor,
-        static_cast<std::uint16_t>(placement.left),
-        g_construction_costs, g_part);
-    if (apply_original_lobby_result(window, result, old_balance, old_height) &&
-        result.new_elevator_shaft_created) {
-      // 11f8:140d is reached only after allocating a new shaft. The existing
-      // add-car branch jumps from 122f straight to 1446 and leaves the active
-      // construction command untouched.
-      g_command_mode = 1U;
-      InvalidateRect(g_command_window, nullptr, FALSE);
-      // 1080:05a1 composes and presents Command before 0fea returns.
-      UpdateWindow(g_command_window);
-    }
-    return;
-  }
-  const auto placement = simtower::original_lobby_placement_from_client(
-      client_x, client_y, view.x, view.y);
-  if (g_selected_build_type != 24U) {
-    return;
-  }
-  const auto old_balance = g_tower_document->header.balance;
-  const auto old_height = g_tower_document->header.lobby_height;
-  simtower::OriginalConstructionResult result{};
-  if (placement.floor == 10 && old_height == 0U) {
-    // 11f8:098f-09b3: Control selects a two-story lobby; Control+Shift
-    // selects three. Shift alone leaves the default one-story selection.
-    std::uint16_t height = 1U;
-    if ((keys & MK_CONTROL) != 0U) {
-      height = (keys & MK_SHIFT) != 0U ? 3U : 2U;
-    }
-    result = simtower::build_original_initial_lobby(
-        *g_tower_document, static_cast<std::uint16_t>(placement.left),
-        static_cast<std::uint16_t>(placement.right), height,
-        g_construction_costs);
-  } else if (placement.floor == 10) {
-    result = simtower::extend_original_lobby(
-        *g_tower_document, static_cast<std::uint16_t>(placement.left),
-        static_cast<std::uint16_t>(placement.right), g_construction_costs);
-  } else {
-    result = simtower::build_original_sky_lobby(
-        *g_tower_document, placement.floor,
-        static_cast<std::uint16_t>(placement.left),
-        static_cast<std::uint16_t>(placement.right), g_construction_costs);
-  }
-  (void)apply_original_lobby_result(window, result, old_balance, old_height,
-                                    true);
-  if (result.succeeded()) {
-    keep_original_pointer_visible(window, client_x, client_y, true);
-  }
-}
-
-void update_original_lobby_drag(HWND window, LPARAM position) {
-  if (!g_lobby_drag.active || !g_tower_document) {
-    return;
-  }
-  const auto view = current_original_view(window);
-  const int client_x = static_cast<std::int16_t>(LOWORD(position));
-  const int client_y = static_cast<std::int16_t>(HIWORD(position));
-  const auto placement = simtower::original_lobby_placement_from_client(
-      client_x, client_y, view.x, view.y);
-  const std::int32_t left = std::min(g_lobby_drag.anchor_left, placement.left);
-  const std::int32_t right =
-      std::max(g_lobby_drag.anchor_right, placement.right);
-  const auto old_balance = g_tower_document->header.balance;
-  const auto old_height = g_tower_document->header.lobby_height;
-  const auto result = g_lobby_drag.floor == 10
-      ? simtower::extend_original_lobby(
-            *g_tower_document, static_cast<std::uint16_t>(left),
-            static_cast<std::uint16_t>(right), g_construction_costs)
-      : simtower::build_original_sky_lobby(
-            *g_tower_document, g_lobby_drag.floor,
-            static_cast<std::uint16_t>(left),
-            static_cast<std::uint16_t>(right), g_construction_costs);
-  (void)apply_original_lobby_result(window, result, old_balance, old_height,
-                                    true);
-  if (result.succeeded()) {
-    keep_original_pointer_visible(window, client_x, client_y, true);
-  }
-}
-
-void update_original_floor_drag(HWND window, LPARAM position) {
-  if (!g_floor_drag.active || !g_tower_document) {
-    return;
-  }
-  const auto view = current_original_view(window);
-  const int client_x = static_cast<std::int16_t>(LOWORD(position));
-  const int client_y = static_cast<std::int16_t>(HIWORD(position));
-  const auto placement = simtower::original_floor_placement_from_client(
-      client_x, client_y, view.x, view.y);
-  const std::int32_t left =
-      std::min(g_floor_drag.anchor_left, placement.left);
-  const std::int32_t right =
-      std::max(g_floor_drag.anchor_right, placement.right);
-  const auto old_balance = g_tower_document->header.balance;
-  const auto old_height = g_tower_document->header.lobby_height;
-  const auto result = simtower::build_original_floor(
-      *g_tower_document, g_floor_drag.floor,
-      static_cast<std::uint16_t>(left), static_cast<std::uint16_t>(right),
-      g_construction_costs);
-  (void)apply_original_lobby_result(window, result, old_balance, old_height,
-                                    true);
-  if (result.succeeded()) {
-    keep_original_pointer_visible(window, client_x, client_y, true);
-  }
-}
-
-void update_original_parking_drag(HWND window,
-                                  LPARAM position,
-                                  bool refresh_horizontal_snap) {
-  if (g_parking_drag.kind == OriginalParkingDragKind::none ||
-      !g_tower_document) {
-    return;
-  }
-  const auto view = current_original_view(window);
-  const int client_x = static_cast<std::int16_t>(LOWORD(position));
-  const int client_y = static_cast<std::int16_t>(HIWORD(position));
-  const auto type = g_parking_drag.kind == OriginalParkingDragKind::parking
-      ? 11U
-      : 44U;
-  const auto placement = simtower::original_facility_placement_from_client(
-      type, client_x, client_y, view.x, view.y);
-  if (refresh_horizontal_snap) {
-    // 07d8 refreshes c6/c8 for move but not for double-click. Ramp passes
-    // these live horizontal words to every 17fd attempt in the helper call.
-    g_parking_drag.snapped_left = placement.left;
-    g_parking_drag.snapped_right = placement.right;
-  }
-
-  std::vector<std::int32_t> parking_units;
-  std::vector<simtower::OriginalParkingRampDragAttempt> ramp_attempts;
-  simtower::OriginalParkingDragRunState parking_next{};
-  simtower::OriginalParkingRampDragRunState ramp_next{};
-  if (g_parking_drag.kind == OriginalParkingDragKind::parking) {
-    auto plan = simtower::original_parking_drag_run_plan(
-        g_parking_drag.parking,
-        g_parking_drag.snapped_left,
-        g_parking_drag.snapped_right,
-        placement.left,
-        placement.right);
-    parking_units = std::move(plan.unit_lefts);
-    parking_next = plan.next_state;
-  } else {
-    auto plan = simtower::original_parking_ramp_drag_run_plan(
-        g_parking_drag.ramp,
-        g_parking_drag.press_floor,
-        placement.floor,
-        g_parking_drag.snapped_left);
-    ramp_attempts = std::move(plan.attempts);
-    ramp_next = plan.next_state;
-  }
-
-  const auto old_balance = g_tower_document->header.balance;
-  bool attempted = false;
-  bool final_attempt_succeeded = false;
-  bool any_succeeded = false;
-  const auto consume_result = [&](
-      const simtower::OriginalConstructionResult& result) {
-    attempted = true;
-    final_attempt_succeeded = result.succeeded();
-    any_succeeded = any_succeeded || final_attempt_succeeded;
-    if (!result.succeeded() && result.construction_status_code != 0U) {
-      show_original_construction_status(result.construction_status_code);
-    }
-  };
-  for (const auto left : parking_units) {
-    consume_result(simtower::build_original_parking(
-        *g_tower_document, g_parking_drag.press_floor,
-        static_cast<std::uint16_t>(left), g_construction_costs));
-  }
-  for (const auto& attempt : ramp_attempts) {
-    consume_result(simtower::build_original_parking_ramp(
-        *g_tower_document, attempt.floor,
-        static_cast<std::uint16_t>(attempt.left),
-        g_construction_costs));
-  }
-
-  if (any_succeeded) {
-    apply_original_construction_mutation_presentation(
-        window, true,
-        g_tower_document->header.balance != old_balance);
-  }
-
-  const auto completion = simtower::original_captured_helper_completion_plan(
-      attempted, final_attempt_succeeded,
-      g_construction_drag_completion.priority_sound_latch_armed);
-  if (completion.increment_successful_step &&
-      g_construction_drag_completion.active) {
-    ++g_construction_drag_completion.successful_steps;
-  }
-  if (completion.sound ==
-          simtower::OriginalCapturedHelperSound::priority_five &&
-      g_audio) {
-    (void)g_audio->play_resource(7001, 0, 5);
-  } else if (completion.sound ==
-                 simtower::OriginalCapturedHelperSound::reserved_if_idle &&
-             g_audio) {
-    (void)g_audio->play_reserved_if_idle(7001, 0, GetTickCount());
-  }
-  if (completion.clear_priority_sound_latch) {
-    g_construction_drag_completion.priority_sound_latch_armed = false;
-  }
-  if (completion.returned_success) {
-    // 240d passes one for horizontal auto-scroll; 25a2 passes zero for the
-    // vertical axis. Both calls precede the helper's retained-pointer update.
-    keep_original_pointer_visible(
-        window, client_x, client_y,
-        g_parking_drag.kind == OriginalParkingDragKind::parking);
-  }
-
-  // 2570/26a6 re-snap LPARAM after possible auto-scroll, so the next helper
-  // call consumes the post-scroll world coordinate rather than the one above.
-  const auto post_view = current_original_view(window);
-  const auto post_placement =
-      simtower::original_facility_placement_from_client(
-          type, client_x, client_y, post_view.x, post_view.y);
-  if (g_parking_drag.kind == OriginalParkingDragKind::parking) {
-    parking_next.retained_left = post_placement.left;
-    parking_next.retained_right = post_placement.right;
-    g_parking_drag.parking = parking_next;
-  } else {
-    ramp_next.retained_floor = post_placement.floor;
-    ramp_next.retained_upper_exclusive = static_cast<std::int16_t>(
-        post_placement.floor + 1);
-    g_parking_drag.ramp = ramp_next;
-  }
-  // 11f8:07d8 clears DS:3216 when 240d/25a2 return zero (0de4-0e09), so the
-  // next helper call re-anchors at the then-current pointer (240d 242a,
-  // 25a2 25b9). A success instead counts the step (0e02).
-  if (!completion.returned_success) {
-    g_parking_drag.parking.initialized = false;
-    g_parking_drag.ramp.initialized = false;
-  }
-}
-
-void finish_original_construction_drag(HWND window) {
-  if (!g_tower_document) return;
-  const auto type = g_selected_build_type;
-  const auto plan = simtower::original_construction_release_plan(
-      type, g_construction_drag_completion.successful_steps,
-      g_construction_drag_completion.balance_at_press,
-      g_tower_document->header.balance);
-  if (!plan.handled) return;
-
-  // Floor/Lobby's balance-change WAVE/7000 precedes RELEASECAPTURE at 0839;
-  // Parking/Ramp deliberately never play this or the general success wave.
-  if (plan.play_drag_success_wave && g_audio) {
-    (void)g_audio->play_resource(7000, 0, 4);
-  }
-
-  g_lobby_drag = {};
-  g_floor_drag = {};
-  g_parking_drag = {};
-  g_construction_drag_completion = {};
-  ReleaseCapture();
-
-  if (!plan.complete_success_tail) {
-    if (plan.play_failure_wave && g_audio) {
-      (void)g_audio->play_resource(7002, 0, 4);
-    }
-    return;
-  }
-
-  // 0e21's common success tail is reached once per captured command, never
-  // once per accepted drag step. It clears the status, runs 1148:0163, then
-  // executes the literal route-rebuild table before repaint/dirty handling.
-  show_original_construction_status(0U);
-  play_original_construction_success_audio(type);
-  const auto old_balance = g_tower_document->header.balance;
-  const auto rating_completion =
-      simtower::complete_original_rating_construction(
-          *g_tower_document, g_part, type);
-  if (rating_completion.dialog.valid()) {
-    (void)run_original_event_dialog(rating_completion.dialog);
-  }
-  if (simtower::original_construction_rebuilds_routes(type)) {
-    simtower::rebuild_original_transport_route_graphs(*g_tower_document);
-  }
-  apply_original_construction_mutation_presentation(
-      window, true, g_tower_document->header.balance != old_balance);
-}
-
-void end_original_lobby_drag() {
-  const bool elevator_finger_capture_active =
-      g_elevator_shaft_drag.capture_active;
-  if (g_lobby_drag.active || g_floor_drag.active ||
-      g_parking_drag.kind != OriginalParkingDragKind::none ||
-      g_construction_drag_completion.active ||
-      elevator_finger_capture_active) {
-    g_lobby_drag = {};
-    g_floor_drag = {};
-    g_parking_drag = {};
-    g_elevator_shaft_drag = {};
-    g_construction_drag_completion = {};
-    ReleaseCapture();
-    // 10a0:05a2 restores the Finger cursor immediately after releasing its
-    // capture, independently of whether a cap drag became active.
-    if (elevator_finger_capture_active) {
-      SetCursor(resolve_original_cursor(1004U));
-    }
-  }
-}
-
-void forward_original_armed_double_click(HWND window,
-                                         WPARAM keys,
-                                         LPARAM position) {
-  // MAINWNDPROC forwards WM_LBUTTONDBLCLK without arming DS:0242; 1058:003a
-  // then makes it effective only if a prior down is still armed. The ordinary
-  // Windows sequence clears that latch on the preceding button-up, but retain
-  // the exact behavior for reentrant/synthetic sequences.
-  if (!g_main_pointer_interaction_armed || !g_tower_document) return;
-  if (g_command_mode == 0U || g_command_mode == 2U) return;
-  if (g_command_mode == 1U) {
-    const auto view = current_original_view(window);
-    const auto hit = simtower::original_elevator_hit_from_client(
-        *g_tower_document,
-        static_cast<std::int16_t>(LOWORD(position)),
-        static_cast<std::int16_t>(HIWORD(position)), view.x, view.y);
-    if (hit.hit) {
-      open_original_elevator_control(
-          hit.elevator_index,
-          static_cast<std::int16_t>(LOWORD(position)),
-          static_cast<std::int16_t>(HIWORD(position)));
-    }
-    return;
-  }
-  if (!g_build_mode_enabled) return;
-  if (g_parking_drag.kind != OriginalParkingDragKind::none) {
-    update_original_parking_drag(window, position, false);
-  } else if (g_floor_drag.active) {
-    update_original_floor_drag(window, position);
-  } else if (g_lobby_drag.active) {
-    update_original_lobby_drag(window, position);
-  } else if (g_construction_drag_completion.active &&
-             (g_selected_build_type == 11U ||
-              g_selected_build_type == 44U) &&
-             g_retained_construction_placement) {
-    // 0x0203 does not refresh c4/c6/c8. A helper skipped by the down-time
-    // bonus/Shift path therefore initializes from those retained snaps, while
-    // its tail still publishes the double-click LPARAM for the following call.
-    g_parking_drag.kind = g_selected_build_type == 11U
-        ? OriginalParkingDragKind::parking
-        : OriginalParkingDragKind::ramp;
-    g_parking_drag.press_floor = g_retained_construction_placement->floor;
-    g_parking_drag.snapped_left = g_retained_construction_placement->left;
-    g_parking_drag.snapped_right = g_retained_construction_placement->right;
-    update_original_parking_drag(window, position, false);
-  } else if (g_retained_construction_press_position_valid) {
-    // 0x0203 bypasses 08ce's placement recomputation, 090e's counter reset,
-    // 0946's capture, and 09c1's Shift replacement. Re-run the type attempt
-    // at the coordinates retained by its already-armed down only.
-    begin_original_lobby_drag(
-        window, keys, g_retained_construction_press_position, false);
-  }
-}
-
-void publish_original_world_input_modifiers(WPARAM keys) {
-  const auto modifiers = simtower::original_world_input_modifiers(
-      static_cast<std::uint16_t>(keys));
-  g_world_control_modifier = modifiers.control;
-  g_world_shift_modifier = modifiers.shift;
-}
-
-void dispatch_original_world_input(
-    HWND window,
-    simtower::OriginalWorldInputMessage message,
-    WPARAM keys,
-    LPARAM position) {
-  // 1058 publishes modifiers even when one of the following gates suppresses
-  // every tool action.
-  publish_original_world_input_modifiers(keys);
-  const bool isolation_active =
-      g_elevator_control_context &&
-      g_elevator_control_context->state.isolation_active;
-  const bool emergency_active =
-      g_tower_document &&
-      simtower::original_emergency_people_pass_active(*g_tower_document);
-  const auto plan = simtower::original_world_input_plan(
-      message, g_main_pointer_interaction_armed, isolation_active,
-      emergency_active, g_command_mode, g_build_mode_enabled,
-      (keys & MK_LBUTTON) != 0U);
-
-  switch (plan.action) {
-    case simtower::OriginalWorldInputAction::none:
-      break;
-    case simtower::OriginalWorldInputAction::emergency_feedback:
-      if (g_audio) (void)g_audio->play_resource(7002, 0, 4);
-      break;
-    case simtower::OriginalWorldInputAction::bulldozer:
-      run_original_facility_bulldozer(window, position);
-      break;
-    case simtower::OriginalWorldInputAction::elevator_finger:
-      switch (message) {
-        case simtower::OriginalWorldInputMessage::button_down:
-          begin_original_elevator_finger(window, position);
-          break;
-        case simtower::OriginalWorldInputMessage::mouse_move:
-          continue_original_elevator_finger(window, position);
-          break;
-        case simtower::OriginalWorldInputMessage::button_up:
-          end_original_lobby_drag();
-          break;
-        case simtower::OriginalWorldInputMessage::double_click:
-          double_click_original_elevator_finger(window, position);
-          break;
-      }
-      break;
-    case simtower::OriginalWorldInputAction::magnifier:
-      run_original_magnifying_glass(window, position);
-      break;
-    case simtower::OriginalWorldInputAction::construction:
-      switch (message) {
-        case simtower::OriginalWorldInputMessage::button_down:
-          begin_original_lobby_drag(window, keys, position);
-          break;
-        case simtower::OriginalWorldInputMessage::mouse_move:
-          if ((keys & MK_LBUTTON) != 0U) {
-            if (g_parking_drag.kind != OriginalParkingDragKind::none) {
-              update_original_parking_drag(window, position);
-            } else if (g_floor_drag.active) {
-              update_original_floor_drag(window, position);
-            } else if (g_lobby_drag.active) {
-              update_original_lobby_drag(window, position);
-            } else if (g_construction_drag_completion.active &&
-                       (g_selected_build_type == 11U ||
-                        g_selected_build_type == 44U)) {
-              begin_original_lobby_drag(window, keys, position, false);
-            }
-          }
-          break;
-        case simtower::OriginalWorldInputMessage::button_up:
-          finish_original_construction_drag(window);
-          break;
-        case simtower::OriginalWorldInputMessage::double_click:
-          forward_original_armed_double_click(window, keys, position);
-          break;
-      }
-      break;
-  }
-
-  // Mode two performs this tail after its down-only hit chain and after every
-  // other routed mouse phase. 1100:0000 may set DS:77c0 while the Person
-  // Information modal runs, so inspect the live post-action latch here.
-  // 1058:033c owns the complete Find/build toggle.
-  if (plan.check_find_exit_latch && g_find_marker.phase != 0U) {
-    apply_original_construction_toggle();
-  }
 }
 
 void remove_original_recent_file_items(HWND window) {
@@ -2824,7 +1411,7 @@ void begin_original_new_tower(HWND window) {
       window, g_tower_document->header.view_x,
       g_tower_document->header.view_y);
   present_original_document_transition_synchronously();
-  g_lobby_drag = {};
+  g_world_input.lobby_drag = {};
   const auto view = current_original_view(window);
   g_tower_document->header.view_x = static_cast<std::uint16_t>(view.x);
   g_tower_document->header.view_y = static_cast<std::uint16_t>(view.y);
@@ -3197,7 +1784,7 @@ bool load_original_tower_from_path(HWND window,
   g_tower_document = std::move(empty_document);
   reset_original_simulation_state();
   reset_original_command_state();
-  g_lobby_drag = {};
+  g_world_input.lobby_drag = {};
   try {
     auto document = simtower::load_original_tdt_file(selected);
     simtower::carry_original_process_random_state(
@@ -3210,7 +1797,7 @@ bool load_original_tower_from_path(HWND window,
         window, g_tower_document->header.view_x,
         g_tower_document->header.view_y);
     present_original_document_transition_synchronously();
-    g_lobby_drag = {};
+    g_world_input.lobby_drag = {};
     g_tower_path = selected;
     g_tower_file_title = !file_title.empty()
                              ? std::move(file_title)
@@ -4939,7 +3526,7 @@ void resume_original_elevator_control(
     OriginalElevatorControlDialogContext& context) {
   if (!g_tower_document || !context.state.isolation_active) return;
   if (simtower::resume_original_elevator_control_isolation(
-          *g_tower_document, context.state, g_build_mode_enabled)) {
+          *g_tower_document, context.state, g_world_input.build_mode_enabled)) {
     g_elevator_transfer_visuals.clear();
     InvalidateRect(dialog, nullptr, FALSE);
     invalidate_original_main_surface();
@@ -4958,7 +3545,7 @@ void toggle_original_elevator_control_simulation(
     return;
   }
   if (!simtower::begin_original_elevator_control_isolation(
-          *g_tower_document, context.state, g_build_mode_enabled)) {
+          *g_tower_document, context.state, g_world_input.build_mode_enabled)) {
     return;
   }
   const auto preview = simtower::prepare_original_elevator_control_preview(
@@ -7070,9 +5657,10 @@ void run_original_find_dialog(simtower::OriginalFindMode mode) {
     // 10e0:0cea exits construction into edit mode two, synchronously presents
     // Command then Map, restores pending preview scratch through 11f8:3b94,
     // and only then applies 1080:0000's camera transform/full refresh.
-    end_original_lobby_drag();
-    g_build_mode_enabled = false;
-    g_command_mode = 2U;
+    simtower::end_original_lobby_drag(original_world_input_context(),
+                                      original_world_input_host());
+    g_world_input.build_mode_enabled = false;
+    g_world_input.command_mode = 2U;
     for (const auto step : simtower::original_find_focus_refresh_order()) {
       switch (step) {
         case simtower::OriginalFindFocusRefreshStep::command_repaint:
@@ -7090,8 +5678,8 @@ void run_original_find_dialog(simtower::OriginalFindMode mode) {
         case simtower::OriginalFindFocusRefreshStep::restore_preview_scratch:
           if ((!g_elevator_control_context ||
                !g_elevator_control_context->state.isolation_active) &&
-              g_original_main_preview_rect) {
-            g_original_main_preview_rect.reset();
+              g_world_input.preview_rect) {
+            g_world_input.preview_rect.reset();
             g_original_main_backing.dirty = true;
           }
           break;
@@ -7378,10 +5966,11 @@ void present_original_info_surface_direct(
 
 void draw_original_command_contents(HDC dc, const RECT& client) {
   const auto raster = simtower::render_original_command_palette(
-      g_resources, active_original_command_rating(g_active_command_rating),
-      g_build_mode_enabled, g_command_mode,
+      g_resources,
+      active_original_command_rating(g_world_input.active_command_rating),
+      g_world_input.build_mode_enabled, g_world_input.command_mode,
       client.right - client.left, client.bottom - client.top,
-      g_command_toggle_pressed);
+      g_world_input.command_toggle_pressed);
   simtower::draw_original_command_raster(
       dc, raster, 0, simtower::kOriginalCommandPaintOffsetY);
 }
@@ -7419,7 +6008,7 @@ bool advance_original_main_surface_state(
   if (plan.advance_visible_facility_people) {
     const auto people = simtower::step_original_visible_facility_people(
         *g_tower_document, view.x, view.y, width, height,
-        g_people_animation_enabled, g_world_control_modifier);
+        g_people_animation_enabled, g_world_input.control_modifier);
     // Every dispatched 1038:050e facility branch reaches its DS:31cc write,
     // even if the selected person bytes happen to retain their prior values.
     // This includes the negative pending-construction presentation path.
@@ -7479,7 +6068,7 @@ void rebuild_original_main_backing(
       g_resources, presentation_document,
       view.x, view.y, width, height, g_elevator_transfer_visuals,
       g_palette_runtime.initialized ? &g_palette_runtime.colors : nullptr,
-      &g_sky_decorations, g_map_mode,
+      &g_sky_decorations, g_world_input.map_mode,
       waiting_isolation ? &*waiting_isolation : nullptr,
       pass == simtower::OriginalMainSurfacePass::simulation_frame
           ? std::function<void()>{[] { original_runtime_audio_pump(); }}
@@ -7499,14 +6088,14 @@ void rebuild_original_main_backing(
   }
   const auto preview_rect = current_original_main_preview_rect();
   if (plan.update_construction_preview_rect) {
-    g_original_main_preview_rect = preview_rect;
+    g_world_input.preview_rect = preview_rect;
   }
   if (preview_rect) {
     // 1090:03df/05ee changes only the scratch construction rectangle. Native
     // retains its final clipped WHITE_PEN/NULL_BRUSH pixels in this cache.
     simtower::composite_original_construction_preview(
-        g_selected_build_type, g_main_pointer.client_x,
-        g_main_pointer.client_y, view.x, view.y, raster);
+        g_world_input.selected_build_type, g_world_input.pointer.client_x,
+        g_world_input.pointer.client_y, view.x, view.y, raster);
   }
   g_original_main_backing.raster = std::move(raster);
   g_original_main_backing.view = view;
@@ -7604,17 +6193,17 @@ void paint_known_original_surface(
     // 1168:0326 XOR-erases the retained DS:7796 focus after the frame and
     // before the Map backing work. The later background blit overwrites that
     // intermediate result; 03bf then XOR-draws the same retained rectangle.
-    if (!g_original_map_focus_rectangle && g_main_window) {
+    if (!g_world_input.map_focus && g_main_window) {
       RECT main_client{};
       GetClientRect(g_main_window, &main_client);
       const auto view = current_original_view(g_main_window);
-      g_original_map_focus_rectangle = simtower::original_map_view_rect(
+      g_world_input.map_focus = simtower::original_map_view_rect(
           view.x, view.y, main_client.right - main_client.left,
           main_client.bottom - main_client.top);
     }
-    if (g_original_map_focus_rectangle) {
+    if (g_world_input.map_focus) {
       draw_original_map_focus_rectangle(
-          dc, *g_original_map_focus_rectangle);
+          dc, *g_world_input.map_focus);
     }
     // 1168:032f follows the first focus/frame pass and precedes the four
     // toolbar cells plus 1160:01dc backing-surface composition.
@@ -7623,7 +6212,7 @@ void paint_known_original_surface(
         g_tower_document && g_tower_document->header.rating == 1U;
     const auto raster = simtower::render_original_map(
         g_resources, presentation_document,
-        g_map_mode, disabled,
+        g_world_input.map_mode, disabled,
         g_palette_runtime.initialized ? &g_palette_runtime.colors : nullptr);
     // 1168:0388 services WAVMIX immediately before the backing blit.
     original_runtime_audio_pump();
@@ -7633,9 +6222,9 @@ void paint_known_original_surface(
     // 1168:03bf repeats 1058:094c with the same retained rectangle. A camera
     // caller subsequently executes 1080:055d to exchange it for the newly
     // derived scroll rectangle; an ordinary Map exposure does not.
-    if (g_original_map_focus_rectangle) {
+    if (g_world_input.map_focus) {
       draw_original_map_focus_rectangle(
-          dc, *g_original_map_focus_rectangle);
+          dc, *g_world_input.map_focus);
     }
     // 1168:03c8 is the painter's final operation after the focus rectangle.
     original_runtime_audio_pump();
@@ -7775,131 +6364,13 @@ void scroll_original(HWND window, int bar, WPARAM wparam, int world_extent) {
 }
 
 void select_original_map_mode(std::uint16_t mode) {
-  const std::uint16_t maximum =
-      g_tower_document && g_tower_document->header.rating == 1U ? 2U : 3U;
-  if (mode > maximum) return;
-
-  // 11d0:0000 couples every map overlay selection to edit mode two. Mode
-  // zero restores construction; modes one through three disable it.
-  g_map_mode = mode;
-  g_build_mode_enabled = mode == 0U;
-  g_command_mode = 2U;
-  if (mode == 1U && g_tower_document) {
-    // 11d0:0031-0039 invokes the complete 1130:00b5 all-tenant
-    // satisfaction refresh before invalidating the Map and world surfaces.
-    simtower::refresh_original_map_tenant_satisfaction(
-        *g_tower_document, g_part);
-  }
-  if (mode == 0U) {
-    // 11d0:001d clears the transient Find target while restoring
-    // construction mode.
-    simtower::reset_original_find_marker(g_find_marker);
-  }
-  InvalidateRect(g_map_window, nullptr, FALSE);
-  InvalidateRect(g_command_window, nullptr, FALSE);
-  // 11d0:0066 supplies zero: the overlay redraw includes facility people but
-  // deliberately leaves the 1048:03a3 sky-decoration state untouched.
-  request_original_main_surface_pass(
-      simtower::OriginalMainSurfacePass::rebuild_without_sky, true);
+  simtower::select_original_map_mode(original_world_input_context(),
+                                     original_world_input_host(), mode);
 }
 
 void apply_original_construction_toggle() {
-  const auto plan = simtower::original_construction_toggle_plan(
-      g_build_mode_enabled, g_map_mode);
-  if (plan.path ==
-      simtower::OriginalConstructionTogglePath::exit_map_overlay) {
-    // 1058:0352 clears DS:7840 first and delegates the complete repaint/state
-    // transaction to 11d0:0000, bypassing the ordinary WAVMIX branch.
-    select_original_map_mode(0U);
-    return;
-  }
-
-  g_build_mode_enabled = plan.build_mode_after;
-  if (plan.force_command_mode_two) g_command_mode = 2U;
-  if (plan.reset_find_marker) {
-    simtower::reset_original_find_marker(g_find_marker);
-  }
-  if (g_audio) {
-    if (plan.audio == simtower::OriginalIdleAudioTransition::activate) {
-      g_audio->activate();
-    } else if (plan.audio ==
-               simtower::OriginalIdleAudioTransition::deactivate) {
-      g_audio->deactivate();
-    }
-  }
-  if (plan.refresh_command_synchronously && g_command_window) {
-    InvalidateRect(g_command_window, nullptr, FALSE);
-    UpdateWindow(g_command_window);
-  }
-  if (plan.restore_preview_scratch) {
-    // 11f8:3b94 clears DS:77ac after restoring the retained old outline.
-    g_original_main_preview_rect.reset();
-  }
-  if (plan.present_main_synchronously) {
-    request_original_main_surface_pass(
-        simtower::OriginalMainSurfacePass::preview_repaint, true);
-  }
-}
-
-void update_original_map_drag(LPARAM position) {
-  // Exact 1058:0284 Map content drag: remove the eight-pixel client frame,
-  // map the clicked overview point to the centered world viewport, and publish
-  // both scroll axes synchronously through the native view boundary.
-  if (!g_main_window) return;
-  const int map_x = static_cast<std::int16_t>(LOWORD(position));
-  const int map_y = static_cast<std::int16_t>(HIWORD(position)) -
-                    simtower::kOriginalMapClientTop;
-  if (map_x < 0 || map_x >= simtower::kOriginalMapWidth ||
-      map_y < simtower::kOriginalMapToolbarHeight ||
-      map_y >= simtower::kOriginalMapBackingHeight) {
-    return;
-  }
-  RECT main_client{};
-  GetClientRect(g_main_window, &main_client);
-  const auto view = current_original_view(g_main_window);
-  const auto centered = simtower::original_map_centered_view(
-      map_x, map_y, view.x, view.y,
-      main_client.right - main_client.left,
-      main_client.bottom - main_client.top);
-  // 1058:06df returns false when EQUALRECT says the focus rectangle is
-  // unchanged. 0284 then skips both scroll publication and its two XOR focus
-  // draws, so do not invalidate either native surface on that no-op path.
-  if (centered == view) return;
-
-  // 1058:02d7-032e pumps, XOR-erases the old Map focus, commits/clamps both
-  // scroll positions, XOR-draws the new focus, pumps, presents Main through
-  // 1080:0a1e(1), releases the Map DC, and pumps once more in that order.
-  original_runtime_audio_pump();
-  HDC map_dc = g_map_window ? GetDC(g_map_window) : nullptr;
-  const auto focus_for_view = [&](simtower::OriginalWorldPoint focus_view) {
-    return simtower::original_map_view_rect(
-        focus_view.x, focus_view.y,
-        main_client.right - main_client.left,
-        main_client.bottom - main_client.top);
-  };
-  const auto draw_focus = [&](const simtower::OriginalMapRect& focus) {
-    if (!map_dc) return;
-    draw_original_map_focus_rectangle(map_dc, focus);
-  };
-  const auto previous_focus = g_original_map_focus_rectangle.value_or(
-      focus_for_view(view));
-  draw_focus(previous_focus);
-
-  SCROLLINFO info{sizeof(info), SIF_POS};
-  info.nPos = centered.x;
-  SetScrollInfo(g_main_window, SB_HORZ, &info, TRUE);
-  info.nPos = centered.y;
-  SetScrollInfo(g_main_window, SB_VERT, &info, TRUE);
-  const auto updated_focus =
-      focus_for_view(current_original_view(g_main_window));
-  draw_focus(updated_focus);
-  g_original_map_focus_rectangle = updated_focus;
-
-  original_runtime_audio_pump();
-  request_original_main_surface_pass(
-      simtower::OriginalMainSurfacePass::rebuild_with_sky, true);
-  if (map_dc) ReleaseDC(g_map_window, map_dc);
-  original_runtime_audio_pump();
+  simtower::apply_original_construction_toggle(original_world_input_context(),
+                                               original_world_input_host());
 }
 
 HWND original_palette_surface_window(
@@ -8184,71 +6655,36 @@ LRESULT auxiliary_window_proc_for_kind(
       apply_original_palette_app_activation(wparam != 0U);
       return 0;
     case WM_LBUTTONDOWN:
-      if (simtower::original_palette_frame_hit_test(
-              static_cast<std::int16_t>(LOWORD(lparam)),
-              static_cast<std::int16_t>(HIWORD(lparam))) ==
-          simtower::OriginalPaletteFrameHit::close) {
-        bool* visible = kind == simtower::OriginalAuxiliaryWindow::info
-            ? &g_info_visible
-            : &g_map_visible;
-        const auto plan = simtower::original_auxiliary_visibility_plan(
-            simtower::OriginalAuxiliaryVisibilityTrigger::close_box,
-            *visible);
-        *visible = plan.visible;
-        if (plan.operation ==
-            simtower::OriginalAuxiliaryWindowOperation::hide) {
-          ShowWindow(window, SW_HIDE);
-        }
+      if (kind == simtower::OriginalAuxiliaryWindow::map) {
+        simtower::original_map_pointer_down(
+            original_world_input_context(), original_world_input_host(),
+            static_cast<std::int16_t>(LOWORD(lparam)),
+            static_cast<std::int16_t>(HIWORD(lparam)));
         return 0;
       }
-      if (kind == simtower::OriginalAuxiliaryWindow::map) {
-        const auto pointer_plan = simtower::original_map_pointer_message_plan(
-            simtower::OriginalMapPointerMessage::button_down,
-            g_map_drag_active, true);
-        if (pointer_plan.set_pointer_down) {
-          g_original_map_pointer_down = true;
-        }
-        // Exact 1058:01d6 mouse-down split: 1058:085c's four 50x18 toolbar
-        // rectangles select a mode; the content area captures and calls 0284.
-        const int x = static_cast<std::int16_t>(LOWORD(lparam));
-        const int map_y = static_cast<std::int16_t>(HIWORD(lparam)) -
-                          simtower::kOriginalMapClientTop;
-        const std::uint16_t rating = g_tower_document
-            ? g_tower_document->header.rating
-            : 1U;
-        if (const auto mode = simtower::original_map_toolbar_mode_at(
-                x, map_y, rating)) {
-          select_original_map_mode(*mode);
-        } else if (x >= 0 && x < simtower::kOriginalMapWidth &&
-                   map_y >= simtower::kOriginalMapToolbarHeight &&
-                   map_y < simtower::kOriginalMapBackingHeight) {
-          g_map_drag_active = true;
-          SetCapture(window);
-          update_original_map_drag(lparam);
-        }
+      if (kind == simtower::OriginalAuxiliaryWindow::info &&
+          simtower::original_info_pointer_down(
+              original_world_input_context(), original_world_input_host(),
+              static_cast<std::int16_t>(LOWORD(lparam)),
+              static_cast<std::int16_t>(HIWORD(lparam)))) {
         return 0;
       }
       break;
     case WM_MOUSEMOVE:
-      if (kind == simtower::OriginalAuxiliaryWindow::map) {
-        const auto plan = simtower::original_map_pointer_message_plan(
-            simtower::OriginalMapPointerMessage::mouse_move,
-            g_map_drag_active, (wparam & MK_LBUTTON) != 0U);
-        if (plan.update_drag) update_original_map_drag(lparam);
-        if (plan.consume_message) return 0;
+      if (kind == simtower::OriginalAuxiliaryWindow::map &&
+          simtower::original_map_pointer_move(
+              original_world_input_context(), original_world_input_host(),
+              static_cast<std::int16_t>(LOWORD(lparam)),
+              static_cast<std::int16_t>(HIWORD(lparam)),
+              static_cast<std::uint16_t>(wparam))) {
+        return 0;
       }
       break;
     case WM_LBUTTONUP:
-      if (kind == simtower::OriginalAuxiliaryWindow::map) {
-        // MAPWNDPROC 1168:0156 clears both pointer/drag words and releases
-        // capture on every Map button-up, not only after a content drag.
-        const auto plan = simtower::original_map_pointer_message_plan(
-            simtower::OriginalMapPointerMessage::button_up,
-            g_map_drag_active, false);
-        if (plan.clear_pointer_down) g_original_map_pointer_down = false;
-        if (plan.clear_drag) g_map_drag_active = false;
-        if (plan.release_capture) ReleaseCapture();
-        if (plan.consume_message) return 0;
+      if (kind == simtower::OriginalAuxiliaryWindow::map &&
+          simtower::original_map_pointer_up(original_world_input_context(),
+                                            original_world_input_host())) {
+        return 0;
       }
       break;
     default:
@@ -8271,16 +6707,9 @@ LRESULT CALLBACK map_window_proc(HWND window, UINT message,
       simtower::OriginalAuxiliaryWindow::map);
 }
 
-struct OriginalCommandSelectorContext {
-  simtower::OriginalCommandGroup group{};
-  std::uint16_t choice{};
-  std::uint16_t highlight{};
-  int anchor_left{};
-  int anchor_top{};
-};
-
-OriginalCommandSelectorContext* command_selector_context(HWND dialog) {
-  return reinterpret_cast<OriginalCommandSelectorContext*>(
+simtower::OriginalCommandSelectorSession* command_selector_context(
+    HWND dialog) {
+  return reinterpret_cast<simtower::OriginalCommandSelectorSession*>(
       GetWindowLongPtrW(dialog, GWLP_USERDATA));
 }
 
@@ -8292,26 +6721,44 @@ void close_original_command_selector(HWND dialog, INT_PTR result) {
   EndDialog(dialog, result);
 }
 
-bool original_selector_point(HWND dialog, LPARAM lparam, int& row) {
-  const int x = static_cast<std::int16_t>(LOWORD(lparam));
-  const int y = static_cast<std::int16_t>(HIWORD(lparam));
+std::optional<int> original_selector_point(HWND dialog, LPARAM lparam) {
+  // GetClientRect's origin is always (0,0): PtInRect, then y / 32.
   RECT client{};
   GetClientRect(dialog, &client);
-  POINT point{x, y};
-  if (!PtInRect(&client, point)) {
-    return false;
-  }
-  row = y / 32;
-  return true;
+  return simtower::OriginalCommandSelectorSession::row_at(
+      static_cast<std::int16_t>(LOWORD(lparam)),
+      static_cast<std::int16_t>(HIWORD(lparam)), client.right,
+      client.bottom);
 }
 
-// Native modal equivalent of CMDBTNSUBWNDPROC at 1050:05a7.
+// Applies one portable selector step to the modal (EndDialog, capture,
+// clip, repaint), as the per-message branches of 1050:05a7 did inline.
+INT_PTR apply_original_command_selector_step(
+    HWND dialog,
+    const simtower::OriginalCommandSelectorStep& step) {
+  if (step.redraw) {
+    InvalidateRect(dialog, nullptr, FALSE);
+    UpdateWindow(dialog);
+  }
+  if (step.end) {
+    if (step.unclip_and_release) {
+      close_original_command_selector(dialog, step.accepted ? 1 : 0);
+    } else {
+      EndDialog(dialog, step.accepted ? 1 : 0);
+    }
+  }
+  return step.handled ? TRUE : FALSE;
+}
+
+// Native modal equivalent of CMDBTNSUBWNDPROC at 1050:05a7. The message
+// logic lives in OriginalCommandSelectorSession (original_world_input.hpp).
 INT_PTR CALLBACK command_selector_dialog_proc(HWND dialog,
                                                UINT message,
                                                WPARAM wparam,
                                                LPARAM lparam) {
   if (message == WM_INITDIALOG) {
-    auto* context = reinterpret_cast<OriginalCommandSelectorContext*>(lparam);
+    auto* context =
+        reinterpret_cast<simtower::OriginalCommandSelectorSession*>(lparam);
     SetWindowLongPtrW(dialog, GWLP_USERDATA,
                       reinterpret_cast<LONG_PTR>(context));
     // 1050:05d6 uses Win16 GCL_HCURSOR (-12), not GCL_HBRBACKGROUND, and
@@ -8319,13 +6766,10 @@ INT_PTR CALLBACK command_selector_dialog_proc(HWND dialog,
     SetClassLongPtrW(dialog, GCLP_HCURSOR, 0);
     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
 
-    const int height = static_cast<int>(context->group.catalog_icons.size()) * 32;
     RECT desktop{};
     GetWindowRect(GetDesktopWindow(), &desktop);
-    const int top = simtower::original_command_selector_top(
-        context->anchor_top, context->choice,
-        context->group.catalog_icons.size(), desktop.bottom);
-    MoveWindow(dialog, context->anchor_left, top, 32, height, FALSE);
+    MoveWindow(dialog, context->anchor_left(), context->top(desktop.bottom),
+               context->width(), context->height(), FALSE);
     SetCapture(dialog);
     RECT clip{};
     GetWindowRect(dialog, &clip);
@@ -8344,55 +6788,27 @@ INT_PTR CALLBACK command_selector_dialog_proc(HWND dialog,
       HDC dc = BeginPaint(dialog, &paint);
       if (dc) {
         const auto raster = simtower::render_original_command_selector(
-            g_resources, context->group, context->highlight,
-            g_build_mode_enabled);
+            g_resources, context->group(), context->highlight(),
+            g_world_input.build_mode_enabled);
         simtower::draw_original_command_raster(dc, raster, 0, 0);
       }
       EndPaint(dialog, &paint);
       return TRUE;
     }
-    case WM_MOUSEMOVE: {
-      int row = 0;
-      if (!original_selector_point(dialog, lparam, row)) {
-        close_original_command_selector(dialog, 0);
-        // 1050:07b9 closes through the common FALSE return, unlike every
-        // in-bounds mouse route.
-        return FALSE;
-      }
-      const std::uint16_t highlight = static_cast<std::uint16_t>(
-          context->group.catalog_icons[static_cast<std::size_t>(row)] + 1U);
-      if (highlight != context->highlight) {
-        context->highlight = highlight;
-        InvalidateRect(dialog, nullptr, FALSE);
-        UpdateWindow(dialog);
-      }
-      return TRUE;
-    }
-    case WM_LBUTTONDOWN: {
-      int row = 0;
-      if (!original_selector_point(dialog, lparam, row)) {
-        close_original_command_selector(dialog, 0);
-        return TRUE;
-      }
-      context->choice = static_cast<std::uint16_t>(row + 1);
-      // 1050:080c-0836 commits on button-down but, unlike the release route,
-      // does not explicitly unclip the pointer or release capture first.
-      EndDialog(dialog, 1);
-      return TRUE;
-    }
-    case WM_LBUTTONUP: {
-      int row = 0;
-      if (!original_selector_point(dialog, lparam, row)) {
-        close_original_command_selector(dialog, 0);
-        return TRUE;
-      }
-      context->choice = static_cast<std::uint16_t>(row + 1);
-      close_original_command_selector(dialog, 1);
-      return TRUE;
-    }
+    case WM_MOUSEMOVE:
+      return apply_original_command_selector_step(
+          dialog, context->on_move(original_selector_point(dialog, lparam)));
+    case WM_LBUTTONDOWN:
+      return apply_original_command_selector_step(
+          dialog,
+          context->on_lbutton_down(original_selector_point(dialog, lparam)));
+    case WM_LBUTTONUP:
+      return apply_original_command_selector_step(
+          dialog,
+          context->on_lbutton_up(original_selector_point(dialog, lparam)));
     case WM_RBUTTONDOWN:
-      close_original_command_selector(dialog, 0);
-      return TRUE;
+      return apply_original_command_selector_step(
+          dialog, context->on_rbutton_down());
     case WM_PALETTECHANGED: {
       const auto plan =
           simtower::original_command_selector_palette_changed_plan(
@@ -8405,102 +6821,6 @@ INT_PTR CALLBACK command_selector_dialog_proc(HWND dialog,
     }
   }
   return FALSE;
-}
-
-void run_original_command_selector(
-    simtower::OriginalCommandRatingState& state,
-    std::size_t catalog_index) {
-  // Native transaction for 1050:0533 and 1058:04e0: launch the modal command
-  // selector, resolve TABM group/current choice,
-  // present CMDBTNSUBWNDPROC only while selecting, persist an accepted choice,
-  // then let the caller resolve TABL/1000's construction type.
-  const auto group = simtower::original_command_group(
-      g_resources, state, catalog_index);
-  if (!group) {
-    return;
-  }
-
-  // 1058:0517-053f opens the captured selector only while the physical
-  // primary button is down. This matters when CMDBTNWNDPROC's button-up path
-  // re-enters a grouped command after a cancelled drag: the original keeps
-  // the current choice instead of opening a second modal popup. Query the
-  // equivalent native setting without temporarily changing the user's global
-  // SwapMouseButton preference as the Win16 implementation did.
-  const bool buttons_swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
-  const int primary_button = static_cast<int>(
-      simtower::original_command_primary_button_virtual_key(buttons_swapped));
-  const bool primary_button_down = GetAsyncKeyState(primary_button) < 0;
-  if (!simtower::original_command_selector_transaction_plan(
-           primary_button_down, false)
-           .show_modal) {
-    return;
-  }
-
-  const auto cell = simtower::original_command_facility_rect(
-      static_cast<std::uint16_t>(catalog_index));
-  RECT command_outer{};
-  GetWindowRect(g_command_window, &command_outer);
-  OriginalCommandSelectorContext context{
-      *group, group->selection_index, group->selection_index,
-      command_outer.left + cell.left, command_outer.top + cell.top};
-
-  const auto original = simtower::parse_original_dialog(
-      g_resources.find("DIALOG", 124));
-  const auto native = simtower::build_native_dialog_template(original);
-  const INT_PTR result = run_original_modal_dialog(
-      g_instance, reinterpret_cast<const DLGTEMPLATE*>(native.data()),
-      g_command_window, command_selector_dialog_proc,
-      reinterpret_cast<LPARAM>(&context));
-  if (simtower::original_command_selector_transaction_plan(
-          primary_button_down, result != 0)
-          .write_choice) {
-    simtower::original_command_select_group_choice(
-        g_resources, state, catalog_index, context.choice);
-  }
-}
-
-void activate_original_command_point(HWND window, LPARAM position) {
-  // 1058:03a9 ignores command activation while 10f0's isolated Elevator
-  // simulation owns the mutable world, although the pressed frame above may
-  // still be presented by CMDBTNWNDPROC.
-  if (g_elevator_control_context &&
-      g_elevator_control_context->state.isolation_active) {
-    return;
-  }
-  const int x = static_cast<std::int16_t>(LOWORD(position));
-  const int y = static_cast<std::int16_t>(HIWORD(position));
-  auto& rating_state =
-      active_original_command_rating(g_active_command_rating);
-  const auto hit = simtower::original_command_hit_test(
-      g_resources, rating_state, g_build_mode_enabled, x, y);
-  switch (hit.kind) {
-    case simtower::OriginalCommandHitKind::build_toggle:
-      apply_original_construction_toggle();
-      return;
-    case simtower::OriginalCommandHitKind::edit_mode:
-      g_command_mode = hit.mode_index;
-      // 1058:0439 calls 1118:0ad5(0) when an edit tool is chosen.
-      show_original_command_status(0U);
-      break;
-    case simtower::OriginalCommandHitKind::facility:
-      g_command_mode = hit.mode_index;
-      run_original_command_selector(
-          rating_state, static_cast<std::size_t>(hit.mode_index - 3U));
-      g_selected_build_type = simtower::original_command_build_type(
-          g_resources,
-          simtower::original_command_catalog(g_resources, rating_state)
-              [hit.mode_index - 3U]);
-      // 11f8:0f63 loads TABL/1000's raw type byte and calls
-      // 1118:0ad5(type+1), selecting the matching STRL/1009 cost line.
-      show_original_command_status(
-          static_cast<std::uint16_t>(g_selected_build_type + 1U));
-      break;
-    case simtower::OriginalCommandHitKind::none:
-      return;
-  }
-  InvalidateRect(window, nullptr, FALSE);
-  invalidate_original_main_surface();
-  InvalidateRect(g_map_window, nullptr, FALSE);
 }
 
 // Native message boundary for CMDBTNWNDPROC at 1050:0000.
@@ -8541,60 +6861,18 @@ LRESULT CALLBACK command_window_proc(HWND window, UINT message,
     case WM_ACTIVATEAPP:
       apply_original_palette_app_activation(wparam != 0U);
       return 0;
-    case WM_LBUTTONDOWN: {
-      const int frame_x = static_cast<std::int16_t>(LOWORD(lparam));
-      const int frame_y = static_cast<std::int16_t>(HIWORD(lparam));
-      const auto plan = simtower::original_command_pointer_plan(
-          simtower::OriginalCommandPointerPhase::button_down,
-          frame_x, frame_y);
-      if (plan.close_palette) {
-        const auto visibility = simtower::original_auxiliary_visibility_plan(
-            simtower::OriginalAuxiliaryVisibilityTrigger::close_box,
-            g_toolbar_visible);
-        g_toolbar_visible = visibility.visible;
-        if (visibility.operation ==
-            simtower::OriginalAuxiliaryWindowOperation::hide) {
-          ShowWindow(window, SW_HIDE);
-        }
-        return 0;
-      }
-      // 1050:0219 delays only the build toggle. Every edit/facility point
-      // enters 1058:03a9 on mouse-down, allowing 1050:05a7's grouped selector
-      // to capture the still-held button and consume its eventual release.
-      if (plan.press_toggle) {
-        g_command_toggle_pressed = true;
-        InvalidateRect(window, nullptr, FALSE);
-        UpdateWindow(window);
-      }
-      if (plan.activate_point) {
-        activate_original_command_point(window, lparam);
-      }
-      // 1050:02a4-02ad enters 1208:05e6 after every non-close button-down,
-      // even when the grouped selector held the call until button release.
-      // Preserve both DS:31b0/31b2 and 11e0:0e84's pump side effect.
-      if (plan.sample_coarse_tick) {
-        g_original_last_auxiliary_pointer_tick = original_runtime_coarse_tick();
-      }
+    case WM_LBUTTONDOWN:
+      simtower::original_command_pointer_down(
+          original_world_input_context(), original_world_input_host(),
+          static_cast<std::int16_t>(LOWORD(lparam)),
+          static_cast<std::int16_t>(HIWORD(lparam)));
       return 0;
-    }
-    case WM_LBUTTONUP: {
-      const int frame_x = static_cast<std::int16_t>(LOWORD(lparam));
-      const int frame_y = static_cast<std::int16_t>(HIWORD(lparam));
-      const auto plan = simtower::original_command_pointer_plan(
-          simtower::OriginalCommandPointerPhase::button_up,
-          frame_x, frame_y);
-      // 1050:02b3 restores 1080:07a6's normal header unconditionally before
-      // applying the release point outside the close box.
-      if (plan.restore_toggle) {
-        g_command_toggle_pressed = false;
-        InvalidateRect(window, nullptr, FALSE);
-        UpdateWindow(window);
-      }
-      if (plan.activate_point) {
-        activate_original_command_point(window, lparam);
-      }
+    case WM_LBUTTONUP:
+      simtower::original_command_pointer_up(
+          original_world_input_context(), original_world_input_host(),
+          static_cast<std::int16_t>(LOWORD(lparam)),
+          static_cast<std::int16_t>(HIWORD(lparam)));
       return 0;
-    }
     case WM_QUERYNEWPALETTE:
     case WM_PALETTECHANGED: {
       const auto plan = simtower::original_auxiliary_palette_message_plan(
@@ -8613,6 +6891,273 @@ LRESULT CALLBACK command_window_proc(HWND window, UINT message,
       return DefWindowProcW(window, message, wparam, lparam);
   }
   return DefWindowProcW(window, message, wparam, lparam);
+}
+
+// Win32 host of the shared world input (original_world_input.hpp). Each
+// hook performs exactly the Win32 calls the moved code made inline.
+//
+// Intentional deviation: invalidate_map, invalidate_command and
+// present_command_now skip a null palette HWND, where the inline code
+// called InvalidateRect(g_map_window/g_command_window, nullptr, FALSE)
+// unguarded (select_original_map_mode, 1058:03a9's Map invalidation, and
+// the new-shaft Command refresh). A null HWND there would have invalidated
+// every window. The palettes are created at startup, so no real run
+// reaches the difference.
+//
+// Further intentional deviations, none observable in a real run:
+// - main_client() (GetClientRect) runs in update_original_map_drag before
+//   the Map bounds check and returns early on failure; see the comment
+//   there.
+// - hide_palette and set_capture use the global palette/Main HWNDs
+//   (g_command_window, g_info_window, g_map_window, g_main_window), where
+//   the inline code passed the message's own HWND (ShowWindow(window,
+//   SW_HIDE), SetCapture(window)). Each window procedure is registered for
+//   exactly one of those windows, so the HWNDs are the same.
+// - play_reserved_if_idle receives services().now_ms() (GetTickCount),
+//   which the shared code evaluates before this host checks g_audio. The
+//   inline code tested g_audio first and called GetTickCount only with
+//   audio. GetTickCount has no side effects, so only the call count
+//   differs.
+class Win32WorldInputHost final : public simtower::OriginalWorldInputHost {
+ public:
+  // GetTickCount, DS:b3ae, the Info notification line and the Command
+  // invalidation are the idle-pass host's implementations.
+  simtower::OriginalHostServices& services() override {
+    return g_idle_pass_host;
+  }
+  bool beep_only() override { return g_original_beep_only; }
+  bool modal_input_locked() override {
+    return original_main_modal_input_locked();
+  }
+  bool find_exit_latch_set() override { return g_find_marker.phase != 0U; }
+  void reset_find_marker() override {
+    simtower::reset_original_find_marker(g_find_marker);
+  }
+  bool primary_button_down() override {
+    // 1058:0517-053f samples the physical primary button. Query the
+    // equivalent native setting without temporarily changing the user's
+    // global SwapMouseButton preference as the Win16 implementation did.
+    const bool buttons_swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
+    const int primary_button = static_cast<int>(
+        simtower::original_command_primary_button_virtual_key(
+            buttons_swapped));
+    return GetAsyncKeyState(primary_button) < 0;
+  }
+
+  void set_capture(simtower::OriginalInputSurface surface) override {
+    switch (surface) {
+      case simtower::OriginalInputSurface::main:
+        SetCapture(g_main_window);
+        break;
+      case simtower::OriginalInputSurface::map:
+        SetCapture(g_map_window);
+        break;
+    }
+  }
+  void release_capture() override { ReleaseCapture(); }
+  void set_cursor(std::uint16_t cursor_id) override {
+    SetCursor(resolve_original_cursor(cursor_id));
+  }
+  void refresh_cursor() override {
+    POINT screen_point{};
+    if (GetCursorPos(&screen_point)) {
+      update_original_main_cursor_from_screen_point(screen_point);
+    }
+  }
+
+  simtower::OriginalWorldPoint main_view() override {
+    return current_original_view(g_main_window);
+  }
+  std::optional<simtower::OriginalMapRect> main_client() override {
+    RECT client{};
+    if (!GetClientRect(g_main_window, &client)) return std::nullopt;
+    return simtower::OriginalMapRect{client.left, client.top, client.right,
+                                     client.bottom};
+  }
+  void set_main_view(int x, int y) override {
+    set_original_view(g_main_window, x, y);
+  }
+  void set_main_scroll_position(int x, int y) override {
+    SCROLLINFO info{sizeof(info), SIF_POS};
+    info.nPos = x;
+    SetScrollInfo(g_main_window, SB_HORZ, &info, TRUE);
+    info.nPos = y;
+    SetScrollInfo(g_main_window, SB_VERT, &info, TRUE);
+  }
+
+  void mark_document_dirty() override { g_tower_dirty = true; }
+  void invalidate_main() override { invalidate_original_main_surface(); }
+  void mark_main_backing_dirty() override {
+    g_original_main_backing.dirty = true;
+  }
+  void invalidate_map() override {
+    if (g_map_window) InvalidateRect(g_map_window, nullptr, FALSE);
+  }
+  void present_info_status() override { invalidate_original_info_status(); }
+  void present_command_now() override {
+    if (!g_command_window) return;
+    InvalidateRect(g_command_window, nullptr, FALSE);
+    UpdateWindow(g_command_window);
+  }
+  void resize_command(int outer_height) override {
+    if (!g_command_window) return;
+    RECT outer{};
+    GetWindowRect(g_command_window, &outer);
+    // 1140:010d passes the result of 1140:03f8 directly to MoveWindow as the
+    // outer height, preserving the existing screen position and width.
+    MoveWindow(g_command_window, outer.left, outer.top,
+               outer.right - outer.left, outer_height, TRUE);
+  }
+  void request_main_pass(simtower::OriginalMainSurfacePass pass,
+                         bool synchronous) override {
+    request_original_main_surface_pass(pass, synchronous);
+  }
+  // One Map DC across 1058:02d7-032e, as the inline code held it.
+  void begin_map_focus() override {
+    map_focus_dc_ = g_map_window ? GetDC(g_map_window) : nullptr;
+  }
+  void xor_map_focus(const simtower::OriginalMapRect& focus) override {
+    if (map_focus_dc_) draw_original_map_focus_rectangle(map_focus_dc_, focus);
+  }
+  void end_map_focus() override {
+    if (map_focus_dc_) ReleaseDC(g_map_window, map_focus_dc_);
+    map_focus_dc_ = nullptr;
+  }
+  void hide_palette(simtower::OriginalAuxiliaryWindow kind) override {
+    HWND window = nullptr;
+    bool* visible = nullptr;
+    switch (kind) {
+      case simtower::OriginalAuxiliaryWindow::command:
+        window = g_command_window;
+        visible = &g_toolbar_visible;
+        break;
+      case simtower::OriginalAuxiliaryWindow::info:
+        window = g_info_window;
+        visible = &g_info_visible;
+        break;
+      case simtower::OriginalAuxiliaryWindow::map:
+        window = g_map_window;
+        visible = &g_map_visible;
+        break;
+    }
+    const auto plan = simtower::original_auxiliary_visibility_plan(
+        simtower::OriginalAuxiliaryVisibilityTrigger::close_box, *visible);
+    *visible = plan.visible;
+    if (plan.operation == simtower::OriginalAuxiliaryWindowOperation::hide) {
+      ShowWindow(window, SW_HIDE);
+    }
+  }
+
+  void construction_status(std::uint16_t code) override {
+    show_original_construction_status(code);
+  }
+  void command_status(std::uint16_t code) override {
+    show_original_command_status(code);
+  }
+  void play_sound(std::int32_t resource,
+                  std::uint16_t repeat,
+                  std::uint16_t priority) override {
+    if (g_audio) (void)g_audio->play_resource(resource, repeat, priority);
+  }
+  void play_reserved_if_idle(std::int32_t resource,
+                             std::uint16_t repeat,
+                             std::uint32_t now_ms) override {
+    if (g_audio) (void)g_audio->play_reserved_if_idle(resource, repeat, now_ms);
+  }
+  void play_event_sounds(
+      std::span<const simtower::OriginalEventSoundRequest> requests)
+      override {
+    play_original_event_sounds(requests);
+  }
+  void beep() override { MessageBeep(static_cast<UINT>(-1)); }
+  void audio_pump() override { original_runtime_audio_pump(); }
+  void audio_transition(
+      simtower::OriginalIdleAudioTransition transition) override {
+    if (!g_audio) return;
+    if (transition == simtower::OriginalIdleAudioTransition::activate) {
+      g_audio->activate();
+    } else if (transition ==
+               simtower::OriginalIdleAudioTransition::deactivate) {
+      g_audio->deactivate();
+    }
+  }
+  void sample_auxiliary_pointer_tick() override {
+    g_original_last_auxiliary_pointer_tick = original_runtime_coarse_tick();
+  }
+
+  int alert(int resource_id, std::string_view text) override {
+    return simtower::show_original_alert(g_main_window, g_resources,
+                                         resource_id, {text, {}, {}, {}});
+  }
+  int event_dialog(
+      const simtower::OriginalEventDialogRequest& request) override {
+    return run_original_event_dialog(request);
+  }
+  void open_elevator_control(std::size_t elevator_index,
+                             std::int16_t pointer_x,
+                             std::int16_t pointer_y) override {
+    open_original_elevator_control(elevator_index, pointer_x, pointer_y);
+  }
+  void transport_information(
+      const simtower::OriginalMagnifierTarget& target) override {
+    (void)run_original_transport_information_dialog(target);
+  }
+  void facility_information(std::int16_t floor,
+                            std::size_t tenant_index) override {
+    (void)run_original_facility_information_dialog(g_main_window, floor,
+                                                   tenant_index);
+  }
+  void person_information(std::size_t person_index) override {
+    (void)run_original_person_information_dialog(g_main_window,
+                                                 person_index);
+  }
+  simtower::OriginalWorldPoint command_outer_origin() override {
+    RECT command_outer{};
+    GetWindowRect(g_command_window, &command_outer);
+    return {command_outer.left, command_outer.top};
+  }
+  bool run_command_selector(
+      simtower::OriginalCommandSelectorSession& session) override {
+    const auto original = simtower::parse_original_dialog(
+        g_resources.find("DIALOG", 124));
+    const auto native = simtower::build_native_dialog_template(original);
+    const INT_PTR result = run_original_modal_dialog(
+        g_instance, reinterpret_cast<const DLGTEMPLATE*>(native.data()),
+        g_command_window, command_selector_dialog_proc,
+        reinterpret_cast<LPARAM>(&session));
+    return result != 0;
+  }
+
+  void consume_person_family_dispatches(
+      std::span<const simtower::OriginalPersonFamilyDispatchResult>
+          dispatches) override {
+    // 0883's process-only callback work is played in the same dispatch
+    // order as the original. Persisted mutation remains entirely in the
+    // translation layer; this host boundary performs only Info, modal,
+    // focus, and audio work.
+    for (const auto& dispatch : dispatches) {
+      simtower::consume_original_person_family_dispatch(g_idle_pass_host,
+                                                        dispatch);
+    }
+  }
+
+ private:
+  HDC map_focus_dc_{};  // between begin_map_focus and end_map_focus
+};
+
+Win32WorldInputHost g_world_input_host;
+
+simtower::OriginalWorldInputHost& original_world_input_host() {
+  return g_world_input_host;
+}
+
+simtower::OriginalWorldInputContext original_world_input_context() {
+  return {g_tower_document ? &*g_tower_document : nullptr,
+          g_resources,
+          g_part,
+          g_construction_costs,
+          g_rent_income,
+          g_world_input};
 }
 
 LRESULT apply_original_main_shutdown_message(
@@ -8766,7 +7311,7 @@ LRESULT CALLBACK main_window_proc(HWND window, UINT message,
     case WM_PAINT: {
       // 1158:00da publishes DS:0244 before BeginPaint and clears it only after
       // EndPaint, suppressing reentrant left-button dispatch during rendering.
-      g_main_paint_active = true;
+      g_world_input.paint_active = true;
       const auto pass = g_main_pending_surface_pass.value_or(
           simtower::OriginalMainSurfacePass::window_paint);
       g_main_pending_surface_pass.reset();
@@ -8781,60 +7326,26 @@ LRESULT CALLBACK main_window_proc(HWND window, UINT message,
         BeginPaint(window, &paint);
         EndPaint(window, &paint);
       }
-      g_main_paint_active = false;
+      g_world_input.paint_active = false;
       return result;
     }
     case WM_LBUTTONDOWN:
-    case WM_LBUTTONDBLCLK: {
-      const auto phase = message == WM_LBUTTONDOWN
-          ? simtower::OriginalMainPointerMessagePhase::button_down
-          : simtower::OriginalMainPointerMessagePhase::double_click;
-      const auto plan = simtower::original_main_pointer_message_plan(
-          phase, original_main_modal_input_locked(), g_main_paint_active,
-          (wparam & MK_LBUTTON) != 0U,
-          g_main_pointer_interaction_armed);
-      if (!plan.forward_to_world_dispatch) return 0;
-      if (plan.arm_interaction) g_main_pointer_interaction_armed = true;
-      dispatch_original_world_input(
-          window,
-          phase == simtower::OriginalMainPointerMessagePhase::button_down
-              ? simtower::OriginalWorldInputMessage::button_down
-              : simtower::OriginalWorldInputMessage::double_click,
-          wparam, lparam);
+    case WM_LBUTTONDBLCLK:
+      simtower::original_main_pointer_down(
+          original_world_input_context(), original_world_input_host(),
+          original_world_input_point(wparam, lparam),
+          message == WM_LBUTTONDBLCLK);
       return 0;
-    }
-    case WM_MOUSEMOVE: {
-      // 1158:0314 obtains the live screen point and runs the complete
-      // 1258:0505 cursor resolver before DS:24b8 can suppress world input.
-      const auto move_plan = simtower::original_main_mouse_move_plan(
-          original_main_modal_input_locked());
-      if (move_plan.refresh_cursor) {
-        POINT screen_point{};
-        if (GetCursorPos(&screen_point)) {
-          update_original_main_cursor_from_screen_point(screen_point);
-        }
-      }
-      if (!move_plan.forward_to_world_dispatch) return 0;
-      dispatch_original_world_input(
-          window, simtower::OriginalWorldInputMessage::mouse_move,
-          wparam, lparam);
+    case WM_MOUSEMOVE:
+      simtower::original_main_pointer_move(
+          original_world_input_context(), original_world_input_host(),
+          original_world_input_point(wparam, lparam));
       return 0;
-    }
-    case WM_LBUTTONUP: {
-      const auto plan = simtower::original_main_pointer_message_plan(
-          simtower::OriginalMainPointerMessagePhase::button_up,
-          original_main_modal_input_locked(), g_main_paint_active,
-          (wparam & MK_LBUTTON) != 0U,
-          g_main_pointer_interaction_armed);
-      if (!plan.forward_to_world_dispatch) return 0;
-      dispatch_original_world_input(
-          window, simtower::OriginalWorldInputMessage::button_up,
-          wparam, lparam);
-      if (plan.clear_interaction) {
-        g_main_pointer_interaction_armed = false;
-      }
+    case WM_LBUTTONUP:
+      simtower::original_main_pointer_up(
+          original_world_input_context(), original_world_input_host(),
+          original_world_input_point(wparam, lparam));
       return 0;
-    }
     case WM_CLOSE:
       return apply_original_main_shutdown_message(
           window, simtower::OriginalMainShutdownMessage::close);
@@ -8968,7 +7479,8 @@ LRESULT CALLBACK main_window_proc(HWND window, UINT message,
         case 9000U:
           // Hidden release-menu entry retained by the 27-way table.
           if (run_original_bomb_offer_boundary()) {
-            mark_original_world_interaction_changed(window);
+            simtower::mark_original_world_interaction_changed(
+                original_world_input_host());
           }
           break;
         case 9001U: {
@@ -8995,7 +7507,8 @@ LRESULT CALLBACK main_window_proc(HWND window, UINT message,
           // Hidden Fire command is the same 10e8:0029 boundary used by the
           // scheduler.
           if (run_original_fire_offer_boundary()) {
-            mark_original_world_interaction_changed(window);
+            simtower::mark_original_world_interaction_changed(
+                original_world_input_host());
           }
           break;
         case 9003U:
@@ -9217,7 +7730,7 @@ void preload_original_command_surfaces() {
 
 void show_original_windows() {
   for (const auto action :
-       simtower::original_startup_show_plan(g_build_mode_enabled)) {
+       simtower::original_startup_show_plan(g_world_input.build_mode_enabled)) {
     using Action = simtower::OriginalStartupShowAction;
     switch (action) {
       case Action::show_command:
@@ -9270,7 +7783,7 @@ void validate_original_startup_data() {
   g_construction_costs = std::move(data.construction_costs);
   g_rent_income = std::move(data.rent_income);
   g_maintenance_costs = std::move(data.maintenance_costs);
-  g_command_ratings = std::move(data.command_ratings);
+  g_world_input.command_ratings = std::move(data.command_ratings);
 }
 
 }  // namespace

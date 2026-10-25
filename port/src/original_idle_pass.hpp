@@ -12,6 +12,7 @@
 // original order. The Win32 host (native_main.cpp) and the SDL session
 // (sdl/sdl_session.cpp) both call it.
 
+#include "original_host_services.hpp"
 #include "original_people.hpp"
 #include "original_simulation.hpp"
 #include "original_tables.hpp"
@@ -109,12 +110,10 @@ class OriginalIdleInfoLatches {
   OriginalIdlePassHost& host_;
 };
 
-class OriginalIdlePassHost {
+// now_ms, elevator_isolation_active, notification_status and
+// invalidate_command (1090:064d) come from OriginalHostServices.
+class OriginalIdlePassHost : public OriginalHostServices {
  public:
-  virtual ~OriginalIdlePassHost() = default;
-
-  // Clock. Each call is one host clock read, at the original read point.
-  virtual std::uint32_t now_ms() = 0;
   // 1208:05e6 for a time already read (the Win32 boundary pumps audio).
   virtual std::uint32_t coarse_tick(std::uint32_t now_ms) = 0;
 
@@ -124,7 +123,6 @@ class OriginalIdlePassHost {
   virtual bool build_mode_enabled() = 0;              // DS:783e
   virtual bool elevator_finger_capture_active() = 0;
   virtual bool fast_mode_enabled() = 0;               // DS:de34
-  virtual bool elevator_isolation_active() = 0;
   virtual bool ambient_sound_enabled() = 0;
   virtual OriginalIdleView main_view() = 0;
   // 1020:00cb on the host palette runtime (reads the clock itself).
@@ -139,7 +137,6 @@ class OriginalIdlePassHost {
   // Event focus. Must perform the synchronous 1080:0a1e(1) camera refresh,
   // which advances the sky and visible people (RNG) at this point.
   virtual void focus(std::int16_t floor, std::int16_t x) = 0;
-  virtual void notification_status(std::uint16_t code) = 0;
   virtual void income_status(std::uint16_t code) = 0;
   // 1118:08f3 Info status expiry.
   virtual void expire_info_status() = 0;
@@ -179,7 +176,6 @@ class OriginalIdlePassHost {
   // The recolor also invalidates the Map (native AnimatePalette equivalent).
   virtual void palette_recolor_invalidate_map() {}
   virtual void present_main_direct() = 0;  // 1090:062c
-  virtual void invalidate_command() {}     // 1090:064d
   // 1090:0661-06cd. A host without an Info painter still drains the latches.
   virtual void present_info_direct(OriginalIdleInfoLatches& latches) {
     latches.consume_hotel_checkout();

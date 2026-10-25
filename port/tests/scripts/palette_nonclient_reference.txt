@@ -1,0 +1,5 @@
+# Reference for palette_nonclient.txt (not a test by itself): the pointer
+# ends on the same point without any press.
+pass 1
+move 2 100
+pass 3

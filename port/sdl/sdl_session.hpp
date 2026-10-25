@@ -13,7 +13,7 @@
 // with a virtual clock.
 
 #include "sdl_digest.hpp"
-#include "sdl_scenario.hpp"
+#include "sdl_layout.hpp"
 
 #include "original_audio.hpp"
 #include "original_audio_device.hpp"
@@ -27,6 +27,8 @@
 #include "original_tdt.hpp"
 #include "original_ui.hpp"
 #include "original_world.hpp"
+#include "original_world_input.hpp"
+#include "test_scenario.hpp"
 
 #include <array>
 #include <cstddef>
@@ -74,6 +76,37 @@ struct SessionFlags {
   bool trace_requests{false};
 };
 
+// One mouse event in window logical coordinates (the Win16 desktop
+// coordinates of sdl_layout.hpp). keys carries MK_SHIFT / MK_CONTROL only;
+// the session adds MK_LBUTTON from its own tracked button state.
+enum class InputKind : std::uint8_t {
+  move,
+  down,
+  up,
+  double_click,
+  right_down,
+};
+
+struct InputEvent {
+  InputKind kind{InputKind::move};
+  int x{};
+  int y{};
+  std::uint16_t keys{};
+};
+
+// Supplies events while a modal loop owns input (the 1050:05a7 selector).
+// Win32 modals run their own message loop, so no idle pass runs until the
+// modal ends. The window host waits for SDL events; the script player reads
+// the next script lines.
+class InputSource {
+ public:
+  virtual ~InputSource() = default;
+  // std::nullopt ends the modal as a cancel.
+  virtual std::optional<InputEvent> next_modal_event() = 0;
+  // The modal's overlay changed (the window host re-presents it).
+  virtual void modal_changed() {}
+};
+
 // Counts of host requests that were logged instead of performed.
 struct HostRequestCounts {
   std::size_t dialogs{};
@@ -93,6 +126,9 @@ struct SessionDigest {
 };
 
 class Session : private OriginalIdlePassHost {
+  class WorldInputHost;
+  friend class WorldInputHost;
+
  public:
   // clock_ms replaces GetTickCount: every Win32 read maps to one call.
   // With flags.sound_enabled and a non-null audio_device (which must
@@ -103,6 +139,7 @@ class Session : private OriginalIdlePassHost {
           SessionFlags flags = {},
           OriginalAudioDevice* audio_device = nullptr);
   // The audio runtime refers to resources_; the session never moves.
+  ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
@@ -162,6 +199,43 @@ class Session : private OriginalIdlePassHost {
   [[nodiscard]] const OriginalWorldRaster& main_raster() const {
     return main_raster_;
   }
+
+  // ---- Input (original_world_input.hpp) ----
+  // Routes one mouse event: the capture owner first, otherwise the top panel
+  // at the point (Command, Map, Info, then Main), each in its own client
+  // coordinates, into the shared module. A palette press on its frame drag
+  // row or border is nonclient, as Win32's WM_NCHITTEST makes it: it only
+  // activates the panel, and its moves and release reach no module.
+  void pointer_event(const InputEvent& event);
+  // Source for modal loops; null cancels every modal immediately.
+  void set_input_source(InputSource* source) { input_source_ = source; }
+  // Answer for the next alert (1 = OK/Yes, 2 = Cancel/No); then back to 1.
+  void set_alert_answer(int answer) { alert_answer_ = answer; }
+  // Test shortcut (scripts' "tool"): selects an edit mode (0 Bulldozer,
+  // 1 Finger, 2 Magnifier) or a construction type. A type selects its
+  // catalog cell (index + 3) when the active rating lists it, else mode 3.
+  void select_tool(std::optional<std::uint16_t> edit_mode,
+                   std::optional<std::uint16_t> build_type);
+  [[nodiscard]] const OriginalWorldInputState& world_input() const {
+    return world_input_;
+  }
+  [[nodiscard]] const WindowLayout& layout() const { return layout_; }
+  [[nodiscard]] bool panel_visible(Panel panel) const;
+  [[nodiscard]] Panel active_panel() const { return active_panel_; }
+  // The running selector modal, or null.
+  [[nodiscard]] const OriginalCommandSelectorSession* active_selector()
+      const {
+    return selector_;
+  }
+  [[nodiscard]] const OriginalPaletteRuntime& palette_runtime() const {
+    return palette_runtime_;
+  }
+  [[nodiscard]] const OriginalCommandRatingState& active_rating_state() const;
+  // Cursor id last set through the module (resolve_original_cursor ids).
+  [[nodiscard]] std::uint16_t cursor_id() const { return cursor_id_; }
+  // FNV-1a over the input state, the sampled pointer and the preview, for
+  // the scripted digest's "input" field.
+  [[nodiscard]] std::uint64_t input_digest() const;
   [[nodiscard]] const Viewport& viewport() const { return viewport_; }
   [[nodiscard]] const OriginalTdtDocument* document() const {
     return document_ ? &*document_ : nullptr;
@@ -170,7 +244,11 @@ class Session : private OriginalIdlePassHost {
     return host_requests_;
   }
 
-  // Test-only: stages a deterministic tower (sdl_scenario.hpp) on the live
+  // Test-only (--direct-build): one constructor call plus the common
+  // success tail, as test_scenario.cpp's Builder runs it. Returns whether
+  // the constructor succeeded.
+  bool direct_build(const DirectBuild& build);
+  // Test-only: stages a deterministic tower (test_scenario.hpp) on the live
   // document after New, through the portable construction functions only.
   ScenarioSummary apply_scenario(std::string_view name);
   // Test-only: runs a hidden menu event command between idle passes, as
@@ -214,15 +292,28 @@ class Session : private OriginalIdlePassHost {
                   bool reserved_if_idle = false);
   void log_fire_menu(bool enabled);
   OriginalIdlePassContext idle_pass_context();
+  OriginalWorldInputContext world_input_context();
+  // The 1050:05a7 modal loop over input_source_.
+  bool run_selector_modal(OriginalCommandSelectorSession& selector);
+  void route_pointer(Panel panel, const InputEvent& event,
+                     std::uint16_t keys);
+  // WM_NCHITTEST for a point inside a palette's outer rectangle.
+  enum class PaletteHit : std::uint8_t { client, caption, border };
+  [[nodiscard]] PaletteHit palette_hit(Panel panel, int x, int y) const;
 
   // OriginalIdlePassHost (sdl_session.cpp maps each hook to its Win32
   // counterpart). Window-only hooks keep the interface's no-op defaults.
   std::uint32_t now_ms() override { return clock_ms_(); }
   std::uint32_t coarse_tick(std::uint32_t now_ms) override;
   void expire_find_marker() override;
-  bool build_mode_enabled() override { return build_mode_enabled_; }
-  bool elevator_finger_capture_active() override { return false; }
+  bool build_mode_enabled() override {
+    return world_input_.build_mode_enabled;
+  }
+  bool elevator_finger_capture_active() override {
+    return world_input_.shaft_drag.capture_active;
+  }
   bool fast_mode_enabled() override { return flags_.fast_mode_enabled; }
+  // No Elevator Control window yet, so never isolated (DS:b3ae).
   bool elevator_isolation_active() override { return false; }
   bool ambient_sound_enabled() override { return flags_.sound_enabled; }
   OriginalIdleView main_view() override;
@@ -247,10 +338,18 @@ class Session : private OriginalIdlePassHost {
   void idle_palette_changed() override;
   void rating_promoted_before_dialog(std::uint16_t rating) override;
   void rating_promoted_after_dialog(std::uint16_t rating) override;
+  void before_scheduler_step(bool sample_cursor) override;
+  void preview_only_pass() override;
+  void restore_preview() override;
   void cathedral_rating_promoted() override;
   bool render_full_frame(bool renderer_surface_dirty) override;
+  void commit_full_frame_preview() override;
   void palette_recolor_rebuild() override;
   void present_main_direct() override { present_main(); }
+  // The panels are recomposed on every present. The idle pass calls this
+  // only right after present_main_direct (1090:064d), which already
+  // requested one; world input calls it through services().
+  void invalidate_command() override { present_requested_ = true; }
   void final_effect_palette_changed() override;
 
   // Appends one host request to the ordered digest log.
@@ -265,6 +364,18 @@ class Session : private OriginalIdlePassHost {
     fire_menu,
     rating_promoted,
     command_mode,
+    // Logged only when input happens, so runs without input keep their
+    // digests.
+    alert,
+    info_dialog,
+    elevator_control,
+    capture,
+    construction_status,
+    command_status,
+    beep,
+    selector,
+    panel,
+    view,
   };
   void log_request(RequestKind kind,
                    std::initializer_list<std::int64_t> fields);
@@ -286,7 +397,6 @@ class Session : private OriginalIdlePassHost {
   OriginalYenTable construction_costs_{};
   OriginalYenTable rent_income_{};
   OriginalYenTable maintenance_costs_{};
-  std::array<OriginalCommandRatingState, 6> command_ratings_{};
 
   std::optional<OriginalTdtDocument> document_;
   OriginalSimulationState simulation_state_{};
@@ -296,10 +406,37 @@ class Session : private OriginalIdlePassHost {
   OriginalInfoStatusState info_status_{};
   std::vector<OriginalElevatorTransferVisual> transfer_visuals_{};
 
-  // reset_original_command_state fields this milestone consults.
-  bool build_mode_enabled_{true};  // DS:783e
-  std::uint16_t command_mode_{3U}; // DS:783c
-  std::uint16_t map_mode_{0U};     // DS:7840
+  // Command, Main pointer, preview and Map state shared with the Win32 host
+  // (original_world_input.hpp), including the mutable TABL rating copies.
+  OriginalWorldInputState world_input_{};
+  std::unique_ptr<WorldInputHost> world_host_;
+  InputSource* input_source_{};
+  bool left_button_down_{};
+  // Last pointer position in Main client coordinates, sampled into
+  // world_input_.pointer by 1258:0256 (before_scheduler_step). Win32 never
+  // clears DS:77ac's "inside" once a point was sampled.
+  std::optional<OriginalWorldPoint> last_pointer_{};
+  WindowLayout layout_{};
+  int command_outer_height_{100};  // 1128:05eb's raw 63x100 until 1140:010d
+  bool map_visible_{true};         // DS:31ac
+  bool info_visible_{true};        // DS:31aa
+  bool command_visible_{true};     // DS:31a8
+  Panel active_panel_{Panel::main};
+  // A palette nonclient press is held until its release (SC_MOVE loop).
+  bool nonclient_press_{};
+  std::optional<OriginalInputSurface> capture_{};
+  OriginalCommandSelectorSession* selector_{};
+  int modal_depth_{};              // DS:24b8
+  int alert_answer_{1};
+  std::uint16_t cursor_id_{};
+  bool document_dirty_{};
+  // DS:77ac at idle-pass entry and the 1090:05ee rectangle.
+  std::optional<OriginalConstructionPreviewRect> previous_preview_rect_{};
+  std::optional<OriginalConstructionPreviewRect> current_preview_rect_{};
+  // A non-synchronous request_main_pass, run before the next idle pass as
+  // the pending WM_PAINT would be.
+  std::optional<OriginalMainSurfacePass> pending_main_pass_{};
+  std::uint32_t last_auxiliary_tick_{};  // DS:31b0/31b2
 
   Viewport viewport_{};
   // Native mirror of the DS:3264 backing (g_original_main_backing).

@@ -1,0 +1,9 @@
+# CLI end-to-end (cli_input_test.cmake): the initial Lobby tool clicked on
+# floor 10 of a New tower must leave the tower bytes of the direct call.
+# Window 608,550 is Main client 400,455: Lobby cells 186..190, floor 10.
+# direct-build: 24,10,186@1
+# passes: 3
+pass 1
+click 608 550
+expect-type 24
+pass 3

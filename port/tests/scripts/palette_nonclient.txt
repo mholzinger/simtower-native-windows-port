@@ -1,0 +1,24 @@
+# CLI end-to-end (cli_input_test.cmake): presses on a palette's nonclient
+# area never reach its procedure, as Win32's WM_NCHITTEST split
+# (original_palette_frame_hit_test) makes them. A drag-row press is
+# HTCAPTION: DefWindowProc's SC_MOVE loop swallows its moves and release,
+# even over Main. A WS_BORDER pixel below the drag row is HTBORDER. The
+# whole digest must equal the reference, which only moves the pointer to
+# the same final point without pressing.
+# same-digest-as: palette_nonclient_reference.txt
+# passes: 3
+pass 1
+# Map drag row (client 47,2), released over Main.
+down 50 7
+move 300 300
+up 600 400
+# Command drag row (client 25,3).
+down 160 182
+up 160 182
+# Info drag row (client 195,3).
+down 400 8
+up 400 8
+# Map left border pixel below the drag row (client -1,95).
+down 2 100
+up 2 100
+pass 3

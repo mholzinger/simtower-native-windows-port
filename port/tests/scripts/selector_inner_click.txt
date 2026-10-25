@@ -1,0 +1,13 @@
+# CLI end-to-end (cli_input_test.cmake): a "click" inside an open Command
+# selector must equal the same press and release written as "down" and
+# "up" lines. The selector (opened by the Lobby group press at 151,256)
+# closes on the press at 151,287, so the click's queued release, and the
+# following click on Main, must reach the session in script order.
+# same-digest-as: selector_inner_click_reference.txt
+# passes: 3
+pass 1
+click 608 550
+down 151 256
+click 151 287
+click 608 518
+pass 3
