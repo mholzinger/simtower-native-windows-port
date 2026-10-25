@@ -769,7 +769,15 @@ void test_parking_drag(const Tables& tables, std::uint16_t type) {
       ramp.retained_floor = p.floor;
       ramp.retained_upper_exclusive = static_cast<std::int16_t>(p.floor + 1);
     }
-    if (attempted && final_ok) ++successes;
+    if (attempted && final_ok) {
+      ++successes;
+    } else {
+      // Development PR #11: 11f8:07d8 clears DS:3216 when 240d/25a2
+      // return zero (0de4-0e09), so the next step re-anchors at the
+      // pointer (240d 242a, 25a2 25b9).
+      parking.initialized = false;
+      ramp.initialized = false;
+    }
   }
   const auto release = original_construction_release_plan(
       type, successes, balance_at_press, b.header.balance);
