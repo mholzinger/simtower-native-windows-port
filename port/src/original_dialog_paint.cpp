@@ -59,11 +59,17 @@ bool empty(const OriginalRect& rect) {
   return rect.right <= rect.left || rect.bottom <= rect.top;
 }
 
-OriginalRect to_rect(const OriginalDtmpRect& source) {
-  return {source.left, source.top, source.right, source.bottom};
-}
-
 }  // namespace
+
+void original_frame_rect(OriginalDrawContext& context,
+                         const OriginalRect& rect, OriginalRgb rgb) {
+  if (empty(rect)) return;
+  context.fill_rect({rect.left, rect.top, rect.right, rect.top + 1}, rgb);
+  context.fill_rect({rect.left, rect.bottom - 1, rect.right, rect.bottom},
+                    rgb);
+  context.fill_rect({rect.left, rect.top, rect.left + 1, rect.bottom}, rgb);
+  context.fill_rect({rect.right - 1, rect.top, rect.right, rect.bottom}, rgb);
+}
 
 void paint_original_dtmp_frame(OriginalDrawContext& context,
                                const OriginalRect& rect) {
@@ -101,7 +107,7 @@ void paint_original_dtmp_chrome(OriginalDrawContext& context,
                                 const OriginalDialogHasChild& has_child) {
   paint_original_dtmp_frame(context, client);
   for (std::size_t index = 0; index < dtmp.rectangles.size(); ++index) {
-    const auto rect = to_rect(dtmp.rectangles[index]);
+    const auto rect = original_dtmp_rect(dtmp.rectangles[index]);
     if (empty(rect)) continue;
     if (!has_child(static_cast<std::uint16_t>(index + 1U))) {
       paint_original_dtmp_placeholder(context, rect);
@@ -124,7 +130,8 @@ std::vector<OriginalDtmpRenderOp> original_dtmp_render_ops(
       continue;
     }
     ops.push_back({Kind::place_child, 0, 0, 0,
-                   static_cast<std::uint16_t>(index + 1U), to_rect(rect)});
+                   static_cast<std::uint16_t>(index + 1U),
+                   original_dtmp_rect(rect)});
   }
   return ops;
 }

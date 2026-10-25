@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace simtower::sdl {
@@ -151,9 +152,13 @@ OriginalWorldRaster compose_window(const Session& session) {
     canvas.outline(layout.map_outer, kBorderRgb);
     canvas.fill(client, kWhiteRgb);
     draw_frame_row(canvas, client, kOriginalMapWidth, active == Panel::map);
+    // 1168:02be: the rating check reads the live document, the raster
+    // the presentation copy (every shaft drawn while Simulate isolates).
     const bool disabled = document && document->header.rating == 1U;
-    canvas.blit(render_original_map(resources, document, input.map_mode,
-                                    disabled, palette),
+    std::optional<OriginalTdtDocument> storage{};
+    canvas.blit(render_original_map(resources,
+                                    session.presentation_document(storage),
+                                    input.map_mode, disabled, palette),
                 client.x, client.y + kOriginalMapClientTop, client);
     const auto& viewport = session.viewport();
     const auto focus = original_map_view_rect(viewport.x, viewport.y,
@@ -200,10 +205,16 @@ OriginalWorldRaster compose_window(const Session& session) {
       case Panel::info: draw_info(); break;
       case Panel::map: draw_map(); break;
       case Panel::command: draw_command(); break;
+      case Panel::elevator_control:
       case Panel::none: break;
     }
   }
 
+  // Elevator Control: TOPMOST above the palettes (1098:08c9; TEMP, owner
+  // decision D2: also while the window is inactive), below the modals.
+  if (const auto* control = session.elevator_control()) {
+    draw_dialog(canvas.raster(), *control, resources);
+  }
   if (const auto* selector = session.active_selector()) {
     // 1050:0978 at the 1050:05d6 placement; the window bottom stands in for
     // the desktop bottom.

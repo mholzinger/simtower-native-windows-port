@@ -1,0 +1,29 @@
+# The scroll bar (SB_CTL 7) of a 24-floor shaft (full tower, floors 1..24:
+# range 1..10, position 10 shows the bottom fifteen floors): the up arrow,
+# the keys of the focused bar, the page clamps and a thumb drag, each a
+# WM_VSCROLL through ELVDLOGMAIN.
+# args: --scenario full --passes 60
+pass 50
+open-elevator-control 0
+expect-scroll 10
+panel-at 143 200
+expect-scroll 9
+panel-key up
+expect-scroll 8
+panel-key pgdn
+expect-scroll 10
+panel-key pgup
+expect-scroll 1
+panel-key down
+expect-scroll 2
+panel-key tab
+panel-key down
+expect-scroll 3
+# Thumb at 3 (y 244..260): grab it and drag to the bottom of the trough (10).
+panel-down 143 252
+panel-move 143 300
+panel-move 143 380
+panel-up 143 380
+expect-scroll 10
+panel-at 148 413
+pass 60

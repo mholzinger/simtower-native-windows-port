@@ -1,0 +1,12 @@
+# Review frame: Elevator Control of the full tower's 24-floor shaft after
+# three line-up clicks (floors 4..18 shown).
+# args: --scenario full --passes 60
+# held: ec_scrolled.bmp
+pass 50
+open-elevator-control 0
+panel-at 143 200
+panel-at 143 200
+panel-at 143 200
+hold ec_scrolled.bmp
+panel-at 148 413
+pass 60

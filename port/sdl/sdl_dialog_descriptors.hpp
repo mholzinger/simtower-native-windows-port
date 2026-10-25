@@ -48,11 +48,23 @@
 //   procedure. The painter reads the procedure's pressed state through
 //   DialogWindow::paint_state (Session sets it to the controller's).
 //
+// - Elevator Control (DIALOG/DTMP 400, ELVDLOGMAIN, modeless): a fixed
+//   panel at 11e0:0b52's requested left 8 on the fixed 1024x768 desktop
+//   (owner decision: fixed in-window panels), the 200x428 client
+//   (size_original_dialog_client) inside the TEMP WS_CAPTION frame with
+//   the STRL/400 caption the Win32 port sets, scroll bar 7 placed by the
+//   DTMP on the white WM_CTLCOLORSCROLLBAR brush; the client painter is
+//   the shared paint_original_elevator_control. Presses, releases and
+//   moves over the client (not the scroll bar) reach the procedure.
+// - The elevator popup (DIALOG 124, ELVPOPUP): 82x67, no frame, at its
+//   phase button raised by the mode rows, with SetCapture and ClipCursor;
+//   moves, left and right releases reach the procedure.
+//
 // Deferred (they keep their logged or auto-answered SDL behavior for a
 // later step): facility and person information, transport information
-// (elevator/escalator magnifier), the elevator popup, the Command selector's
-// own window chrome, the startup (New/Load) dialog, the splash, and
-// Elevator Control. Each becomes another descriptor.
+// (elevator/escalator magnifier), the Command selector's own window chrome,
+// the startup (New/Load) dialog and the splash. Each becomes another
+// descriptor.
 
 #include "sdl_dialog.hpp"
 
@@ -116,6 +128,20 @@ inline constexpr int kCaptionFrameHeight = 18;
     bool person);
 [[nodiscard]] DialogWindow make_movie_dialog(
     const OriginalResources& resources);
+// Elevator Control's panel at the launch block's requested left
+// (original_elevator_control_launch_contract); client paints the client
+// (the session's paint_original_elevator_control over its controller and
+// tower).
+[[nodiscard]] DialogWindow make_elevator_control_dialog(
+    const OriginalResources& resources,
+    int requested_left,
+    std::string caption,
+    DialogDescriptor::Painter client);
+// ELVPOPUP with its outer origin at (x, y) in window coordinates;
+// paint_state() - 1 is the hover band (0: none).
+[[nodiscard]] DialogWindow make_elevator_popup_dialog(
+    const OriginalResources& resources, int x, int y);
+
 // paint_state() != 0 draws the OK surface pressed (BITMAP/501).
 [[nodiscard]] DialogWindow make_finance_dialog(
     const OriginalResources& resources,

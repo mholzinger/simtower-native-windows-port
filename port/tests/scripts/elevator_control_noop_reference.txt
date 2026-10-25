@@ -1,0 +1,3 @@
+# Reference for elevator_control_noop.txt: the same run, never opened.
+# args: --scenario busy --passes 600
+pass 600

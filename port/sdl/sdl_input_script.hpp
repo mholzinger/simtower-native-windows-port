@@ -30,7 +30,8 @@
 //   digest                 print a digest line now
 //   menu ID                pick menu command ID (WM_COMMAND), as a click on
 //                          the item would: exit 2 if ID is not in the live
-//                          menu; a grayed item is logged and not sent
+//                          menu or Main is disabled (Elevator Control
+//                          open); a grayed item is logged and not sent
 //   key f1                 the F1 accelerator (TranslateAccelerator, 40021)
 //   pick-file PATH|cancel  the result of an Open / Save As sheet (PATH is
 //                          the rest of the line). Right after the command
@@ -49,7 +50,8 @@
 //                          the live tower (what a Save just wrote)
 //   expect-dialog event ID | alert ID | about | box replace |
 //                 box invalid-filename | finance | find person |
-//                 find tenant | rename person | rename tenant | movie
+//                 find tenant | rename person | rename tenant | movie |
+//                 elevator popup
 //                          the dialog that is opening now (see Dialogs);
 //                          exit 3 if another one opens, or none is open
 //   dialog-click ID        press and release the center of push button ID
@@ -86,6 +88,37 @@
 //                          FILE, or to the --headless-window file (which
 //                          the run then does not overwrite at its end); exit
 //                          2 with neither
+//   open-elevator-control INDEX
+//                          TEST SHORTCUT, not original input: opens
+//                          Elevator Control on shaft INDEX as a Magnifier
+//                          press would ("tool inspect" + a click on the
+//                          shaft is the original path)
+//   expect-panel elevator-control INDEX | none
+//                          Elevator Control is open on shaft INDEX (or
+//                          closed); exit 3 otherwise
+//   panel-at X Y [right]   press and release at client point X,Y of the
+//                          open Elevator Control (exit 2 when none); when
+//                          the press runs a modal (ELVPOPUP), the modal
+//                          took the release and none is sent
+//   panel-down X Y | panel-move X Y | panel-up X Y
+//                          one press, move or release there (drags: the
+//                          scroll thumb, a pressed Close / Simulate)
+//   panel-dblclick X Y     the second press of a double click there
+//                          (WM_LBUTTONDBLCLK: the scroll bar takes it as a
+//                          press, ELVDLOGMAIN ignores it)
+//   panel-key KEY          a key stroke for its dialog manager (the
+//                          dialog-key words: tab, up, down, pgup, pgdn...)
+//   expect-served INDEX FLOOR yes|no
+//                          shaft INDEX serves FLOOR (raw floor number)
+//   expect-scroll POS      Elevator Control's scroll position
+//   expect-waiting N       its displayed waiting count (DTMP 41) for the
+//                          selected bank and phase
+//   expect-isolation on|off
+//                          Simulate's isolation (DS:b3ae)
+//   expect-idle-passes N   the session ran N idle passes so far (a pass
+//                          held by a scroll bar track does not count)
+//   hold [FILE]            write the composed window now (as dialog-hold,
+//                          outside dialogs too)
 //   open-dialog rename-person PERSON | rename-tenant FLOOR TENANT |
 //               movie RECORD
 //                          TEST SHORTCUT, not original input: opens the
@@ -175,6 +208,20 @@ enum class ScriptOp : std::uint8_t {
   dialog_timer,
   dialog_hold,
   open_dialog,
+  open_elevator_control,
+  expect_panel,
+  panel_at,
+  panel_down,
+  panel_move,
+  panel_up,
+  panel_double_click,
+  panel_key,
+  expect_served,
+  expect_scroll,
+  expect_waiting,
+  expect_isolation,
+  expect_idle_passes,
+  hold,
 };
 
 struct ScriptCommand {

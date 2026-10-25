@@ -240,6 +240,7 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
                     pointer_y});
     s_.tally("elevator control");
     log_line("elevator control " + std::to_string(elevator_index));
+    s_.open_elevator_control(elevator_index, pointer_x, pointer_y);
   }
   void transport_information(const OriginalMagnifierTarget& target) override {
     ++s_.host_requests_.dialogs;
@@ -278,6 +279,123 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
           static_cast<OriginalIdlePassHost&>(s_), dispatch);
     }
   }
+
+ private:
+  Session& s_;
+};
+
+// panel_disabled_'s slot for each window ELVDLOGMAIN enables or disables
+// (the digest hashes the slots in this order).
+constexpr std::size_t disabled_slot(
+    OriginalElevatorControlCloseWindow window) noexcept {
+  switch (window) {
+    case OriginalElevatorControlCloseWindow::main: return 0U;
+    case OriginalElevatorControlCloseWindow::map: return 1U;
+    case OriginalElevatorControlCloseWindow::info: return 2U;
+    case OriginalElevatorControlCloseWindow::command: return 3U;
+  }
+  return 0U;
+}
+
+// ELVDLOGMAIN's world (OriginalElevatorControlHost): the Win32 host's
+// globals become session state. The windows it disables, enables and
+// invalidates are the panels; the alerts and the ELVPOPUP run through the
+// dialog runtime when the input source drives them, and otherwise take the
+// scripted alert answer and the popup's cancel (its original mode).
+class Session::ElevatorControlHost final : public OriginalElevatorControlHost {
+ public:
+  explicit ElevatorControlHost(Session& session) : s_(session) {}
+
+  OriginalTdtDocument* document() override {
+    return s_.document_ ? &*s_.document_ : nullptr;
+  }
+  const OriginalPartTable& part() override { return s_.part_; }
+  const OriginalYenTable& rent_income() override { return s_.rent_income_; }
+  bool& build_mode() override { return s_.world_input_.build_mode_enabled; }
+  int alert(int alert_id, std::uint16_t strl_id,
+            std::uint16_t strl_index) override {
+    const auto text = original_strl_entry(s_.resources_.find("STRL", strl_id),
+                                          strl_index);
+    return s_.show_alert(alert_id, {text, {}, {}, {}});
+  }
+  int popup(const OriginalDtmpRect& phase_rectangle, std::size_t phase_item,
+            std::uint8_t original_mode) override {
+    // run_original_elevator_popup: ClientToScreen of the phase rectangle,
+    // raised by the mode rows (size_original_dialog_client).
+    const auto* panel = s_.elevator_control();
+    const auto [x, y] =
+        original_elevator_popup_origin(phase_rectangle, original_mode);
+    std::optional<int> result{};
+    if (panel && s_.input_source_) {
+      auto popup = make_elevator_popup_dialog(
+          s_.resources_, panel->client_x() + x, panel->client_y() + y);
+      if (s_.drives(popup)) {
+        OriginalElevatorPopupController controller(original_mode);
+        popup.set_paint_state([&controller]() {
+          return static_cast<std::uint32_t>(controller.hover_mode() + 1);
+        });
+        result = s_.run_dialog_modal(
+            popup, [&](const DialogSignal& signal, OriginalDialogOps& ops) {
+              return controller.signal(signal, ops).result;
+            });
+      }
+    }
+    // Undriven (or ended without an answer): WM_RBUTTONUP's cancel, the
+    // mode it opened with.
+    const int answer = result.value_or(original_mode);
+    ++s_.host_requests_.dialogs;
+    s_.log_request(RequestKind::elevator_control,
+                   {-1, static_cast<std::int64_t>(phase_item), original_mode,
+                    answer});
+    s_.tally("elevator popup");
+    log_line("elevator popup " + std::to_string(phase_item) + " mode " +
+             std::to_string(original_mode) + " -> " + std::to_string(answer) +
+             (result ? "" : " (not driven: cancel)"));
+    return answer;
+  }
+  void consume_family_dispatches(
+      std::span<const OriginalPersonFamilyDispatchResult> dispatches)
+      override {
+    for (const auto& dispatch : dispatches) {
+      consume_original_person_family_dispatch(
+          static_cast<OriginalIdlePassHost&>(s_), dispatch);
+    }
+  }
+  void play_movement_sound() override {
+    s_.sound(kOriginalElevatorControlMovementSound, "elevator control");
+    s_.play_audio(kOriginalElevatorControlMovementSound, 0U, 0U);
+  }
+  void rebuild_main_without_sky() override {
+    // request_original_main_surface_pass(rebuild_without_sky, true).
+    s_.world_host_->request_main_pass(
+        OriginalMainSurfacePass::rebuild_without_sky, true);
+  }
+  void clear_transfer_visuals() override { s_.transfer_visuals_.clear(); }
+  void mark_document_dirty() override { s_.document_dirty_ = true; }
+  void invalidate_main() override {
+    s_.main_backing_dirty_ = true;
+    s_.present_requested_ = true;
+  }
+  // The panels are recomposed on every present; Info repaints its
+  // retained client (WM_PAINT, presentation only).
+  void invalidate_map() override { s_.present_requested_ = true; }
+  void invalidate_info() override {
+    s_.paint_info();
+    s_.present_requested_ = true;
+  }
+  void invalidate_command() override { s_.present_requested_ = true; }
+  void enable_window(OriginalElevatorControlCloseWindow window,
+                     bool enabled) override {
+    s_.panel_disabled_[disabled_slot(window)] = !enabled;
+  }
+  // DS:31a0 = 0: the slot is emptied when DestroyWindow completes.
+  void unpublish() override {}
+  // TEMP (owner decision D7): DestroyWindow activates Main.
+  void activate_main() override {}
+  // GetAsyncKeyState of the primary button: the tracked MK_LBUTTON (set
+  // before the press is routed, so a press always finds it down).
+  bool primary_button_down() override { return s_.left_button_down_; }
+  void destroy() override { s_.elevator_destroy_pending_ = true; }
 
  private:
   Session& s_;
@@ -559,7 +677,8 @@ Session::Session(std::vector<std::byte> pack,
       flags_(flags),
       world_host_(std::make_unique<WorldInputHost>(*this)),
       command_host_(std::make_unique<MainCommandHost>(*this)),
-      file_host_(std::make_unique<TowerFileHost>(*this)) {
+      file_host_(std::make_unique<TowerFileHost>(*this)),
+      elevator_host_(std::make_unique<ElevatorControlHost>(*this)) {
   verify_pack_extent(pack_);
   // WinMain: the portable span constructor replaces from_current_module.
   resources_ = OriginalResources(std::span<const std::byte>(pack_));
@@ -640,7 +759,9 @@ void Session::paint_info() {
   OriginalCanvasDrawContext context(
       info_raster_, OriginalCanvasFont::bundled(), 0, 0,
       {0, 0, info_raster_.width, info_raster_.height});
-  draw_original_info(context, resources_, document(), info_status_.text);
+  std::optional<OriginalTdtDocument> storage{};
+  draw_original_info(context, resources_, presentation_document(storage),
+                     info_status_.text);
 }
 
 Session::~Session() = default;
@@ -702,6 +823,11 @@ void Session::resize(int width, int height) {
   // must not leave a dialog outside).
   for (auto* dialog : dialogs_) {
     dialog->place(layout_.window_width, layout_.window_height);
+  }
+  if (elevator_) {
+    // The fixed panel follows the same rule (sdl_dialog.hpp fixed_desktop).
+    elevator_->window->place(layout_.window_width, layout_.window_height);
+    window_repaint_ = true;
   }
   if (first_size) {
     // Window creation: 1128:08d6 (create_original_windows) installs the
@@ -783,6 +909,10 @@ void Session::reset_command_state() {
 }
 
 void Session::install_document(OriginalTdtDocument document) {
+  // Unreachable through the UI while Elevator Control is open (Main and
+  // its menu are disabled); a test shortcut that replaces the tower still
+  // must not leave the control on a stale shaft (owner decision D5).
+  if (elevator_) close_elevator_panel(-3);
   carry_original_process_random_state(document_ ? &*document_ : nullptr,
                                       document);
   document_ = std::move(document);
@@ -810,6 +940,9 @@ void Session::install_document(OriginalTdtDocument document) {
 }
 
 void Session::install_empty_document() {
+  // The New / Open path's first install: the same stale-shaft rule as
+  // install_document (a load that throws after it leaves no control).
+  if (elevator_) close_elevator_panel(-3);
   auto empty_document = make_original_new_tdt();
   carry_original_process_random_state(document_ ? &*document_ : nullptr,
                                       empty_document);
@@ -851,6 +984,13 @@ std::optional<std::filesystem::path> Session::next_picked_file(bool save) {
 }
 
 bool Session::choose_menu_command(std::uint16_t command) {
+  if (!panel_enabled(Panel::main)) {
+    // A disabled Main's menu bar takes no input (Elevator Control open).
+    log_request(RequestKind::menu, {command, 0, 3});
+    tally("menu " + std::to_string(command));
+    log_line("menu " + std::to_string(command) + " (Main disabled: not sent)");
+    return false;
+  }
   const auto* item = find_original_menu_command(menu_, command);
   const bool dispatched = item && !item->grayed();
   log_request(RequestKind::menu, {command, dispatched, 0});
@@ -867,6 +1007,13 @@ bool Session::accelerator(std::uint16_t virtual_key) {
     if ((entry.flags & kOriginalAcceleratorVirtualKey) == 0U ||
         entry.key != virtual_key) {
       continue;
+    }
+    if (elevator_) {
+      // TranslateAccelerator(Elevator Control, ...) (1258:00bc): the
+      // WM_COMMAND reaches ELVDLOGMAIN, which has no WM_COMMAND handler.
+      log_request(RequestKind::menu, {entry.command, 0, 2});
+      tally("accelerator " + std::to_string(entry.command));
+      return false;
     }
     const auto* item = find_original_menu_command(menu_, entry.command);
     const bool dispatched = !item || !item->grayed();
@@ -915,8 +1062,8 @@ void Session::open_tower(const std::filesystem::path& path) {
 void Session::rebuild_main(OriginalMainSurfacePass pass,
                            bool advance_state,
                            bool full_frame_surface_dirty) {
-  // rebuild_original_main_backing without Elevator Control isolation,
-  // with the Find marker and the construction preview.
+  // rebuild_original_main_backing, with Elevator Control's isolation
+  // views, the Find marker and the construction preview.
   const auto plan = original_main_surface_pass_plan(pass);
   if (advance_state) (void)advance_main_surface_state(pass);
   if (plan.clear_elevator_transfer_visuals_before_rebuild) {
@@ -924,17 +1071,20 @@ void Session::rebuild_main(OriginalMainSurfacePass pass,
     transfer_visuals_.clear();
   }
   if (viewport_.width <= 0 || viewport_.height <= 0) return;
+  std::optional<OriginalTdtDocument> storage{};
+  const auto* shown = presentation_document(storage);
+  const auto waiting = original_elevator_control_waiting_view(elevator_state());
   main_raster_ = render_original_world(
-      resources_, document(), viewport_.x, viewport_.y, viewport_.width,
+      resources_, shown, viewport_.x, viewport_.y, viewport_.width,
       viewport_.height, transfer_visuals_,
       palette_runtime_.initialized ? &palette_runtime_.colors : nullptr,
-      &sky_decorations_, world_input_.map_mode, nullptr, {},
-      full_frame_surface_dirty);
+      &sky_decorations_, world_input_.map_mode,
+      waiting ? &*waiting : nullptr, {}, full_frame_surface_dirty);
   if (find_marker_.active()) {
     // 10e0:055b: BITMAP/21256 over the found target.
     const auto derived = palette_runtime_.initialized
                              ? OriginalWorldPalette{}
-                             : original_world_palette(resources_, document());
+                             : original_world_palette(resources_, shown);
     composite_original_find_marker(
         resources_,
         palette_runtime_.initialized ? palette_runtime_.colors : derived,
@@ -1259,8 +1409,7 @@ bool Session::run_find_dialog(OriginalFindMode mode) {
         present_requested_ = true;
         break;
       case OriginalFindFocusRefreshStep::restore_preview_scratch:
-        // No Elevator Control isolation exists on SDL yet.
-        if (world_input_.preview_rect) {
+        if (!elevator_isolation_active() && world_input_.preview_rect) {
           world_input_.preview_rect.reset();
           main_backing_dirty_ = true;
         }
@@ -1380,6 +1529,12 @@ std::optional<int> Session::run_dialog_modal(DialogWindow& dialog,
     DialogWindow& dialog;
     Open(Session& s, InputSource* src, bool l, DialogWindow& d)
         : session(s), source(src), lock(l), dialog(d) {
+      // The new modal takes the input: a scroll bar track on Elevator
+      // Control ends (WM_CANCELMODE) instead of outliving its release.
+      if (session.elevator_ &&
+          session.elevator_->window->cancel_scroll_tracking()) {
+        session.window_repaint_ = true;
+      }
       session.dialogs_.push_back(&d);
       if (lock) ++session.modal_depth_;
       // UpdateWindow from the procedure (ops.update_window): present the
@@ -1561,9 +1716,18 @@ OriginalIdlePassContext Session::idle_pass_context() {
 bool Session::run_idle_pass() {
   // run_original_idle_simulation. Of the 1258:0195-023a prelude only the
   // WAVMIX activation reconcile applies (TOPMOST window repair has no
-  // single-window equivalent), and of the 1258:0285-02d9 epilogue only the
-  // 11c8:0135(0) audio finish (no Elevator Control yet). The shared pass
-  // runs 1258:023a through 1090:03ab(1), calling back into the hooks below.
+  // single-window equivalent: Elevator Control is always drawn above the
+  // palettes), and the 1258:0285-02d9 epilogue is the Elevator Control
+  // refresh and the 11c8:0135(0) audio finish. The shared pass runs
+  // 1258:023a through 1090:03ab(1), calling back into the hooks below.
+  if (elevator_tracking()) {
+    // USER's scroll bar tracking loop owns the thread (Win32: no
+    // PeekMessage idle pass until the release).
+    if (!idle_held_) log_line("idle passes held: scroll bar tracking");
+    idle_held_ = true;
+    return false;
+  }
+  idle_held_ = false;
   if (pending_main_pass_) {
     // The pending WM_PAINT of a non-synchronous request_main_pass.
     const auto pass = *pending_main_pass_;
@@ -1589,7 +1753,15 @@ bool Session::run_idle_pass() {
     }
   }
   auto context = idle_pass_context();
-  (void)run_original_idle_pass(context, *this);
+  const auto outcome = run_original_idle_pass(context, *this);
+  if (outcome == OriginalIdlePassOutcome::full_frame &&
+      original_idle_elevator_refresh_required(true, elevator_.has_value(),
+                                              elevator_.has_value(),
+                                              elevator_.has_value())) {
+    // 1258:0285-02c9: 1098:1a5b repaints the cars, then UpdateWindow.
+    // Paint only (the panel is drawn from live state); not logged.
+    window_repaint_ = true;
+  }
   // 1258:02d9 always ends through 11c8:0135(0); the zero force word makes
   // both channel stops deliberate no-ops.
   if (audio_) audio_->stop_all(false);
@@ -1768,7 +1940,7 @@ void Session::before_scheduler_step(bool sample_cursor) {
 void Session::preview_only_pass() {
   // 1090:03bf-0427 through the shared plan, as Win32IdlePassHost runs it.
   const auto plan = original_preview_only_pass_plan(
-      world_input_, false, previous_preview_rect_,
+      world_input_, elevator_isolation_active(), previous_preview_rect_,
       original_world_input_preview_rect(world_input_,
                                         {viewport_.x, viewport_.y}));
   for (std::uint8_t index = 0; index < plan.checkpoints_before; ++index) {
@@ -1789,7 +1961,8 @@ void Session::preview_only_pass() {
 void Session::restore_preview() {
   // 1090:04a7 11f8:3b94.
   const auto restore = original_construction_preview_restore_plan(
-      world_input_.preview_scratch, false, previous_preview_rect_.has_value());
+      world_input_.preview_scratch, elevator_isolation_active(),
+      previous_preview_rect_.has_value());
   for (std::uint8_t index = 0; index < restore.audio_checkpoints; ++index) {
     checkpoint(OriginalIdleCheckpoint::construction);
   }
@@ -1916,6 +2089,12 @@ void Session::pointer_event(const InputEvent& event) {
   // Main (1258:0256 never clears "inside").
   last_pointer_ = OriginalWorldPoint{event.x - layout_.main_client.x,
                                      event.y - layout_.main_client.y};
+  if (elevator_) {
+    // Main, Map, Info and Command are disabled: only the control (the
+    // TOPMOST window, owner decision D2) takes mouse input.
+    elevator_control_pointer(event);
+    return;
+  }
   if (event.kind == InputKind::right_down ||
       event.kind == InputKind::right_up) {
     return;
@@ -2039,6 +2218,7 @@ void Session::route_pointer(Panel panel,
                                          client_y(layout_.info_client));
       }
       break;
+    case Panel::elevator_control:
     case Panel::none:
       break;
   }
@@ -2072,6 +2252,7 @@ bool Session::panel_visible(Panel panel) const {
     case Panel::info: return info_visible_;
     case Panel::command: return command_visible_;
     case Panel::main: return true;
+    case Panel::elevator_control: return elevator_.has_value();
     case Panel::none: return false;
   }
   return false;
@@ -2278,6 +2459,23 @@ SessionDigest Session::state_digest() const {
   host.unsigned_integer(host_requests_.sounds);
   host.unsigned_integer(host_requests_.focus);
   host.unsigned_integer(host_requests_.status);
+  if (elevator_ever_opened_) {
+    // Only runs that opened Elevator Control hash it (baselines unchanged).
+    host.boolean(elevator_.has_value());
+    for (const bool disabled : panel_disabled_) host.boolean(disabled);
+    if (elevator_) {
+      const auto& state = elevator_->controller->state();
+      host.unsigned_integer(state.elevator_index);
+      host.unsigned_integer(state.schedule_bank);
+      host.unsigned_integer(state.day_phase);
+      host.integer(state.scroll_min);
+      host.integer(state.scroll_max);
+      host.integer(state.scroll_position);
+      host.boolean(state.isolation_active);
+      host.boolean(state.saved_build_mode);
+      host.integer(elevator_->controller->pressed_item());
+    }
+  }
   digest.host = host.value();
 
   Fnv64 requests = request_log_;
@@ -2294,6 +2492,204 @@ SessionDigest Session::state_digest() const {
   return digest;
 }
 
+// ---- Elevator Control ----------------------------------------------------
+
+const OriginalTdtDocument* Session::presentation_document(
+    std::optional<OriginalTdtDocument>& storage) const {
+  if (!document_) return nullptr;
+  return original_elevator_control_presentation_document(
+      *document_, elevator_state(), storage);
+}
+
+bool Session::panel_enabled(Panel panel) const {
+  using Window = OriginalElevatorControlCloseWindow;
+  switch (panel) {
+    case Panel::main: return !panel_disabled_[disabled_slot(Window::main)];
+    case Panel::map: return !panel_disabled_[disabled_slot(Window::map)];
+    case Panel::info: return !panel_disabled_[disabled_slot(Window::info)];
+    case Panel::command:
+      return !panel_disabled_[disabled_slot(Window::command)];
+    case Panel::elevator_control: return elevator_.has_value();
+    case Panel::none: return false;
+  }
+  return false;
+}
+
+void Session::open_elevator_control_for_test(std::size_t index) {
+  world_host_->open_elevator_control(index, 0, 0);
+}
+
+void Session::open_elevator_control(std::size_t elevator_index,
+                                    std::int16_t pointer_x,
+                                    std::int16_t pointer_y) {
+  // open_original_elevator_control: one instance (nm 3693), then
+  // 1098:0000's CreateDialogParam on DIALOG/400 with the launch block.
+  if (!document_ || elevator_) {
+    if (elevator_) log_line("elevator control already open: ignored");
+    return;
+  }
+  const auto launcher = original_elevator_control_launch_contract(
+      elevator_index, pointer_x, pointer_y);
+  auto dtmp = parse_original_dtmp(
+      resources_.find("DTMP", launcher.dialog_resource_id));
+  auto state = make_original_elevator_control_state(
+      *document_, launcher.elevator_index, simulation_state_.calendar_phase,
+      simulation_state_.day_phase);
+  if (!state.valid) return;
+  auto controller = std::make_unique<OriginalElevatorControlController>(
+      std::move(dtmp), std::move(state));
+  auto* procedure = controller.get();
+  auto window = std::make_unique<DialogWindow>(make_elevator_control_dialog(
+      resources_, launcher.requested_left,
+      original_elevator_control_title(resources_, *document_, elevator_index),
+      [this, procedure](OriginalDrawContext& context, OriginalCanvasFont&,
+                        const DialogWindow&, const OriginalResources& pack) {
+        paint_original_elevator_control(context, pack, *procedure,
+                                        document());
+      }));
+  elevator_ = ElevatorControlPanel{std::move(window), std::move(controller)};
+  elevator_ever_opened_ = true;
+  auto& dialog = *elevator_->window;
+  // UpdateWindow from the procedure: present the panel now.
+  dialog.set_update_window([this]() {
+    window_repaint_ = true;
+    if (input_source_) input_source_->modal_changed();
+  });
+  // WM_INITDIALOG: Main, Map, Info, Command disabled. EnableWindow(FALSE)
+  // sends WM_CANCELMODE, whose DefWindowProc releases a held capture (the
+  // Magnifier press that opened it) without telling the world input
+  // [INFERRED 60%].
+  procedure->disable_windows(*elevator_host_);
+  if (capture_) {
+    capture_.reset();
+    log_request(RequestKind::capture, {-2});
+  }
+  nonclient_press_ = false;
+  // size_original_dialog_client, 11e0:0b52(dialog, 8), render_original_dtmp
+  // (in make_elevator_control_dialog), the scroll bar, the STRL/400 title,
+  // the arrow class cursor, SetFocus(dialog) and TRUE: the dialog manager
+  // focuses the first tab stop (scroll bar 7 when it is enabled).
+  dialog.place(layout_.window_width, layout_.window_height);
+  procedure->initialize_scroll_bar(dialog);
+  (void)dialog.take_invalidated();
+  dialog.focus_first_tab_stop();
+  cursor_id_ = 0U;
+  active_panel_ = Panel::elevator_control;
+  window_repaint_ = true;
+}
+
+void Session::close_elevator_panel(int reason) {
+  elevator_.reset();
+  panel_disabled_ = {};
+  nonclient_press_ = false;
+  elevator_destroy_pending_ = false;
+  if (active_panel_ == Panel::elevator_control) active_panel_ = Panel::main;
+  log_request(RequestKind::elevator_control, {reason});
+}
+
+void Session::elevator_control_signal(const DialogSignal& signal) {
+  if (!elevator_) return;
+  auto& panel = *elevator_;
+  panel.controller->signal(signal, *panel.window, *elevator_host_);
+  if (!elevator_destroy_pending_) return;
+  // DestroyWindow after the procedure's close tail (1098:0f5e), which
+  // already re-enabled the four windows.
+  close_elevator_panel(-2);
+  tally("elevator control closed");
+  log_line("elevator control closed");
+  window_repaint_ = true;
+  present_requested_ = true;
+}
+
+void Session::elevator_control_step(const DialogStep& step) {
+  if (step.redraw) window_repaint_ = true;
+  if (step.signal) elevator_control_signal(*step.signal);
+  if (step.then && elevator_) elevator_control_signal(*step.then);
+  if (elevator_ && elevator_->window->take_invalidated()) {
+    window_repaint_ = true;
+  }
+}
+
+void Session::elevator_control_pointer(const InputEvent& event) {
+  auto& window = *elevator_->window;
+  const bool down =
+      event.kind == InputKind::down || event.kind == InputKind::double_click;
+  // A press on its caption or border is nonclient (fixed panel, no system
+  // menu): swallowed until the release, like a palette's SC_MOVE loop.
+  if (nonclient_press_) {
+    if (event.kind == InputKind::up) nonclient_press_ = false;
+    return;
+  }
+  const PanelRect client{window.client_x(), window.client_y(),
+                         window.client_width(), window.client_height()};
+  if (!window.has_pointer_capture()) {
+    if (!window.outer().contains(event.x, event.y)) {
+      // Under the pointer is a disabled window: Win16 discards its mouse
+      // input (TEMP, owner decision D3: no MessageBeep).
+      return;
+    }
+    // IDC_ARROW is the control's class cursor.
+    cursor_id_ = 0U;
+    if (!client.contains(event.x, event.y)) {
+      if (down) {
+        nonclient_press_ = true;
+        active_panel_ = Panel::elevator_control;
+      }
+      return;
+    }
+  }
+  if (down) active_panel_ = Panel::elevator_control;
+  DialogPointer pointer{DialogPointer::Kind::move, event.x, event.y,
+                        (event.keys & kOriginalKeyShift) != 0U};
+  switch (event.kind) {
+    case InputKind::move: break;
+    case InputKind::down:
+    case InputKind::double_click:
+      pointer.kind = DialogPointer::Kind::down;
+      break;
+    case InputKind::up: pointer.kind = DialogPointer::Kind::up; break;
+    case InputKind::right_down:
+      pointer.kind = DialogPointer::Kind::right_down;
+      break;
+    case InputKind::right_up: pointer.kind = DialogPointer::Kind::right_up;
+      break;
+  }
+  auto step = window.pointer(pointer);
+  if (event.kind == InputKind::double_click && step.signal &&
+      step.signal->kind == DialogSignal::Kind::button_down) {
+    // The dialog class #32770 has CS_DBLCLKS (style 0x808 under Wine): the
+    // second press of a double click is WM_LBUTTONDBLCLK, which
+    // ELVDLOGMAIN's message table (1098:12c9) does not list. Scroll bar 7
+    // takes it like a press (its class handles the message as one); the
+    // procedure gets nothing. The release that follows is delivered.
+    step.signal.reset();
+  }
+  elevator_control_step(step);
+}
+
+void Session::elevator_control_input(const DialogInput& input) {
+  if (!elevator_) return;
+  auto& window = *elevator_->window;
+  switch (input.kind) {
+    case DialogInput::Kind::key:
+      elevator_control_step(
+          window.key(input.key, input.character, input.shift));
+      break;
+    case DialogInput::Kind::key_up:
+      elevator_control_step(window.key_up(input.key, input.character));
+      break;
+    case DialogInput::Kind::character:
+      elevator_control_step(window.character(input.character));
+      break;
+    case DialogInput::Kind::pointer:
+      pointer_event(input.pointer);
+      break;
+    case DialogInput::Kind::timer:
+    case DialogInput::Kind::wait_elapsed:
+      break;
+  }
+}
+
 std::uint32_t Session::milliseconds_until_due() const {
   const std::uint32_t now = clock_ms_();
   const auto remaining = [now](std::uint32_t due_ms) -> std::uint32_t {
@@ -2301,6 +2697,8 @@ std::uint32_t Session::milliseconds_until_due() const {
     return delta > 0 ? static_cast<std::uint32_t>(delta) : 0U;
   };
   std::uint32_t wait = 100U;
+  // Held passes are not due: wait for input instead of spinning.
+  if (elevator_tracking()) return wait;
   if (document_ && world_input_.build_mode_enabled) {
     wait = std::min(
         wait, flags_.fast_mode_enabled

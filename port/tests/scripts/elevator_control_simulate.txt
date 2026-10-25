@@ -1,0 +1,23 @@
+# Simulate and Resume: isolation (DS:b3ae) gates the passes, a grid click
+# while isolated alerts ALRT/1000 (STRL/1004[1]) and changes nothing,
+# Resume restores the shafts; Close while isolated resumes first.
+# args: --scenario busy --passes 420
+# expect-stderr: alert 1000 "Cannot change settings
+# expect-stderr: elevator control closed
+pass 300
+open-elevator-control 0
+panel-at 50 413
+expect-isolation on
+pass 330
+expect-served 0 12 yes
+panel-at 24 358
+expect-served 0 12 yes
+panel-at 50 413
+expect-isolation off
+pass 340
+panel-at 50 413
+expect-isolation on
+pass 350
+panel-at 148 413
+expect-panel none
+pass 420

@@ -1,0 +1,11 @@
+# Opening and closing Elevator Control with no edits changes nothing the
+# simulation reads: the tower and process digests equal a run that never
+# opened it (only the logged open / close and the host state differ).
+# args: --scenario busy --passes 600
+# same-tower-as: elevator_control_noop_reference.txt
+pass 300
+open-elevator-control 1
+pass 450
+panel-at 148 413
+expect-panel none
+pass 600

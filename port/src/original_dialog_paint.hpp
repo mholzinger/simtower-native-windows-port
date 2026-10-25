@@ -21,6 +21,17 @@ namespace simtower {
          (static_cast<OriginalRgb>(level) << 8U) | level;
 }
 
+// A DTMP rectangle as a draw-context rectangle.
+[[nodiscard]] constexpr OriginalRect original_dtmp_rect(
+    const OriginalDtmpRect& source) noexcept {
+  return {source.left, source.top, source.right, source.bottom};
+}
+
+// FrameRect with a solid brush: the one-pixel border inside the
+// rectangle; an empty rectangle draws nothing.
+void original_frame_rect(OriginalDrawContext& context,
+                         const OriginalRect& rect, OriginalRgb rgb);
+
 // InflateRect(&rect, -by, -by).
 [[nodiscard]] constexpr OriginalRect original_deflate_rect(OriginalRect rect,
                                                            int by) noexcept {

@@ -1,0 +1,21 @@
+# Determinism: elevator_control_simulate.txt run twice gives the same
+# whole digest (the second run is this copy).
+# args: --scenario busy --passes 420
+# same-digest-as: elevator_control_simulate.txt
+pass 300
+open-elevator-control 0
+panel-at 50 413
+expect-isolation on
+pass 330
+expect-served 0 12 yes
+panel-at 24 358
+expect-served 0 12 yes
+panel-at 50 413
+expect-isolation off
+pass 340
+panel-at 50 413
+expect-isolation on
+pass 350
+panel-at 148 413
+expect-panel none
+pass 420

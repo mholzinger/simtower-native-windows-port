@@ -925,6 +925,57 @@ void resize_session(const SDL_Event& event, simtower::sdl::Session& session) {
 // pass, as DialogBoxIndirectParamW's own loop does. Only pointer input,
 // QUIT, EXPOSED and RESIZED are handled inside it; other events (focus,
 // keys, wheel) are dropped while it runs.
+// WM_KEYDOWN / WM_KEYUP for a dialog manager (an open modal dialog, or the
+// active Elevator Control): the key, Shift, and a letter's lower-case
+// character (a button mnemonic); nullopt for any other event.
+std::optional<simtower::sdl::DialogInput> dialog_key_input(
+    const SDL_Event& event) {
+  using simtower::sdl::DialogInput;
+  using simtower::sdl::DialogKey;
+  if (event.type != SDL_EVENT_KEY_DOWN && event.type != SDL_EVENT_KEY_UP) {
+    return std::nullopt;
+  }
+  DialogInput input{event.type == SDL_EVENT_KEY_DOWN
+                        ? DialogInput::Kind::key
+                        : DialogInput::Kind::key_up,
+                    {},
+                    DialogKey::other};
+  const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
+  input.shift = shift;
+  switch (event.key.key) {
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER: input.key = DialogKey::enter; break;
+    case SDLK_ESCAPE: input.key = DialogKey::escape; break;
+    case SDLK_TAB:
+      input.key = shift ? DialogKey::shift_tab : DialogKey::tab;
+      break;
+    case SDLK_SPACE: input.key = DialogKey::space; break;
+    case SDLK_LEFT: input.key = DialogKey::left; break;
+    case SDLK_RIGHT: input.key = DialogKey::right; break;
+    case SDLK_UP: input.key = DialogKey::up; break;
+    case SDLK_DOWN: input.key = DialogKey::down; break;
+    case SDLK_HOME: input.key = DialogKey::home; break;
+    case SDLK_END: input.key = DialogKey::end; break;
+    case SDLK_PAGEUP: input.key = DialogKey::page_up; break;
+    case SDLK_PAGEDOWN: input.key = DialogKey::page_down; break;
+    case SDLK_BACKSPACE: input.key = DialogKey::backspace; break;
+    case SDLK_DELETE: input.key = DialogKey::delete_key; break;
+    case SDLK_F4: input.key = DialogKey::f4; break;
+    // WM_SYSKEYDOWN: Alt or F10 alone.
+    case SDLK_LALT:
+    case SDLK_RALT:
+    case SDLK_F10: input.key = DialogKey::menu; break;
+    default:
+      // A letter is a button mnemonic (SDL keycodes of letters are
+      // their lower-case ASCII).
+      if (event.key.key >= SDLK_A && event.key.key <= SDLK_Z) {
+        input.character = static_cast<char>(event.key.key);
+      }
+      break;
+  }
+  return input;
+}
+
 class WindowModalSource final : public simtower::sdl::InputSource {
  public:
   WindowModalSource(Window& window, simtower::sdl::Session& session)
@@ -1040,47 +1091,8 @@ class WindowModalSource final : public simtower::sdl::InputSource {
         }
         continue;
       }
-      if (event.type == SDL_EVENT_KEY_DOWN ||
-          event.type == SDL_EVENT_KEY_UP) {
-        DialogInput input{event.type == SDL_EVENT_KEY_DOWN
-                              ? DialogInput::Kind::key
-                              : DialogInput::Kind::key_up,
-                          {},
-                          DialogKey::other};
-        const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
-        input.shift = shift;
-        switch (event.key.key) {
-          case SDLK_RETURN:
-          case SDLK_KP_ENTER: input.key = DialogKey::enter; break;
-          case SDLK_ESCAPE: input.key = DialogKey::escape; break;
-          case SDLK_TAB:
-            input.key = shift ? DialogKey::shift_tab : DialogKey::tab;
-            break;
-          case SDLK_SPACE: input.key = DialogKey::space; break;
-          case SDLK_LEFT: input.key = DialogKey::left; break;
-          case SDLK_RIGHT: input.key = DialogKey::right; break;
-          case SDLK_UP: input.key = DialogKey::up; break;
-          case SDLK_DOWN: input.key = DialogKey::down; break;
-          case SDLK_HOME: input.key = DialogKey::home; break;
-          case SDLK_END: input.key = DialogKey::end; break;
-          case SDLK_PAGEUP: input.key = DialogKey::page_up; break;
-          case SDLK_PAGEDOWN: input.key = DialogKey::page_down; break;
-          case SDLK_BACKSPACE: input.key = DialogKey::backspace; break;
-          case SDLK_DELETE: input.key = DialogKey::delete_key; break;
-          case SDLK_F4: input.key = DialogKey::f4; break;
-          // WM_SYSKEYDOWN: Alt or F10 alone.
-          case SDLK_LALT:
-          case SDLK_RALT:
-          case SDLK_F10: input.key = DialogKey::menu; break;
-          default:
-            // A letter is a button mnemonic (SDL keycodes of letters are
-            // their lower-case ASCII).
-            if (event.key.key >= SDLK_A && event.key.key <= SDLK_Z) {
-              input.character = static_cast<char>(event.key.key);
-            }
-            break;
-        }
-        return with_elapsed(input);
+      if (const auto key = dialog_key_input(event)) {
+        return with_elapsed(*key);
       }
       if (wait_ms) {
         return with_elapsed({DialogInput::Kind::wait_elapsed, {}, {}});
@@ -1303,9 +1315,25 @@ bool handle_event(const SDL_Event& event, simtower::sdl::Session& session,
                   Window& window, bool& expose,
                   WindowActivation& activation, LoneAlt& lone_alt) {
   const bool lone_alt_up = lone_alt.released(event);
+  // While Elevator Control is open it is the active window and Main (with
+  // its menu bar and accelerators) is disabled: keys go to its dialog
+  // manager (IsDialogMessage; 1258:00bc routes there first), presses on
+  // the menu bar reach nothing, and the SDL-only arrow / wheel scroll
+  // stand-ins of Main are off.
+  const bool control_open = session.elevator_control() != nullptr;
+  if (control_open) {
+    if (const auto key = dialog_key_input(event)) {
+      // Auto-repeat downs are WM_KEYDOWN repeats, as in USER.
+      session.elevator_control_input(*key);
+      expose = true;
+      return true;
+    }
+    if (event.type == SDL_EVENT_MOUSE_WHEEL) return true;
+  }
   if (const auto input = pointer_input(event)) {
-    if (input->kind == simtower::sdl::InputKind::down ||
-        input->kind == simtower::sdl::InputKind::double_click) {
+    if (!control_open &&
+        (input->kind == simtower::sdl::InputKind::down ||
+         input->kind == simtower::sdl::InputKind::double_click)) {
       const auto bar =
           simtower::sdl::menu_bar_layout(session.menu(), session.layout());
       if (bar.strip.contains(input->x, input->y)) {
@@ -1462,7 +1490,8 @@ int run_window(const Options& options) {
     }
     window.set_title(session.window_title());
     session.set_window_activation(activation.active, activation.iconic);
-    if (session.run_idle_pass() || expose) {
+    const bool presented = session.run_idle_pass();
+    if (session.take_window_repaint() || presented || expose) {
       window.present(simtower::sdl::compose_window(session));
     }
     window.set_cursor(session.cursor_id());

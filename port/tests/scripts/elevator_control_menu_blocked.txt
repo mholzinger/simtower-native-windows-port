@@ -1,0 +1,9 @@
+# While Elevator Control is open Main (and its menu) is disabled: a
+# scripted menu pick is an error (exit 2).
+# args: --scenario busy --passes 3
+# expect-exit: 2
+# expect-stderr: Main and its menu are disabled
+pass 2
+open-elevator-control 0
+menu 40001
+pass 3
