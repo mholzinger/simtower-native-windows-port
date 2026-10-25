@@ -1,0 +1,45 @@
+# The Find exit latch DS:77c0 (1100:00f3-0107): after Person Information
+# closes, an active Find marker on this same person sets it, driven or
+# not; another person does not. Person 1645 is renamed through its dialog,
+# found with Find Person (marker on 1645), then Person Information on
+# person 0 leaves the latch clear and on 1645 (undriven) sets it. A
+# Magnifier click in Main runs 1058:019f's tail, which consumes it through
+# 1058:033c (the construction toggle resets the marker). Found again, 1645
+# driven from a facility portrait's context sets it again.
+# args: --scenario busy --passes 301
+# expect-stderr: dialog rename person -> changed, name "Zed"
+# expect-stderr: dialog find person: focused floor
+# expect-stderr: dialog person 763 person 0 -> 1, name "Man"
+# expect-stderr: dialog person 763 person 1645 -> 1, find latch set, name "Zed"
+# expect-stderr: dialog person 763 person 1645 -> not driven, find latch set, name "Zed"
+pass 300
+open-dialog person 1645
+expect-dialog person 763
+dialog-click 4
+expect-dialog rename person
+dialog-type Zed
+dialog-click 1
+dialog-click 1
+expect-find-latch 0
+menu 40019
+expect-dialog find person
+dialog-list 5 0
+dialog-click 4
+expect-find-latch 0
+open-dialog person 0
+expect-dialog person 763
+dialog-click 1
+expect-find-latch 0
+open-dialog person 1645
+expect-find-latch 1
+click 600 120
+expect-find-latch 0
+menu 40019
+expect-dialog find person
+dialog-list 5 0
+dialog-click 4
+open-dialog person 1645 facility
+expect-dialog person 763
+dialog-click 1
+expect-find-latch 1
+pass 301

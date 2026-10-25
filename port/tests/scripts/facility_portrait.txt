@@ -1,0 +1,16 @@
+# A press on a live portrait (1100:35b7) opens Person Information (763,
+# DS:b3a6 = 2) over the facility dialog; the dialog refreshes after it. A
+# press beside it opens nothing.
+# args: --scenario busy --passes 301
+# expect-stderr: person information 1603 \(from facility\)
+# expect-stderr: dialog person 763 person 1603 -> 1, name "Salesman"
+# expect-stderr: dialog facility 748 floor 13 tenant 4 -> 1, rate 1
+pass 300
+open-dialog facility 13 4
+expect-dialog facility 748
+dialog-at 44 134
+expect-dialog person 763
+dialog-click 1
+dialog-at 100 134
+dialog-click 1
+pass 301

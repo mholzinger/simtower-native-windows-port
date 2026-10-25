@@ -1,0 +1,20 @@
+# The Magnifier on the Lobby opens Finance (2026-10-25, matches the
+# original): 1058:015b -> 11f8:0750 -> 1100:03ac, whose cs:054e table
+# sends Lobby types 24..26 to 0468, a far call to 1060:0083 (DIALOG 500),
+# instead of a Facility Information dialog. Enter closes on its key up.
+# Undriven (the second click, no expect-dialog) it is only logged.
+# args: --scenario busy --passes 4
+# held: lobby_finance.bmp
+# expect-stderr: lobby finance
+# reject-stderr: facility information
+# reject-stderr: dialog finance requested
+pass 2
+click-command 182 228
+expect-mode 2
+click 608 560
+expect-dialog finance
+dialog-hold lobby_finance.bmp
+dialog-key enter
+pass 3
+click 608 560
+pass 4

@@ -322,6 +322,9 @@ void run_original_magnifying_glass(const OriginalWorldInputContext& ctx,
     case OriginalMagnifierTargetKind::facility_information:
       host.facility_information(target.floor, target.tenant_index);
       break;
+    case OriginalMagnifierTargetKind::lobby_finance:
+      host.finance_dialog();
+      break;
     case OriginalMagnifierTargetKind::none:
       break;
     case OriginalMagnifierTargetKind::waiting_person_information:

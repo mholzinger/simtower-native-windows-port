@@ -25,16 +25,19 @@ add_library(simtower_port_core STATIC
   src/original_dtmp_runtime.cpp
   src/original_elevator_control.cpp
   src/original_elevator_control_controller.cpp
+  src/original_facility_information_controller.cpp
   src/original_finance.cpp
   src/original_find.cpp
   src/original_idle_pass.cpp
   src/original_info.cpp
   src/original_information.cpp
+  src/original_information_paint.cpp
   src/original_main_command.cpp
   src/original_map.cpp
   src/original_menu.cpp
   src/original_palette_frame.cpp
   src/original_people.cpp
+  src/original_person_information_controller.cpp
   src/original_resources_index.cpp
   src/original_simulation.cpp
   src/original_startup.cpp
@@ -43,6 +46,7 @@ add_library(simtower_port_core STATIC
   src/original_tdt.cpp
   src/original_tdt_file.cpp
   src/original_tower_file.cpp
+  src/original_transport_information_controller.cpp
   src/original_ui.cpp
   src/original_wave.cpp
   src/original_world.cpp
@@ -430,6 +434,65 @@ if(BUILD_TESTING)
   set_tests_properties(simtower_dialog_controller_tests PROPERTIES
                        SKIP_RETURN_CODE 77)
 
+  # The shared Facility Information controller against a frozen copy of
+  # the Win32 TENANTINFODLOGFILTER branches, and its portable painter (also
+  # run under Wine). The staged tower needs the pack: skipped (exit 77).
+  add_executable(simtower_facility_information_controller_tests
+                 tests/facility_information_controller_tests.cpp)
+  target_link_libraries(simtower_facility_information_controller_tests
+                        PRIVATE simtower_test_support simtower_canvas)
+  if(MINGW)
+    target_link_options(simtower_facility_information_controller_tests
+                        PRIVATE -Wl,--stack,16777216)
+  endif()
+  add_test(
+    NAME simtower_facility_information_controller_tests
+    COMMAND simtower_facility_information_controller_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_facility_information_controller_tests
+                       PROPERTIES SKIP_RETURN_CODE 77)
+
+  # The shared Person Information controller against a frozen copy of the
+  # Win32 PEPLEINFODLOGFILTER branches, the Find exit latch and its portable
+  # painter (also run under Wine). The staged tower needs the pack:
+  # skipped (exit 77).
+  add_executable(simtower_person_information_controller_tests
+                 tests/person_information_controller_tests.cpp)
+  target_link_libraries(simtower_person_information_controller_tests
+                        PRIVATE simtower_test_support simtower_canvas)
+  if(MINGW)
+    target_link_options(simtower_person_information_controller_tests
+                        PRIVATE -Wl,--stack,16777216)
+  endif()
+  add_test(
+    NAME simtower_person_information_controller_tests
+    COMMAND simtower_person_information_controller_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_person_information_controller_tests
+                       PROPERTIES SKIP_RETURN_CODE 77)
+
+  # The shared Transport Information controller (elevator car, stairs /
+  # escalator) against a frozen copy of the Win32 ELVINFODLOGFILTER /
+  # ESCINFODLOGFILTER branches, and its portable painter (also run under
+  # Wine). The staged tower needs the pack: skipped (exit 77).
+  add_executable(simtower_transport_information_controller_tests
+                 tests/transport_information_controller_tests.cpp)
+  target_link_libraries(simtower_transport_information_controller_tests
+                        PRIVATE simtower_test_support simtower_canvas)
+  if(MINGW)
+    target_link_options(simtower_transport_information_controller_tests
+                        PRIVATE -Wl,--stack,16777216)
+  endif()
+  add_test(
+    NAME simtower_transport_information_controller_tests
+    COMMAND simtower_transport_information_controller_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/generated/original_resources.pack
+  )
+  set_tests_properties(simtower_transport_information_controller_tests
+                       PROPERTIES SKIP_RETURN_CODE 77)
+
   # The SDL dialog manager's controls (edit, list box, combo box, scroll
   # bar), the arrow-key groups and the WM_PAINT event: synthetic, no assets.
   add_executable(simtower_sdl_widget_tests tests/sdl_widget_tests.cpp)
@@ -587,7 +650,14 @@ if(BUILD_TESTING)
                    elevator_control_tracking elevator_control_magnifier
                    elevator_control_magnifier_car
                    elevator_control_accelerator
-                   elevator_control_phase_released)
+                   elevator_control_phase_released
+                   facility_magnifier facility_rent facility_rename
+                   facility_movie facility_portrait facility_frames
+                   facility_frames_full facility_lobby_finance
+                   person_magnifier person_rename
+                   person_exit_latch person_frames
+                   transport_magnifier transport_portrait
+                   transport_exit_latch transport_frames)
       add_test(
         NAME simtower_sdl_${script}
         COMMAND ${CMAKE_COMMAND}
@@ -670,6 +740,9 @@ if(BUILD_TESTING)
       simtower_sdl_dialog_tests
       simtower_sdl_widget_tests
       simtower_dialog_controller_tests
+      simtower_facility_information_controller_tests
+      simtower_person_information_controller_tests
+      simtower_transport_information_controller_tests
       simtower_elevator_control_tests
       simtower_elevator_control_controller_tests
       simtower_audio_tests

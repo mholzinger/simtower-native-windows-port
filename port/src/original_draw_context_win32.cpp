@@ -127,4 +127,38 @@ int OriginalGdiDrawContext::text_extent_cx(std::string_view text) {
   return extent.cx;
 }
 
+void OriginalGdiDrawContext::stretch_pixels(
+    std::span<const std::uint32_t> pixels, int width, int height,
+    const OriginalRect& source, const OriginalRect& destination) {
+  // draw_original_facility_preview's presentation step
+  // (original_information_win32.cpp).
+  if (width <= 0 || height <= 0 || pixels.empty()) return;
+  BITMAPINFO bitmap{};
+  bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bitmap.bmiHeader.biWidth = width;
+  bitmap.bmiHeader.biHeight = -height;
+  bitmap.bmiHeader.biPlanes = 1U;
+  bitmap.bmiHeader.biBitCount = 32U;
+  bitmap.bmiHeader.biCompression = BI_RGB;
+  const int previous_mode = SetStretchBltMode(dc_, COLORONCOLOR);
+  // A top-down DIB: source rows count from the top.
+  (void)StretchDIBits(dc_, destination.left, destination.top,
+                      destination.right - destination.left,
+                      destination.bottom - destination.top, source.left,
+                      source.top, source.right - source.left,
+                      source.bottom - source.top, pixels.data(), &bitmap,
+                      DIB_RGB_COLORS, SRCCOPY);
+  SetStretchBltMode(dc_, previous_mode);
+}
+
+void OriginalGdiDrawContext::draw_dib_region_scaled(
+    std::span<const std::byte> resource, const OriginalRect& source,
+    const OriginalRect& destination) {
+  draw_original_dib_region_scaled(
+      dc_, resource, destination.left, destination.top,
+      destination.right - destination.left,
+      destination.bottom - destination.top, source.left, source.top,
+      source.right - source.left, source.bottom - source.top);
+}
+
 }  // namespace simtower

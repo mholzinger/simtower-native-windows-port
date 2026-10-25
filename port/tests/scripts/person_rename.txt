@@ -1,0 +1,26 @@
+# Rename (control 4, 1100:032e) opens Rename Person (730) over Person
+# Information: a saved name changes the document, the dialog repaints at
+# once with it (1100:0366-037d) and the portrait becomes the named one
+# (BITMAP 702); Cancel in a second Rename changes nothing. The keyboard:
+# Tab moves the focus from OK to Rename and Space presses it; the focus
+# is back on Rename after each nested dialog; Tab, Space presses OK.
+# args: --scenario busy --passes 3
+# held: person_renamed.bmp
+# expect-stderr: dialog rename person -> changed, name "Ann Example"
+# expect-stderr: dialog rename person -> unchanged, name "Ann Example"
+# expect-stderr: dialog person 763 person 0 -> 1 \(changed\), name "Ann Example"
+pass 1
+open-dialog person 0
+expect-dialog person 763
+dialog-key tab
+dialog-key space
+expect-dialog rename person
+dialog-type Ann Example
+dialog-click 1
+dialog-key space
+expect-dialog rename person
+dialog-key esc
+dialog-hold person_renamed.bmp
+dialog-key tab
+dialog-key space
+pass 3

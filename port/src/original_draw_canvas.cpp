@@ -169,6 +169,63 @@ void OriginalCanvasDrawContext::draw_dib(std::span<const std::byte> resource,
   }
 }
 
+void OriginalCanvasDrawContext::stretch_pixels(
+    std::span<const std::uint32_t> pixels, int width, int height,
+    const OriginalRect& source, const OriginalRect& destination) {
+  const int dw = destination.right - destination.left;
+  const int dh = destination.bottom - destination.top;
+  const int sw = source.right - source.left;
+  const int sh = source.bottom - source.top;
+  if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 || width <= 0 ||
+      height <= 0 ||
+      pixels.size() < static_cast<std::size_t>(width) *
+                          static_cast<std::size_t>(height)) {
+    return;
+  }
+  const auto area = intersect(destination, state_.clip);
+  for (int y = area.top; y < area.bottom; ++y) {
+    const auto row = static_cast<long long>(y - destination.top);
+    const int sy = source.top + static_cast<int>(row * sh / dh);
+    if (sy < 0 || sy >= height) continue;
+    for (int x = area.left; x < area.right; ++x) {
+      const auto column = static_cast<long long>(x - destination.left);
+      const int sx = source.left + static_cast<int>(column * sw / dw);
+      if (sx < 0 || sx >= width) continue;
+      plot(x, y,
+           pixels[static_cast<std::size_t>(sy) *
+                      static_cast<std::size_t>(width) +
+                  static_cast<std::size_t>(sx)] &
+               0x00FFFFFFU,
+           state_.clip);
+    }
+  }
+}
+
+void OriginalCanvasDrawContext::draw_dib_region_scaled(
+    std::span<const std::byte> resource, const OriginalRect& source,
+    const OriginalRect& destination) {
+  const DibSampler dib(resource);
+  const int dw = destination.right - destination.left;
+  const int dh = destination.bottom - destination.top;
+  const int sw = source.right - source.left;
+  const int sh = source.bottom - source.top;
+  if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 || source.left < 0 ||
+      source.top < 0 || source.right > dib.width() ||
+      source.bottom > dib.height()) {
+    throw std::runtime_error("Canvas scaled DIB source rectangle is invalid");
+  }
+  const auto area = intersect(destination, state_.clip);
+  for (int y = area.top; y < area.bottom; ++y) {
+    const auto row = static_cast<long long>(y - destination.top);
+    const int sy = source.top + static_cast<int>(row * sh / dh);
+    for (int x = area.left; x < area.right; ++x) {
+      const auto column = static_cast<long long>(x - destination.left);
+      const int sx = source.left + static_cast<int>(column * sw / dw);
+      plot(x, y, dib.sample(sx, sy), state_.clip);
+    }
+  }
+}
+
 void OriginalCanvasDrawContext::push_solid_pen(OriginalRgb rgb) {
   previous_pens_.push_back(state_.pen_color);
   state_.pen_color = rgb;

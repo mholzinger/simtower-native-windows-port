@@ -1,0 +1,21 @@
+# The original path to Facility Information: the Magnifier (Command cell at
+# 182,228) and a click on an office (raw floor 14, window x 608) select the
+# facility target (1058:015b -> 11f8:0750 -> 1100:03ac), which opens DIALOG
+# 748. Esc sends IDCANCEL, which TENANTINFODLOGFILTER ignores; a press on
+# no portrait opens nothing; OK closes with 1. Undriven (the second click,
+# no expect-dialog) it is only logged, as before the dialog was ported.
+# args: --scenario busy --passes 4
+# expect-stderr: facility information floor 14 tenant 7
+# expect-stderr: dialog facility 748 floor 14 tenant 7 -> 1, rate 1
+# reject-stderr: person information
+pass 2
+click-command 182 228
+expect-mode 2
+click 608 410
+expect-dialog facility 748
+dialog-key esc
+dialog-at 2 2
+dialog-click 1
+pass 3
+click 608 410
+pass 4

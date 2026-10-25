@@ -49,6 +49,31 @@ std::string alert_dialog_label(int alert_id) {
   return "alert " + std::to_string(alert_id);
 }
 
+const char* information_dialog_kind_name(InformationDialogKind kind) {
+  switch (kind) {
+    case InformationDialogKind::facility: return "facility";
+    case InformationDialogKind::person: return "person";
+    case InformationDialogKind::transport: return "transport";
+  }
+  return "?";
+}
+
+std::optional<InformationDialogKind> parse_information_dialog_kind(
+    std::string_view name) {
+  for (const auto kind :
+       {InformationDialogKind::facility, InformationDialogKind::person,
+        InformationDialogKind::transport}) {
+    if (name == information_dialog_kind_name(kind)) return kind;
+  }
+  return std::nullopt;
+}
+
+std::string information_dialog_label(InformationDialogKind kind,
+                                     std::uint16_t dialog_id) {
+  return std::string(information_dialog_kind_name(kind)) + " " +
+         std::to_string(dialog_id);
+}
+
 int dialog_line_height(OriginalCanvasFont& font, int pixel_height) {
   const auto metrics = font.metrics(pixel_height);
   return metrics.ascent + metrics.descent;
@@ -549,6 +574,37 @@ std::optional<std::pair<int, int>> DialogWindow::list_item_point(
   const int top = rows.top + row * line;
   if (row < 0 || top + line > rows.bottom) return std::nullopt;
   return std::pair{client_x() + rows.left + 8, client_y() + top + line / 2};
+}
+
+std::optional<std::pair<int, int>> DialogWindow::combo_field_point(
+    std::uint16_t id) const {
+  const auto* entry = control(id);
+  if (!entry || !entry->visible || !entry->enabled ||
+      entry->kind != DialogControlKind::combo_box) {
+    return std::nullopt;
+  }
+  auto& font = OriginalCanvasFont::bundled();
+  const auto field = dialog_combo_field_rect(
+      *entry, dialog_line_height(font, font_pixels()));
+  return std::pair{client_x() + (field.left + field.right) / 2,
+                   client_y() + (field.top + field.bottom) / 2};
+}
+
+std::optional<std::pair<int, int>> DialogWindow::combo_item_point(
+    std::uint16_t id, int index) const {
+  if (!combo_field_point(id)) return std::nullopt;
+  const auto& entry = *control(id);
+  if (index < 0 || index >= static_cast<int>(entry.items.size())) {
+    return std::nullopt;
+  }
+  auto& font = OriginalCanvasFont::bundled();
+  const int line = dialog_line_height(font, font_pixels());
+  const auto list = dialog_combo_list_rect(entry, line);
+  // pointer_down's row: top_index + (y - list.top - 1) / line.
+  const int row = index - entry.top_index;
+  const int top = list.top + 1 + row * line;
+  if (row < 0 || top + line > list.bottom) return std::nullopt;
+  return std::pair{client_x() + list.left + 8, client_y() + top + line / 2};
 }
 
 bool DialogWindow::caret_visible() const {

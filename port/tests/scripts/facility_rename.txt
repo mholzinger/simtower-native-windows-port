@@ -1,0 +1,21 @@
+# Rename (control 7, 1100:3d5b) opens Rename Tenant (732) over the facility
+# dialog; a saved name changes the document and the refreshed dialog shows
+# it (item 3); Cancel in a second Rename changes nothing.
+# args: --scenario busy --passes 3
+# held: facility_renamed.bmp
+# expect-stderr: dialog rename tenant -> changed, name "Corner Shop"
+# expect-stderr: dialog rename tenant -> unchanged, name "Corner Shop"
+# expect-stderr: dialog facility 753 floor 11 tenant 1 -> 1 \(changed\), rate 1
+pass 1
+open-dialog facility 11 1
+expect-dialog facility 753
+dialog-click 7
+expect-dialog rename tenant
+dialog-type Corner Shop
+dialog-click 1
+dialog-click 7
+expect-dialog rename tenant
+dialog-key esc
+dialog-hold facility_renamed.bmp
+dialog-click 1
+pass 3

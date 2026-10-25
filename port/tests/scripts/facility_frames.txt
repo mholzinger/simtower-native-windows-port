@@ -1,0 +1,67 @@
+# Review frames of Facility Information on the busy tower after 300
+# passes (people in the offices): every dialog the tower has (office 748,
+# single 749, twin 750, suite 751, condo 752, shop 753, housekeeping 754,
+# security 755, restaurant and fast food 760), the office after a rent
+# change, and its combo dropped.
+# args: --scenario busy --passes 301
+# held: fi_office.bmp
+# held: fi_office_dropped.bmp
+# held: fi_office_rent.bmp
+# held: fi_single.bmp
+# held: fi_twin.bmp
+# held: fi_suite.bmp
+# held: fi_condo.bmp
+# held: fi_shop.bmp
+# held: fi_housekeeping.bmp
+# held: fi_security.bmp
+# held: fi_restaurant.bmp
+# held: fi_fast_food.bmp
+pass 300
+open-dialog facility 13 4
+expect-dialog facility 748
+dialog-hold fi_office.bmp
+dialog-key tab
+dialog-key tab
+dialog-key f4
+dialog-hold fi_office_dropped.bmp
+dialog-key f4
+dialog-list 13 0
+dialog-hold fi_office_rent.bmp
+dialog-click 1
+open-dialog facility 22 1
+expect-dialog facility 749
+dialog-hold fi_single.bmp
+dialog-click 1
+open-dialog facility 21 1
+expect-dialog facility 750
+dialog-hold fi_twin.bmp
+dialog-click 1
+open-dialog facility 23 1
+expect-dialog facility 751
+dialog-hold fi_suite.bmp
+dialog-click 1
+open-dialog facility 18 1
+expect-dialog facility 752
+dialog-hold fi_condo.bmp
+dialog-click 1
+open-dialog facility 11 1
+expect-dialog facility 753
+dialog-hold fi_shop.bmp
+dialog-click 1
+open-dialog facility 13 2
+expect-dialog facility 754
+dialog-hold fi_housekeeping.bmp
+dialog-click 1
+open-dialog facility 13 1
+expect-dialog facility 755
+dialog-hold fi_security.bmp
+dialog-click 1
+open-dialog facility 11 9
+expect-dialog facility 760
+dialog-hold fi_restaurant.bmp
+dialog-click 1
+open-dialog facility 11 7
+expect-dialog facility 760
+dialog-hold fi_fast_food.bmp
+dialog-click 1
+pass 301

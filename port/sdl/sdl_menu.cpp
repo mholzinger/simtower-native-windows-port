@@ -262,7 +262,7 @@ void draw_main_caption_and_menu_bar(OriginalWorldRaster& window,
   // TEMP caption: navy (inactive: COLOR_INACTIVECAPTION) with the centred
   // title, a system-menu box and the minimize/maximize boxes in button
   // face. TEMP: the Win3.1 COLOR_WINDOWFRAME line under the caption is not
-  // drawn, so an inactive (white) caption meets the white menu strip.
+  // drawn, so an inactive (grey) caption meets the white menu strip.
   const PanelRect caption{outer.x + metrics.frame_width,
                           outer.y + metrics.frame_height,
                           outer.width - 2 * metrics.frame_width,

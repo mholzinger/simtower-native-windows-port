@@ -88,6 +88,23 @@ class OriginalDrawContext {
                                      const OriginalRect& rect) = 0;
   // GetTextExtentPoint32A(text).cx.
   [[nodiscard]] virtual int text_extent_cx(std::string_view text) = 0;
+  // SetStretchBltMode(COLORONCOLOR), StretchDIBits (SRCCOPY) of the source
+  // rectangle of a top-down 32-bit raster of 0x00RRGGBB pixels (width x
+  // height) onto destination, then the previous stretch mode (1100:4439's
+  // preview presentation).
+  virtual void stretch_pixels(std::span<const std::uint32_t> pixels,
+                              int width,
+                              int height,
+                              const OriginalRect& source,
+                              const OriginalRect& destination) = 0;
+  // draw_original_dib_region_scaled: SetStretchBltMode(COLORONCOLOR),
+  // StretchDIBits (SRCCOPY, DIB_RGB_COLORS) of the source rectangle of the
+  // resource, in top-left DIB coordinates, onto destination, then the
+  // previous stretch mode (1100:364a's portrait through 1100:37a9/37d1).
+  // Throws if the source is outside the bitmap or GDI reports failure.
+  virtual void draw_dib_region_scaled(std::span<const std::byte> resource,
+                                      const OriginalRect& source,
+                                      const OriginalRect& destination) = 0;
 };
 
 // SaveDC on construction, RestoreDC on destruction when SaveDC succeeded.

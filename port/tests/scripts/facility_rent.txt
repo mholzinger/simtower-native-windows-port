@@ -1,0 +1,29 @@
+# Rent through the combo box (CBN_SELCHANGE, 1100:0bb7): a click on the
+# dropped list's row 3 sets record byte 16 to 3 at once (1130:06e9), Enter
+# closes (OK is the default button); then the keyboard: Tab, Tab to the
+# combo and Up selects rate 2. Picking the current rate again changes
+# nothing.
+# args: --scenario busy --passes 3
+# expect-stderr: dialog facility 748 floor 13 tenant 4 -> 1 \(changed\), rate 3
+# expect-stderr: dialog facility 748 floor 13 tenant 4 -> 1 \(changed\), rate 2
+# expect-stderr: dialog facility 748 floor 13 tenant 4 -> 1, rate 2
+pass 1
+expect-rent 13 4 1
+open-dialog facility 13 4
+expect-dialog facility 748
+dialog-list 13 3
+dialog-key enter
+expect-rent 13 4 3
+open-dialog facility 13 4
+expect-dialog facility 748
+dialog-key tab
+dialog-key tab
+dialog-key up
+dialog-click 1
+expect-rent 13 4 2
+open-dialog facility 13 4
+expect-dialog facility 748
+dialog-list 13 2
+dialog-click 1
+expect-rent 13 4 2
+pass 3

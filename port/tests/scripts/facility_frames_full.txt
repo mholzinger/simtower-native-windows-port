@@ -1,0 +1,54 @@
+# Review frames of the basement dialogs of the full tower after 300
+# passes: a parking space and the parking ramp (756, OK only), a movie
+# theater (758, New Movie), the medical center (757), a party hall (759),
+# the recycling center (756), the metro station (756) and security on
+# B7 (755). By pass 300 construction has completed, so 1100:03ac opens
+# each of them.
+# args: --scenario full --passes 301
+# held: fi_parking.bmp
+# held: fi_parking_ramp.bmp
+# held: fi_movie.bmp
+# held: fi_medical.bmp
+# held: fi_party_hall.bmp
+# held: fi_recycling.bmp
+# held: fi_metro.bmp
+# held: fi_security_b7.bmp
+# expect-stderr: dialog facility 757 floor 9 tenant 4
+# expect-stderr: dialog facility 759 floor 7 tenant 1
+# expect-stderr: dialog facility 756 floor 5 tenant 1
+# expect-stderr: dialog facility 756 floor 2 tenant 1
+# expect-stderr: dialog facility 755 floor 3 tenant 1
+pass 300
+open-dialog facility 8 6
+expect-dialog facility 756
+dialog-hold fi_parking.bmp
+dialog-click 1
+open-dialog facility 8 16
+expect-dialog facility 756
+dialog-hold fi_parking_ramp.bmp
+dialog-click 1
+open-dialog facility 9 1
+expect-dialog facility 758
+dialog-hold fi_movie.bmp
+dialog-click 1
+open-dialog facility 9 4
+expect-dialog facility 757
+dialog-hold fi_medical.bmp
+dialog-click 1
+open-dialog facility 7 1
+expect-dialog facility 759
+dialog-hold fi_party_hall.bmp
+dialog-click 1
+open-dialog facility 5 1
+expect-dialog facility 756
+dialog-hold fi_recycling.bmp
+dialog-click 1
+open-dialog facility 2 1
+expect-dialog facility 756
+dialog-hold fi_metro.bmp
+dialog-click 1
+open-dialog facility 3 1
+expect-dialog facility 755
+dialog-hold fi_security_b7.bmp
+dialog-click 1
+pass 301
