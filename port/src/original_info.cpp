@@ -1,5 +1,6 @@
 #include "original_info.hpp"
 
+#include "original_draw_context.hpp"
 #include "original_tables.hpp"
 
 #include <algorithm>
@@ -202,6 +203,142 @@ OriginalInfoContent build_original_info_content(
   const int hour_index = content.clock.hour * 5 + content.clock.minute / 12;
   content.hour_hand = original_info_clock_point(hour_index, 9);
   return content;
+}
+
+namespace {
+
+// The 1118 painters' fixed colors (0x00RRGGBB).
+constexpr OriginalRgb kDarkText = 0x262626U;
+constexpr OriginalRgb kWeekendText = 0xb30000U;
+constexpr OriginalRgb kFieldGray = 0x999999U;
+constexpr OriginalRgb kStatusGray = 0xd9d9d9U;
+constexpr OriginalRgb kWhite = 0xffffffU;
+constexpr OriginalRgb kBlack = 0x000000U;
+
+void draw_info_date(OriginalDrawContext& dc,
+                    const OriginalInfoContent& content) {
+  // 1118:0ba4 constructs this 152x16 field at (151,5); the caller's shared
+  // eight-pixel palette-frame offset yields client coordinates (151,13).
+  const OriginalRect field{151, 13, 303, 29};
+  dc.fill_rect(field, kFieldGray);
+
+  OriginalSelectedFont font(dc, 14);
+  dc.set_bk_transparent();
+  dc.set_text_align(kOriginalTaUpdateCp | kOriginalTaBaseline);
+  dc.move_to(159, 28);
+  if (!content.date_red.empty()) {
+    dc.set_text_color(kWeekendText);
+    dc.text_out(content.date_red);
+  }
+  dc.set_text_color(kDarkText);
+  dc.text_out(content.date_dark);
+}
+
+void draw_info_rating(OriginalDrawContext& dc,
+                      const OriginalResources& resources,
+                      std::uint16_t rating) {
+  if (rating == 6U) {
+    const OriginalRect clip{42, 10, 148, 32};
+    draw_original_clipped_dib(dc, resources.find("BITMAP", 327), clip.left,
+                              clip.top, clip);
+    return;
+  }
+
+  // 1118:0b67 returns each 21x19 star strip at x=43+(index-1)*21, y=3;
+  // applying the palette-frame offset produces the rectangles below.
+  for (int index = 1; index <= 5; ++index) {
+    const OriginalRect clip{43 + (index - 1) * 21, 11, 43 + index * 21, 30};
+    const int bitmap = index <= static_cast<int>(rating) ? 322 : 323;
+    draw_original_clipped_dib(dc, resources.find("BITMAP", bitmap),
+                              clip.left, clip.top, clip);
+  }
+}
+
+void draw_info_balance(OriginalDrawContext& dc, const std::string& text) {
+  // 1118:0bda's 70x14 base rectangle plus 1118:0143's (10,8) offset.
+  const OriginalRect field{354, 13, 424, 27};
+  dc.fill_rect(field, kFieldGray);
+
+  OriginalSelectedFont font(dc, 13);
+  dc.set_text_color(kDarkText);
+  dc.set_bk_transparent();
+  dc.set_text_align(kOriginalTaUpdateCp | kOriginalTaRight |
+                    kOriginalTaBaseline);
+  dc.move_to(field.right - 1, field.bottom - 1);
+  dc.text_out(text);
+}
+
+void draw_info_status(OriginalDrawContext& dc, const std::string& text) {
+  // 1118:0c0f's 262x11 status rectangle plus the eight-pixel client offset.
+  const OriginalRect field{41, 33, 303, 44};
+  const OriginalRect highlight{41, 44, 303, 45};
+  dc.fill_rect(field, kStatusGray);
+  dc.fill_rect(highlight, kWhite);
+
+  OriginalSelectedFont font(dc, 12);
+  dc.set_text_color(kDarkText);
+  dc.set_bk_transparent();
+  dc.set_text_align(kOriginalTaUpdateCp | kOriginalTaBaseline);
+  // 1118:02ee-02fb establishes the DrawText current position explicitly.
+  // With TA_UPDATECP/TA_BASELINE this is observable: omitting it can leave the
+  // status string at the current position inherited from the balance painter.
+  dc.move_to(field.left + 2, field.bottom);
+  dc.draw_text_single_line(text, field);
+}
+
+void draw_info_population(OriginalDrawContext& dc, const std::string& text) {
+  // 1118:0c44's 86x14 population rectangle plus the client-frame offset.
+  const OriginalRect field{337, 31, 423, 45};
+  dc.fill_rect(field, kFieldGray);
+
+  OriginalSelectedFont font(dc, 13);
+  const int extent = dc.text_extent_cx(text);
+  dc.set_text_color(kDarkText);
+  dc.set_bk_transparent();
+  dc.set_text_align(kOriginalTaUpdateCp | kOriginalTaBaseline);
+  dc.move_to(field.right - extent, field.bottom - 2);
+  dc.text_out(text);
+}
+
+void draw_info_clock(OriginalDrawContext& dc,
+                     const OriginalResources& resources,
+                     const OriginalInfoContent& content) {
+  // 11f8:033a precomposes BITMAP/321 into 1118:0cad's shared-surface source.
+  // Each 1118:073d paint restores it into 1118:0c79's 31x31 local face at
+  // (5,5), then applies the eight-pixel palette-frame offset used below.
+  const OriginalRect clip{5, 13, 36, 44};
+  draw_original_clipped_dib(dc, resources.find("BITMAP", 321), clip.left,
+                            clip.top, clip);
+
+  // The two hands preserve 1208:0d35's relative-line primitive: get the
+  // current position and LineTo(current.x+dx, current.y+dy).
+  dc.push_solid_pen(kBlack);
+  constexpr int center_x = 20;
+  constexpr int center_y = 28;
+  dc.move_to(center_x, center_y);
+  dc.line_to(center_x + content.minute_hand.x,
+             center_y + content.minute_hand.y);
+  dc.move_to(center_x, center_y);
+  dc.line_to(center_x + content.hour_hand.x, center_y + content.hour_hand.y);
+  dc.pop_pen();
+}
+
+}  // namespace
+
+void draw_original_info(OriginalDrawContext& context,
+                        const OriginalResources& resources,
+                        const OriginalTdtDocument* document,
+                        std::string_view status) {
+  OriginalSavedDrawState saved(context);
+  context.draw_dib(resources.find("BITMAP", 320), 0, kOriginalInfoClientTop);
+  const auto content =
+      build_original_info_content(resources, document, status);
+  draw_info_date(context, content);
+  draw_info_rating(context, resources, content.rating);
+  draw_info_balance(context, content.balance);
+  draw_info_status(context, content.status);
+  draw_info_population(context, content.population);
+  draw_info_clock(context, resources, content);
 }
 
 }  // namespace simtower

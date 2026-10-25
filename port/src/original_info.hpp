@@ -10,6 +10,8 @@
 
 namespace simtower {
 
+class OriginalDrawContext;
+
 // 1128:13fc builds a 431x41 backing bitmap from BITMAP/320. 1120:0215
 // presents it below the common eight-pixel palette-window frame and then
 // overlays the live fields translated by this module.
@@ -108,5 +110,16 @@ struct OriginalInfoStatusState {
     const OriginalResources& resources,
     const OriginalTdtDocument* document,
     std::string_view status = {});
+
+// The 1120:0215 content painter (1118:073d plus the 1118:0143/0368/026a
+// field painters): BITMAP/320 at client y 8, then the date, rating, balance,
+// status, population, and clock overlays. The shared palette-window frame
+// occupies client rows 0..7 and is not drawn here. The Win32 host calls it
+// through OriginalGdiDrawContext (draw_original_info(HDC, ...)), the SDL host
+// through OriginalCanvasDrawContext.
+void draw_original_info(OriginalDrawContext& context,
+                        const OriginalResources& resources,
+                        const OriginalTdtDocument* document,
+                        std::string_view status = {});
 
 }  // namespace simtower

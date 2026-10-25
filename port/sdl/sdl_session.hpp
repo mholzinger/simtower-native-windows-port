@@ -199,6 +199,12 @@ class Session : private OriginalIdlePassHost {
   [[nodiscard]] const OriginalWorldRaster& main_raster() const {
     return main_raster_;
   }
+  // The Info client (kOriginalInfoWidth x 49) as the Win32 Info window last
+  // painted it: rows 8.. hold draw_original_info's output, rows 0..7 stay
+  // white for the palette frame, which compose_window draws on top.
+  [[nodiscard]] const OriginalWorldRaster& info_raster() const {
+    return info_raster_;
+  }
 
   // ---- Input (original_world_input.hpp) ----
   // Routes one mouse event: the capture owner first, otherwise the top panel
@@ -280,6 +286,13 @@ class Session : private OriginalIdlePassHost {
                     bool full_frame_surface_dirty = false);
   bool advance_main_surface_state(OriginalMainSurfacePass pass);
   void present_main();
+  // Repaints info_raster_ from the live document and status text through
+  // the software canvas. Called exactly where the Win32 host paints the
+  // Info window synchronously: its direct 1090:0661 present, and every
+  // InvalidateRect+UpdateWindow (1118:0000 status changes, the day change,
+  // the rating promotion, the bomb ransom and the document transition).
+  // Presentation only: it reads no clock and changes no game state.
+  void paint_info();
   void focus_event_coordinate(std::int16_t floor, std::int16_t x);
   std::uint16_t log_dialog(const OriginalEventDialogRequest& dialog,
                            std::uint16_t choice,
@@ -339,6 +352,8 @@ class Session : private OriginalIdlePassHost {
   void rating_promoted_before_dialog(std::uint16_t rating) override;
   void rating_promoted_after_dialog(std::uint16_t rating) override;
   void before_scheduler_step(bool sample_cursor) override;
+  void begin_full_frame(bool day_changed) override;
+  void bomb_ransom_paid() override { paint_info(); }
   void preview_only_pass() override;
   void restore_preview() override;
   void cathedral_rating_promoted() override;
@@ -346,6 +361,7 @@ class Session : private OriginalIdlePassHost {
   void commit_full_frame_preview() override;
   void palette_recolor_rebuild() override;
   void present_main_direct() override { present_main(); }
+  void present_info_direct(OriginalIdleInfoLatches& latches) override;
   // The panels are recomposed on every present. The idle pass calls this
   // only right after present_main_direct (1090:064d), which already
   // requested one; world input calls it through services().
@@ -442,6 +458,9 @@ class Session : private OriginalIdlePassHost {
   // Native mirror of the DS:3264 backing (g_original_main_backing).
   OriginalWorldRaster main_raster_{};
   bool main_backing_dirty_{true};
+  // Retained Info client image (see info_raster()). A future path that
+  // shows a hidden Info panel again must repaint it, as WM_PAINT would.
+  OriginalWorldRaster info_raster_{};
   // Stands in for InvalidateRect / direct Main blits until the next present.
   bool present_requested_{};
   HostRequestCounts host_requests_{};

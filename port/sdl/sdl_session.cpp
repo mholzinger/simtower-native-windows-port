@@ -1,6 +1,8 @@
 #include "sdl_session.hpp"
 
+#include "original_canvas_font.hpp"
 #include "original_construction.hpp"
+#include "original_draw_canvas.hpp"
 #include "original_resources.generated.hpp"
 #include "original_startup_data.hpp"
 #include "original_tdt_file.hpp"
@@ -124,7 +126,11 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
   // The panels are recomposed on every present, so the remaining
   // invalidations only request one.
   void invalidate_map() override { s_.present_requested_ = true; }
-  void present_info_status() override { s_.present_requested_ = true; }
+  // 1118:0000: invalidate and synchronously repaint the whole Info client.
+  void present_info_status() override {
+    s_.paint_info();
+    s_.present_requested_ = true;
+  }
   void present_command_now() override { s_.present_requested_ = true; }
   void resize_command(int outer_height) override {
     s_.command_outer_height_ = outer_height;
@@ -162,6 +168,7 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
     ++s_.host_requests_.status;
     const bool shown = set_original_info_construction_status(
         s_.resources_, s_.info_status_, code, s_.coarse_tick_now());
+    if (shown) s_.paint_info();
     s_.log_request(RequestKind::construction_status, {code, shown});
     s_.tally("construction status");
   }
@@ -169,6 +176,7 @@ class Session::WorldInputHost final : public OriginalWorldInputHost {
     ++s_.host_requests_.status;
     const bool shown = set_original_info_command_status(
         s_.resources_, s_.info_status_, code, s_.coarse_tick_now());
+    if (shown) s_.paint_info();
     s_.log_request(RequestKind::command_status, {code, shown});
     s_.tally("command status");
   }
@@ -331,6 +339,23 @@ Session::Session(std::vector<std::byte> pack,
   const auto startup_bootstrap = make_original_new_tdt();
   reset_original_palette_runtime(resources_, &startup_bootstrap,
                                  palette_runtime_, coarse_tick_now());
+  // The Info window's first WM_PAINT, before any tower: the painter's
+  // no-document defaults.
+  info_raster_.width = kOriginalInfoWidth;
+  info_raster_.height = kOriginalInfoClientTop + kOriginalInfoBackingHeight;
+  info_raster_.pixels.assign(
+      static_cast<std::size_t>(info_raster_.width) * info_raster_.height,
+      0x00ffffffU);
+  paint_info();
+}
+
+void Session::paint_info() {
+  // paint_known_original_surface's draw_original_info on a white client;
+  // the frame row is composed per present.
+  OriginalCanvasDrawContext context(
+      info_raster_, OriginalCanvasFont::bundled(), 0, 0,
+      {0, 0, info_raster_.width, info_raster_.height});
+  draw_original_info(context, resources_, document(), info_status_.text);
 }
 
 Session::~Session() = default;
@@ -483,6 +508,8 @@ void Session::install_document(OriginalTdtDocument document) {
   present_requested_ = true;
   document_->header.view_x = static_cast<std::uint16_t>(viewport_.x);
   document_->header.view_y = static_cast<std::uint16_t>(viewport_.y);
+  // The transition's last step (info_repaint, 1118:0000).
+  paint_info();
 }
 
 void Session::new_tower() {
@@ -630,6 +657,7 @@ void Session::notification_status(std::uint16_t code) {
   ++host_requests_.status;
   const bool shown = set_original_info_notification_status(
       resources_, info_status_, code, coarse_tick_now());
+  if (shown) paint_info();
   log_request(RequestKind::notification_status, {code, shown});
   tally("notification status");
   if (shown) {
@@ -642,6 +670,7 @@ void Session::income_status(std::uint16_t code) {
   ++host_requests_.status;
   const bool shown = set_original_info_income_status(resources_, info_status_,
                                                      code, coarse_tick_now());
+  if (shown) paint_info();
   log_request(RequestKind::income_status, {code, shown});
   tally("income status");
 }
@@ -763,7 +792,24 @@ void Session::focus(std::int16_t floor, std::int16_t x) {
 }
 
 void Session::expire_info_status() {
-  (void)expire_original_info_status(info_status_, coarse_tick_now());
+  if (expire_original_info_status(info_status_, coarse_tick_now())) {
+    paint_info();
+  }
+}
+
+void Session::begin_full_frame(bool day_changed) {
+  // 1200:04d4-04fe synchronously repaints 1118:045d right after the day
+  // update, before the ordinary 1090 frame pass.
+  if (day_changed) paint_info();
+}
+
+void Session::present_info_direct(OriginalIdleInfoLatches& latches) {
+  // present_original_info_surface_direct: the retained painter first, then
+  // the Hotel latch at the 1090:0691 checkpoint. The Win32 audio pumps
+  // around it read the clock; this host pumps only through its own hooks,
+  // as before this step, so the digest is unchanged.
+  paint_info();
+  latches.consume_hotel_checkout();
 }
 
 void Session::play_sound(std::int32_t resource,
@@ -813,6 +859,8 @@ void Session::idle_palette_changed() {
 }
 
 void Session::rating_promoted_before_dialog(std::uint16_t rating) {
+  // InvalidateRect+UpdateWindow on Info before the rating dialog.
+  paint_info();
   log_request(RequestKind::rating_promoted, {rating});
   tally("rating promoted");
   log_line("rating promoted to " + std::to_string(rating));
