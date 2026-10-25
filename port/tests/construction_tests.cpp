@@ -2539,7 +2539,40 @@ int main() {
         assert(exact[byte] == std::byte{0});
       }
     }
-    assert(tower.retail[0].exact_bytes == retail_before);
+    // 2026-10-25: activation reserves the shop's service slot (1228:02c2
+    // jumps to the 6/12 tail at 0354, which calls 11a8:07d3 and stores the
+    // index at +0xc). Before, the port left word +0xc at 0 and record 0
+    // untouched, so a shop read whatever record 0 held.
+    assert(activated.exact_bytes[6] == std::byte{0} &&
+           activated.exact_bytes[7] == std::byte{0});
+    {
+      const auto& exact = tower.retail[0].exact_bytes;
+      assert(exact != retail_before);
+      assert(exact[0] == std::byte{11});
+      assert(exact[1] == std::byte{0});
+      // 11a8:0847-085a: a shop starts closed whatever 1812 says.
+      assert(exact[2] == std::byte{0xff});
+      assert(exact[3] == std::byte{0x0a});
+      assert(exact[4] == std::byte{0x0a});
+      assert(exact[5] == std::byte{0x0a});
+      assert(exact[6] == std::byte{0});
+      assert(exact[7] == std::byte{0x0a});
+      assert(exact[8] == std::byte{0});
+      assert(exact[9] == std::byte{0});
+      assert(exact[10] == std::byte{0});
+      // 11a8:0ada-0afa: DS:7958 selects the shop kind, cycling mod 11.
+      assert(exact[11] == std::byte{0});
+      assert(exact[12] == std::byte{0xff});
+      assert(exact[13] == std::byte{0xff});
+      assert(exact[16] == std::byte{0});
+      assert(exact[17] == std::byte{0});
+    }
+    assert(tower.retail_service_variant == 1U);
+    // 11a8:1596 appends Retail indices to DS:dd5c's 0x26e-byte groups.
+    assert(tower.post_elevator.dynamic_dd5c[0] == std::byte{1});
+    assert(tower.post_elevator.dynamic_dd5c[1] == std::byte{0});
+    assert(tower.post_elevator.dynamic_dd5c[2] == std::byte{0});
+    assert(tower.post_elevator.dynamic_dd5c[3] == std::byte{0});
     const auto bytes = simtower::serialize_original_tdt(tower);
     const auto reparsed = simtower::parse_original_tdt(bytes);
     assert(simtower::serialize_original_tdt(reparsed) == bytes);

@@ -685,6 +685,37 @@ void original_behaviour_tests(const simtower::OriginalResources& resources,
       resources, base, part, shop.floor, shop.tenant);
   assert(shop_information.dialog_id == 753U &&
          shop_information.yesterday_profit_text.empty());
+
+  // 4. The shop picture: activation (1228:02c2 -> 0354 -> 11a8:07d3) gives
+  // every shop its own Retail record, closed (byte 2 = 0xff), so 1100:465a
+  // crops the shop itself. Before, every shop kept word +0xc = 0 and showed
+  // record 0's Fast Food (the Soba picture).
+  std::set<std::size_t> shop_records{};
+  std::size_t shops = 0U;
+  for (std::size_t floor = 0; floor < base.floors.size(); ++floor) {
+    const auto& tenants = base.floors[floor].tenants;
+    for (std::size_t tenant = 0; tenant < tenants.size(); ++tenant) {
+      const auto& record = tenants[tenant];
+      if (std::to_integer<std::int8_t>(record.exact_bytes[4]) != 10) {
+        continue;
+      }
+      const auto information = simtower::original_facility_information(
+          resources, base, part, static_cast<std::int16_t>(floor), tenant);
+      const auto linked = information.linked_record_index;
+      assert(linked < base.retail.size());
+      const auto& retail = base.retail[linked].exact_bytes;
+      assert(std::to_integer<std::size_t>(retail[0]) == floor);
+      assert(base.floors[floor].tenant_index[std::to_integer<std::size_t>(
+                 retail[1])] == tenant);
+      assert(information.preview.view_x == record.left * 8 &&
+             information.preview.width == 12 * 8);
+      shop_records.insert(linked);
+      ++shops;
+    }
+  }
+  assert(shops > 1U && shop_records.size() == shops);
+  std::printf("facility original behaviour: %zu shops, own records\n",
+              shops);
   std::printf("facility original behaviour: condo floor %d tenant %zu\n",
               condo.floor, condo.tenant);
 }

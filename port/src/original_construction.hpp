@@ -828,6 +828,8 @@ enum class OriginalPendingStepStatus : std::uint8_t {
 // Exact type-10 path at 11f8:0c92. Retail Shop is twelve cells wide, has no
 // appearance selector, is capped at 512 instances, and allocates 48 simulation
 // records through 1220:0c4b. Its reversed basement support rules are included.
+// Activation (1228:02c2 -> 0354) reserves its 18-byte service slot through
+// 11a8:07d3 like Restaurant and Fast Food, starting closed (byte 2 = 0xff).
 [[nodiscard]] OriginalConstructionResult build_original_retail_shop(
     OriginalTdtDocument& document,
     std::int16_t floor,

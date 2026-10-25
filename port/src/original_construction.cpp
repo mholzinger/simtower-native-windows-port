@@ -1133,13 +1133,17 @@ std::uint16_t allocate_original_commercial_service(
   exact[0] = static_cast<std::byte>(floor);
   exact[1] = static_cast<std::byte>(key);
 
-  // 11a8:1812 is false for Restaurant. For Fast Food it is true only during
-  // day phase zero after frame 0xf0. Type 10 is allocated later by its rental
-  // path, not by deferred construction activation.
+  // 11a8:1812 is false for Restaurant. For Retail and Fast Food it is true
+  // only during day phase zero after frame 0xf0. 11a8:0847-085a starts a
+  // Retail Shop's record closed (byte 2 = 0xff) without asking 1812, but
+  // 0918's second 1812 call still takes the open lanes and population.
   const bool initially_open =
-      type == 12U && original_day_phase(document.header.frame_time) == 0 &&
+      (type == 10U || type == 12U) &&
+      original_day_phase(document.header.frame_time) == 0 &&
       document.header.frame_time > 0x00f0U;
-  exact[2] = initially_open ? std::byte{0} : std::byte{3};
+  exact[2] = type == 10U       ? std::byte{0xff}
+             : initially_open ? std::byte{0}
+                              : std::byte{3};
   exact[3] = std::byte{0x0a};
   exact[4] = std::byte{0x0a};
   exact[5] = std::byte{0x0a};
@@ -1156,7 +1160,7 @@ std::uint16_t allocate_original_commercial_service(
     exact[8] = std::byte{0x0a};
     store_u16(exact, 12, 0xfff5U, document.header.byte_swapped);
     // 11a8:09b4-09f4 forwards the initialized byte-eight population to
-    // 1060:07f7. That immediately raises both Fast Food's category total and
+    // 1060:07f7. That immediately raises both the type's category total and
     // the overall population by ten when a newly activated service starts
     // open; it is not deferred until the first visitor callback.
     add_original_population_for_type(
@@ -1171,10 +1175,14 @@ std::uint16_t allocate_original_commercial_service(
   }
   exact[9] = std::byte{0};
   exact[10] = std::byte{0};
-  auto& selector = type == 6U ? document.restaurant_service_variant
-                              : document.fast_food_service_variant;
+  // 11a8:0a7d-0afa: Restaurant DS:7952 and Fast Food DS:795a cycle mod 5,
+  // Retail DS:7958 mod 11.
+  auto& selector = type == 6U    ? document.restaurant_service_variant
+                   : type == 10U ? document.retail_service_variant
+                                 : document.fast_food_service_variant;
   exact[11] = static_cast<std::byte>(selector);
-  selector = static_cast<std::uint16_t>((selector + 1U) % 5U);
+  selector = static_cast<std::uint16_t>((selector + 1U) %
+                                        (type == 10U ? 11U : 5U));
   store_u16(exact, 16, 0U, document.header.byte_swapped);
 
   // 11a8:1596 groups floors by the signed IDIV of (floor - 5) / 15 and
@@ -1198,6 +1206,8 @@ std::uint16_t allocate_original_commercial_service(
     };
     if (type == 6U) {
       append_index(document.post_elevator.dynamic_dd60, 0x12eU);
+    } else if (type == 10U) {
+      append_index(document.post_elevator.dynamic_dd5c, 0x26eU);
     } else {
       append_index(document.post_elevator.dynamic_dd64, 0x1ceU);
     }
@@ -1401,7 +1411,9 @@ bool activate_original_pending_facility(OriginalTdtDocument& document) {
     // 1220:0be3 then overwrites only the second of the three Condo people.
     document.people[people_start + 1U].exact_bytes[6] = std::byte{0xfe};
   }
-  if (positive_type == 6U || positive_type == 12U) {
+  // 1228:030c (types 6 and 12) and 1228:02c2 (type 10, which jumps to
+  // 0354) share the 11a8:07d3 call whose result is stored at +0xc.
+  if (positive_type == 6U || positive_type == 10U || positive_type == 12U) {
     const auto service_index = allocate_original_commercial_service(
         document, location->floor, *new_key, positive_type);
     tenant.variant = static_cast<std::uint8_t>(service_index);

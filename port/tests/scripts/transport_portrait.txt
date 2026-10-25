@@ -10,7 +10,7 @@
 # expect-stderr: dialog rename person -> changed, name "Rider"
 # expect-stderr: dialog person 763 person 2403 -> 1 \(changed\), name "Rider"
 # expect-stderr: dialog transport 762 car 0/0 -> 1 \(changed\), "Standard Elevator" 6 / 21, 6 portraits
-# expect-stderr: dialog transport 761 stair 0 -> 1, "Escalator" 7, 7 portraits
+# expect-stderr: dialog transport 761 stair 0 -> 1, "Escalator" 8, 8 portraits
 # expect-stderr: person information [0-9]+ \(from transport\)
 pass 300
 open-dialog transport-car 0 0

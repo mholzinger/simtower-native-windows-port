@@ -558,7 +558,11 @@ int main(int argc, char** argv) {
        {{100, true}},
        // Re-pinned for development PR #2 (DS:779e balance-changed latch):
        // 67 added sound:10013 cash-sound calls, nothing else changed.
-       0x3283928cc2fd2d4eULL,
+       // Re-pinned 2026-10-25 (shops own Retail records, 1228:02c2 ->
+       // 11a8:07d3): all 24 shops now rent (24 new income:6, 1118:0a49(6)),
+       // which moves cash sounds (81 -> 104), ambient 6002 (399 -> 389) and
+       // notifications (55 -> 60); 126848 -> 126897 hook calls.
+       0x754b6e818654bed6ULL,
        {"dialog:bomb_offer:", "dialog:bomb_followup:", "dialog:bomb_event:",
         "dialog:rating:", "focus:", "sound:", "rating_before:"}},
       // Fire offer, declined fire crew, its follow-up and the 2000 finish.
@@ -568,7 +572,10 @@ int main(int argc, char** argv) {
        {{300, false}},
        // Re-pinned for development PR #2 (DS:779e balance-changed latch):
        // 68 added sound:10013 cash-sound calls, nothing else changed.
-       0x98b0df3d5f47ce13ULL,
+       // Re-pinned 2026-10-25 (shops own Retail records): 24 new income:6,
+       // cash sounds 68 -> 89, notifications 24 -> 25, ambient and
+       // elevator sounds shift; 51660 -> 51702 hook calls.
+       0xb7dfe17bb6f163dbULL,
        {"dialog:fire_offer:", "dialog:fire_crew_offer:",
         "dialog:fire_crew_followup:", "dialog:fire_event:", "fire_menu:"}},
   };
